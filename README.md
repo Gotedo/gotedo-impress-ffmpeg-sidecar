@@ -28,22 +28,36 @@ Before building, ensure your host system has the following installed:
 
 The build system is entirely self-contained. It compiles the task runner locally so you do not have to install global build utilities on your system.
 
-### 1. Initialize & Install the Build Runner
+### 1. Setup Your Computer
+
+1. Install Go on your computer. Follow the instructions at: https://go.dev/doc/install.
+2. Install Git on your computer. Follow the instructions at: https://git-scm.com/install.
+3. Install Docker on your computer. Following the instructions at: https://docs.docker.com/desktop/setup/install/windows-install.
+4. Clone this repository:
+
+    ```bash
+    git clone https://github.com/Gotedo/gotedo-impress-ffmpeg-sidecar.git
+    ```
+
+### 2. Initialize & Install the Build Runner
 
 From the root of this repository, run the following command to download and compile the `task` utility locally inside your workspace:
 
 ```bash
-# 1. Initialize the Go module (if not already done)
+#1. Go into the directory of the downloaded repository.
+cd gotedo-impress-ffmpeg-sidecar
+
+# 2. Initialize the Go module
 go mod tidy
 
-# 2. Compile and install 'task' into your local project directory
+# 3. Compile and install 'go-task' into the local repository
 GOBIN="$(pwd)/bin" go install github.com/go-task/task/v3/cmd/task@latest
 
 ```
 
 *(This compiles the `task` executable and places it securely under `./bin/` which is ignored by Git).*
 
-### 2. Compile FFmpeg (All Targets)
+### 3. Compile FFmpeg (All Targets)
 
 To trigger the complete cross-compilation pipeline (this will pull the toolchains, run an APT caching proxy to speed up dependencies, and build FFmpeg for Linux, macOS, and Windows):
 
