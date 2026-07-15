@@ -1437,6 +1437,23 @@ else
     EXTRA_FFMPEG_FLAGS="--enable-rpath"
 fi
 
+# DLLTOOL PATH MAPPER (Only for Windows builds)
+if [[ "$OS" == "windows" ]]; then
+    echo ">>> Creating a virtual dlltool symlink to resolve llvm-dlltool..."
+    
+    # Create a local temporary directory for our binary overrides
+    mkdir -p /tmp/bin-override
+    
+    # Safely resolve the path of the compiler's sibling llvm-dlltool
+    TOOLCHAIN_BIN_DIR=$(dirname "${CC}")
+    
+    # Symlink llvm-dlltool as "dlltool" inside our temp override directory
+    ln -sf "${TOOLCHAIN_BIN_DIR}/llvm-dlltool" /tmp/bin-override/dlltool
+    
+    # Prepend this temp override directory to the execution PATH
+    export PATH="/tmp/bin-override:$PATH"
+fi
+
 # The big configure line (dynamic + requested features + subtitles)
 ./configure \
     --prefix="${sysroot}" \
