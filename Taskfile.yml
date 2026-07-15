@@ -107,4 +107,4 @@ tasks:
     vars:
       DEFAULT_OUT_DIR: '{{$.TASKFILE_DIR}}/dist'
       OUT_DIR: '{{.OUT_DIR | default .DEFAULT_OUT_DIR }}'
-      MACOSX_DEPLOYMENT_TARGET: '{{{.MACOSX_DEPLOYMENT_TARGET | default "10.15"}}}'
+      MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET | default "10.15"}}'
