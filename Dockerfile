@@ -1482,6 +1482,7 @@ fi
     --enable-runtime-cpudetect \
     --extra-version="gotedo-impress" \
     --pkg-config=pkg-config \
+    --pkg-config-flags="--static" \
     --extra-cflags="-I${sysroot}/include -fPIC ${FFMPEG_CFLAGS}" \
     --extra-ldflags="-L${sysroot}/lib ${FFMPEG_LDFLAGS}" \
     ${FFMPEG_OS_FLAGS}
