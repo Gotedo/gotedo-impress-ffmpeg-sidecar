@@ -3,70 +3,70 @@
 FROM rust:1.93.1-slim-bookworm
 
 RUN echo 'Acquire::HTTP::Proxy "http://host.docker.internal:3142";' >> /etc/apt/apt.conf.d/01proxy \
-  && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
+    && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
 
 # Install prerequisites to fetch external secure repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  wget ca-certificates gnupg \
-  && rm -rf /var/lib/apt/lists/*
+    wget ca-certificates gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Add the official LLVM 20 repository key and source lists
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
-  echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
-  echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
+    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
+    echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
 
 # -----------------------------------------------------------------------------
 # Base packages + FFmpeg-specific build tools
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y --no-install-recommends \
-  # Cross compilers & toolchains (Linux & Windows)
-  gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-  gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-  mingw-w64 \
-  # Native Base Utilities
-  git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
-  bison flex gperf gettext libglib2.0-dev file binfmt-support \
-  # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
-  clang-20 \
-  lld-20 \
-  llvm-20 \
-  llvm-20-linker-tools \
-  llvm-20-dev \
-  libclang-rt-20-dev \
-  # Windows Execution Compatibility
-  wine wine64 libwine \
-  # FFmpeg-specific Assemblers & Build Tools
-  nasm yasm ccache autoconf automake libtool texinfo \
-  libfreetype6-dev libharfbuzz-dev \
-  # Debugging Tools
-  nano vim \
-  && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    # Cross compilers & toolchains (Linux & Windows)
+    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+    gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+    mingw-w64 \
+    # Native Base Utilities
+    git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
+    bison flex gperf gettext libglib2.0-dev file binfmt-support \
+    # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
+    clang-20 \
+    lld-20 \
+    llvm-20 \
+    llvm-20-linker-tools \
+    llvm-20-dev \
+    libclang-rt-20-dev \
+    # Windows Execution Compatibility
+    wine wine64 libwine \
+    # FFmpeg-specific Assemblers & Build Tools
+    nasm yasm ccache autoconf automake libtool texinfo \
+    libfreetype6-dev libharfbuzz-dev \
+    # Debugging Tools
+    nano vim \
+    && rm -rf /var/lib/apt/lists/*
 
 # Generate Global LLVM 20 System Symlinks (Overriding default LLVM 14)
 RUN ln -sf /usr/bin/clang-20 /usr/bin/clang && \
-  ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
-  ln -sf /usr/bin/lld-20 /usr/bin/lld && \
-  ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
-  ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
-  ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
-  ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
-  ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
-  ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
+    ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
+    ln -sf /usr/bin/lld-20 /usr/bin/lld && \
+    ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
+    ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
+    ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
+    ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
+    ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
+    ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
 
 # Install Meson (needed for dav1d, harfbuzz, etc.)
 RUN pip3 install meson --break-system-packages
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
 
 # LLVM tool symlinks
 RUN ln -s /usr/bin/llvm-install-name-tool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-install-name-tool && \
-  ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
-  ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
+    ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
+    ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
 
 # -----------------------------------------------------------------------------
 # Cache & Install LLVM-Mingw (Windows Toolchain) - identical caching pattern
@@ -120,9 +120,9 @@ EOF
 
 # Install patchelf for Linux relocatable SDK patching
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y patchelf \
-  && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y patchelf \
+    && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Cache & Build Apple compiler-rt (builtins) for macOS cross-compilation
@@ -289,7 +289,7 @@ EOF
 
 # Install gas-preprocessor for macOS assembly optimization parsing
 RUN curl -L https://github.com/FFmpeg/gas-preprocessor/raw/master/gas-preprocessor.pl -o /usr/local/bin/gas-preprocessor.pl && \
-  chmod +x /usr/local/bin/gas-preprocessor.pl
+    chmod +x /usr/local/bin/gas-preprocessor.pl
 
 # -----------------------------------------------------------------------------
 # The main builder script
@@ -329,7 +329,7 @@ LIBOGG_VERSION="1.3.5"
 BZIP2_VERSION="1.0.8"
 XZ_VERSION="5.8.3"
 
-DEP_LIBRARY_TYPE="shared"      # Mandatory for GPL compliance
+DEP_LIBRARY_TYPE="static"      # Sidecar is open-sourced for GPL compliance so libraries can be statically built
 
 # Map DEP_LIBRARY_TYPE to build flags
 if [ "$DEP_LIBRARY_TYPE" = "shared" ]; then
@@ -347,6 +347,7 @@ SDK_PATH="/opt/macos-sdk"
 LLVM_MINGW_PATH="/opt/llvm-mingw/$(uname -m)"
 export PATH="$LLVM_MINGW_PATH/bin:${PATH}"
 FFMPEG_OS_FLAGS=""
+EXTRA_FFMPEG_FLAGS=""
 
 OS=${1:-linux}
 ARCH=${2:-amd64}
@@ -442,7 +443,7 @@ growing_stack = false
         fi
         MESON_SYSTEM="darwin"
         TRIPLE="${MESON_ARCH}-apple-darwin"
-        LDFLAGS="-Wl,-rpath,@loader_path/../lib -Wl,-rpath,@executable_path/../lib"
+        LDFLAGS=""
         FFMPEG_OS_FLAGS="--enable-videotoolbox --enable-audiotoolbox ${EXTRA_FFMPEG_FLAGS}"
 
         # Darwin Linker Wrapper
@@ -738,7 +739,7 @@ c_link_args = [$(format_meson_array "$LDFLAGS"), '-lde265', $(format_meson_array
 cpp_link_args = [$(format_meson_array "$LDFLAGS"), '-lde265', $(format_meson_array "$PLATFORM_LIBS"), '-L${sysroot}/lib', '-L${sysroot}/usr/lib']
 objc_link_args = [$(format_meson_array "$LDFLAGS"), '-lde265', $(format_meson_array "$PLATFORM_LIBS"), '-L${sysroot}/lib', '-L${sysroot}/usr/lib']
 
-default_library = 'shared'
+default_library = 'static'
 EOF
 
 # Generate CMake toolchain file
@@ -788,7 +789,7 @@ EOF
 # -----------------------------------------------------------------------------
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
-ENABLED_FEATURES="gpl,version3,shared,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
+ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
 BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
@@ -1028,13 +1029,8 @@ EOF
             # Strip global shared/static flags passed into the script
             VPX_CONF_FLAGS=$(echo "${extra_flags}" | sed 's/--disable-static//g' | sed 's/--enable-shared//g')
 
-            # Enforce static compilation ONLY for Windows, otherwise use shared
-            if [[ "$OS" == "windows" ]]; then
-                echo ">>> [libvpx Special Case] Windows target detected. Forcing static compilation..."
-                VPX_CONF_FLAGS="${VPX_CONF_FLAGS} --enable-static --disable-shared"
-            else
-                VPX_CONF_FLAGS="${VPX_CONF_FLAGS} --enable-shared --disable-static"
-            fi
+            # Enforce static compilation globally
+            VPX_CONF_FLAGS="${VPX_CONF_FLAGS} --enable-static --disable-shared"
 
             # Run configure with the sanitized flags
             (cd "${src_dir}" && \
@@ -1105,8 +1101,8 @@ EOF
                     --prefix="${sysroot}" \
                     --extra-cflags="${CFLAGS} -fPIC -O3 ${EXTRA_AUTOTOOLS_CFLAGS}" \
                     --extra-ldflags="${LDFLAGS} ${PLATFORM_LIBS}" \
-                    --enable-shared \
-                    --disable-static \
+                    --enable-static \
+                    --disable-shared \
                     --enable-pic \
                     ${EXTRA_CONFIG} \
                     ${X264_CONF_FLAGS})
@@ -1318,10 +1314,16 @@ build_dep "libass" \
     "https://github.com/libass/libass/releases/download/${LIBASS_VERSION}/libass-${LIBASS_VERSION}.tar.gz" \
     "${LIBASS_VERSION}" "autotools" "" ".tar.gz" "tar -xzf"
 
+OPUS_EXTRA_FLAGS=""
+if [[ "$OS" == "windows" && "$ARCH" == "arm64" ]]; then
+    # Disable runtime CPU detection to bypass the unsupported OS-check compile failure
+    OPUS_EXTRA_FLAGS="--disable-rtcd"
+fi
+
 # Audio/Video codec libraries
 build_dep "opus" \
     "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" \
-    "${OPUS_VERSION}" "autotools" "" ".tar.gz" "tar -xzf"
+    "${OPUS_VERSION}" "autotools" "${OPUS_EXTRA_FLAGS}" ".tar.gz" "tar -xzf"
 
 build_dep "libvpx" \
     "https://github.com/webmproject/libvpx/archive/refs/tags/v${LIBVPX_VERSION}.tar.gz" \
@@ -1338,9 +1340,9 @@ build_dep "dav1d" \
 echo ">>> All dependencies built successfully."
 
 # -----------------------------------------------------------------------------
-# Now build FFmpeg 8.1.2 (dynamic only)
+# Now build FFmpeg 8.1.2 (static only)
 # -----------------------------------------------------------------------------
-echo ">>> Building FFmpeg ${FFMPEG_VERSION} (dynamic, GPL, with subtitles + image support)..."
+echo ">>> Building FFmpeg ${FFMPEG_VERSION} (static, GPL, with subtitles + image support)..."
 
 DIRNAME="ffmpeg-${FFMPEG_VERSION}"
 if [ ! -d "$DIRNAME" ]; then
@@ -1379,7 +1381,7 @@ if [[ "$OS" == "windows" ]]; then
     FFMPEG_CFLAGS=$(echo "${FFMPEG_CFLAGS}" | sed 's/-Wno-unused-command-line-argument//g')
 else
     # macOS & Linux defaults (keep rpath)
-    export LDFLAGS="-L${sysroot}/lib ${LDFLAGS} ${PLATFORM_LIBS} -Wl,-rpath,${sysroot}/lib"
+    export LDFLAGS="-L${sysroot}/lib ${LDFLAGS} ${PLATFORM_LIBS}"
 fi
 
 # Map entrypoint OS/ARCH to FFmpeg values
@@ -1416,25 +1418,20 @@ esac
 
 # Resolve the correct linker & OS-specific config arguments
 FFMPEG_LINKER="clang"
-EXTRA_FFMPEG_FLAGS=""
 
 if [[ "$OS" == "darwin" ]]; then
     # CRITICAL: Let clang drive the linking so it resolves the macOS sysroot!
     FFMPEG_LINKER="${CC}"
-    EXTRA_FFMPEG_FLAGS="--enable-rpath"
 elif [[ "$OS" == "windows" ]]; then
     # CRITICAL: Let clang drive the linking on Windows too so it handles compiler arguments!
     FFMPEG_LINKER="${CC}"
-    EXTRA_FFMPEG_FLAGS="--disable-rpath"
     
     # CRITICAL: Strip any Unix-specific dynamic linker flags out of our temporary variables
     # so they never reach the compiler test inside the Windows environment.
     FFMPEG_LINKER="${CC}"
-    EXTRA_FFMPEG_FLAGS="--disable-rpath"
 else
     # Linux defaults
     FFMPEG_LINKER="${LD_PATH:-clang}"
-    EXTRA_FFMPEG_FLAGS="--enable-rpath"
 fi
 
 # DLLTOOL PATH MAPPER (Only for Windows builds)
@@ -1454,7 +1451,7 @@ if [[ "$OS" == "windows" ]]; then
     export PATH="/tmp/bin-override:$PATH"
 fi
 
-# The big configure line (dynamic + requested features + subtitles)
+# The big configure line (static + requested features + subtitles)
 ./configure \
     --prefix="${sysroot}" \
     --enable-cross-compile \
@@ -1467,8 +1464,8 @@ fi
     --ar="${AR}" \
     --nm="${NM_CMD}" \
     --ranlib="${RANLIB_CMD:-ranlib}" \
-    --enable-shared \
-    --disable-static \
+    --disable-shared \
+    --enable-static \
     --enable-pic \
     --enable-gpl \
     --enable-version3 \
@@ -1485,7 +1482,7 @@ fi
     --enable-zlib \
     --enable-bzlib \
     --enable-lzma \
-    ${EXTRA_FFMPEG_FLAGS} \
+    --disable-rpath \
     --enable-demuxer=mp4,mov,mkv,webm,avi,flv,ts,matroska,ogg,ass,ssa \
     --enable-muxer=mp4,mov,webm,image2 \
     --enable-encoder=libx264,libx265,libvpx-vp9,libaom-av1,png,mjpeg,libwebp,tiff \
@@ -1527,10 +1524,10 @@ fi
 # -----------------------------------------------------------------------------
 # Verification step (small test to confirm FFmpeg version via the built libraries)
 # -----------------------------------------------------------------------------
-echo ">>> Verification: testing built dynamic libraries..."
+echo ">>> Verification: testing built static libraries..."
 
 # Create a tiny C program that links against libavutil and prints the version.
-# This proves the shared libs are correctly built, PIC, and linkable.
+# This proves the static libs are correctly built, PIC, and linkable.
 cat > /tmp/ffmpeg_version_test.c << 'EOF'
 #include <stdio.h>
 #include <libavutil/avutil.h>
@@ -1545,20 +1542,37 @@ int main(void) {
 }
 EOF
 
-# Compile the test against the just-built shared libs
-$CC $CFLAGS $LDFLAGS -o /tmp/ffmpeg_version_test \
+# Resolve static dependency link flags dynamically using pkg-config
+# The --static flag forces pkg-config to output all nested static dependencies (like -lpng, -lz, -lm, etc.)
+STATIC_DEP_LIBS=$(pkg-config --static --libs libavformat libavcodec libavutil libswscale libswresample 2>/dev/null || echo "")
+
+# If pkg-config fails or isn't fully populated yet, we fall back to a manual list
+if [ -z "$STATIC_DEP_LIBS" ]; then
+    STATIC_DEP_LIBS="-lavformat -lavcodec -lswscale -lswresample -lavutil ${PLATFORM_LIBS} -lz -lm -lpthread"
+fi
+
+# Set the static compiling flag where supported (Windows/Linux)
+STATIC_LINK_FLAG=""
+if [[ "$OS" != "darwin" ]]; then
+    STATIC_LINK_FLAG="-static"
+fi
+
+# Compile the test using static flag and the fully expanded static dependencies
+$CC $CFLAGS $STATIC_LINK_FLAG -o /tmp/ffmpeg_version_test \
     /tmp/ffmpeg_version_test.c \
     -I"${sysroot}/include" \
     -L"${sysroot}/lib" \
-    -lavutil -lavformat -lavcodec -lswscale -lswresample \
-    ${PLATFORM_LIBS} \
-    -Wl,-rpath,"${sysroot}/lib"
+    $STATIC_DEP_LIBS
 
-# Run it (will use the dynamic libs we just built)
-if /tmp/ffmpeg_version_test; then
-    echo ">>> SUCCESS: Dynamic FFmpeg libraries are correctly built and linkable."
+# Run it (Only if we are not cross-compiling to a different architecture)
+if [[ "$OS" == "linux" && "$ARCH" == "amd64" ]]; then
+    if /tmp/ffmpeg_version_test; then
+        echo ">>> SUCCESS: Static FFmpeg libraries are correctly built, fully self-contained, and linkable!"
+    else
+        echo ">>> WARNING: Static verification run failed."
+    fi
 else
-    echo ">>> WARNING: Version test failed, but continuing (check logs)."
+    echo ">>> Static compilation verification successful (Skipping execution check because we are cross-compiling to ${OS}-${ARCH})."
 fi
 
 # Also show pkg-config results for key libraries (useful for your CGO build)
@@ -1601,85 +1615,6 @@ fi
 if [ -d "$INSTALL_SOURCE" ]; then
     cp -r "$INSTALL_SOURCE"/* /output/
 fi
-
-# ==========================================
-#      START RELOCATABLE SDK PATCHING
-# ==========================================
-echo ">>> Executing relocatable SDK patching for $OS..."
-
-# Target the final flattened directory to ensure every library 
-# (from sysroot and libvips) is made relocatable.
-PATCH_DIR="/output/lib"
-
-if [[ "$OS" == "darwin" ]]; then
-    echo ">>> Converting absolute paths to relocatable @rpath in Mach-O headers..."
-
-    # 1. Detect the correct cross-compilation tools using the $TRIPLE defined in your setup
-    if command -v "${TRIPLE}-install_name_tool" >/dev/null 2>&1; then
-        INT_CMD="${TRIPLE}-install_name_tool"
-        OTOOL_CMD="${TRIPLE}-otool"
-    elif command -v "llvm-install-name-tool" >/dev/null 2>&1; then
-        # This is usually provided by the 'llvm' package in Debian
-        INT_CMD="llvm-install-name-tool"
-        OTOOL_CMD="llvm-otool"
-    elif command -v "install_name_tool" >/dev/null 2>&1; then
-        INT_CMD="install_name_tool"
-        OTOOL_CMD="otool"
-    else
-        echo "ERROR: No install_name_tool or llvm-install-name-tool found!"
-        exit 1
-    fi
-
-    # 2. Execute the patching
-    if [ -n "$INT_CMD" ] && [ -d "$PATCH_DIR" ]; then
-        find "$PATCH_DIR" -maxdepth 1 -type f -name "*.dylib*" | while read -r dylib; do
-            base_name=$(basename "$dylib")
-            
-            # Update the library's own internal ID
-            "$INT_CMD" -id "@rpath/$base_name" "$dylib"
-            
-            # Extract dependencies and update any that point to our SDK
-            "$OTOOL_CMD" -L "$dylib" | tail -n +2 | awk '{print $1}' | while read -r dep; do
-                dep_base=$(basename "$dep")
-                
-                # If the dependency exists in our exported lib folder and isn't already @rpath
-                if [ -e "$PATCH_DIR/$dep_base" ] && [ "$dep" != "@rpath/$dep_base" ]; then
-                    "$INT_CMD" -change "$dep" "@rpath/$dep_base" "$dylib"
-                fi
-            done
-        done
-        echo ">>> macOS @rpath patching complete."
-    fi
-
-elif [[ "$OS" == "linux" ]]; then
-    echo ">>> Converting absolute paths to relocatable \$ORIGIN in ELF headers..."
-
-    if command -v patchelf >/dev/null 2>&1; then
-        if [ -d "$PATCH_DIR" ]; then
-            find "$PATCH_DIR" -maxdepth 1 -type f -name "*.so*" | while read -r solib; do
-                # Skip symlinks
-                if [ -L "$solib" ]; then
-                    continue
-                fi
-                
-                # Set the RPATH to $ORIGIN (the current directory)
-                patchelf --set-rpath '$ORIGIN' "$solib"
-            done
-            echo ">>> Linux \$ORIGIN patching complete."
-        fi
-    else
-        echo "WARNING: patchelf not found! Linux .so files may contain absolute paths."
-    fi
-
-elif [[ "$OS" == "windows" ]]; then
-    echo ">>> Windows PE/COFF libraries do not require RPATH patching. Skipping."
-fi
-
-echo ">>> Relocatable patching complete."
-
-# ==========================================
-#       END RELOCATABLE SDK PATCHING
-# ==========================================
 
 if [[ "$OS" == "windows" ]]; then
     echo ">>> Harvesting all LLVM-Mingw runtimes from $TRIPLE/bin..."
