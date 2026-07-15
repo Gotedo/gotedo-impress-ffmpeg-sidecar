@@ -1051,8 +1051,6 @@ EOF
                     --prefix="${sysroot}" \
                     --extra-cflags="${CFLAGS} -fPIC -O3 ${EXTRA_AUTOTOOLS_CFLAGS}" \
                     --extra-cxxflags="${CXXFLAGS} -fPIC -O3 ${EXTRA_AUTOTOOLS_CXXFLAGS}" \
-                    --enable-shared \
-                    --disable-static \
                     --enable-vp8 \
                     --enable-vp9 \
                     --enable-multithread \
@@ -1139,6 +1137,12 @@ EOF
                 install)
 
           else
+            # Dynamically append extra libraries for font-config only
+            local AUTOTOOLS_LIBS=""
+            if [[ "$name" == "fontconfig" ]]; then
+                AUTOTOOLS_LIBS="-lbrotlidec -lbrotlicommon"
+            fi
+            
             # Normal autotools path (unchanged for everything else)
             # Add -fPIC to CFLAGS/CXXFLAGS
             (cd "${src_dir}" && \
@@ -1156,6 +1160,7 @@ EOF
               CPPFLAGS="-I${sysroot}/include ${CFLAGS}" \
               # Only pass the global LDFLAGS and PLATFORM_LIBS to avoid conflicting targets
               LDFLAGS="-L${sysroot}/lib ${LDFLAGS} ${PLATFORM_LIBS}" \
+              LIBS="${AUTOTOOLS_LIBS}" \
               PKG_CONFIG_PATH="${sysroot}/lib/pkgconfig:${sysroot}/usr/lib/pkgconfig:${sysroot}/share/pkgconfig" \
               ./configure --host=${TRIPLE} --prefix="${sysroot}" \
                 ${EXTRA_CONF_ARGS} \
@@ -1283,7 +1288,7 @@ build_dep "tiff" \
 
 build_dep "brotli" \
     "https://github.com/google/brotli/archive/refs/tags/v${BROTLI_VERSION}.tar.gz" \
-    "${BROTLI_VERSION}" "cmake" "-DBROTLI_SHARED_LIBS=ON" ".tar.gz" "tar -xzf"
+    "${BROTLI_VERSION}" "cmake" "-DBROTLI_SHARED_LIBS=OFF" ".tar.gz" "tar -xzf"
 
 build_dep "libde265" \
     "https://github.com/strukturag/libde265/releases/download/v${LIBDE265_VERSION}/libde265-${LIBDE265_VERSION}.tar.gz" \
@@ -1331,7 +1336,7 @@ build_dep "libvpx" \
 
 build_dep "x265" \
     "https://bitbucket.org/multicoreware/x265_git/downloads/x265_${X265_VERSION}.tar.gz" \
-    "${X265_VERSION}" "cmake" "-DENABLE_SHARED=ON -DHIGH_BIT_DEPTH=ON" ".tar.gz" "tar -xzf"
+    "${X265_VERSION}" "cmake" "-DENABLE_SHARED=OFF -DHIGH_BIT_DEPTH=ON" ".tar.gz" "tar -xzf"
 
 build_dep "dav1d" \
     "https://code.videolan.org/videolan/dav1d/-/archive/${DAV1D_VERSION}/dav1d-${DAV1D_VERSION}.tar.gz" \
