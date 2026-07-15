@@ -1487,11 +1487,25 @@ fi
     --extra-ldflags="-L${sysroot}/lib ${FFMPEG_LDFLAGS}" \
     ${FFMPEG_OS_FLAGS}
 
+# Temporarily rename the VERSION file if compiling on Windows
+HAS_VERSION_RENAME=false
+if [[ "$OS" == "windows" ]] && [[ -f "VERSION" ]]; then
+    echo ">>> Windows compilation: Temporarily renaming VERSION file to prevent C++20 standard header collision..."
+    mv VERSION VERSION.tmp
+    HAS_VERSION_RENAME=true
+fi
+
 echo ">>> Compiling FFmpeg..."
 make -j $(nproc) -l $(nproc)
 
 echo ">>> Installing FFmpeg to sysroot..."
 make install
+
+# Restore the VERSION file immediately after compilation is done
+if [ "$HAS_VERSION_RENAME" = true ]; then
+    echo ">>> Windows compilation complete: Restoring VERSION file..."
+    mv VERSION.tmp VERSION
+fi
 
 # -----------------------------------------------------------------------------
 # Verification step (small test to confirm FFmpeg version via the built libraries)
