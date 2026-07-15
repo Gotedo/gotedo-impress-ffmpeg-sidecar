@@ -1,0 +1,110 @@
+version: '3'
+
+vars:
+  MACOSX_DEPLOYMENT_TARGET: '10.15'
+
+tasks:
+  apt-cache:
+    desc: Ensure the apt-cache-proxy container is running
+    internal: true
+    run: once
+    status:
+      # The task is skipped if this command exits with 0 (i.e., container is running)
+      - docker ps -q -f name=^apt-cache-proxy$ -f status=running | grep -q .
+    cmds:
+      # 1. Remove any stopped or dead container with this name to avoid conflicts
+      - docker rm -f apt-cache-proxy 2>/dev/null || true
+
+      # 2. Build the image only if it doesn't already exist locally
+      - |
+        if ! docker image inspect sameersbn/apt-cacher-ng >/dev/null 2>&1; then
+          echo ">>> Building sameersbn/apt-cacher-ng image..."
+          docker build -t sameersbn/apt-cacher-ng https://github.com/sameersbn/docker-apt-cacher-ng.git
+        else
+          echo ">>> Docker image sameersbn/apt-cacher-ng already exists. Skipping build."
+        fi
+
+      # 3. Start the proxy container
+      - echo ">>> Launching apt-cache-proxy container..."
+      - |
+        docker run -d \
+          --name apt-cache-proxy \
+          -p 3142:3142 \
+          -v /tmp/apt-cacher-ng:/var/cache/apt-cacher-ng \
+          sameersbn/apt-cacher-ng
+
+  create-ffmpeg-builder:
+    desc: Set up a dedicated buildx container builder instance
+    internal: true
+    cmds:
+      - |
+        if ! docker buildx ls | grep -q "ffmpeg-builder"; then
+          docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap
+        fi
+      - docker buildx use ffmpeg-builder
+
+  build:ffmpeg:
+    desc: Build FFmpeg dynamically using multi-platform cross-compilation
+    summary: |
+      Compiles FFmpeg and its libraries across Linux, macOS, and Windows.
+      Outputs built components directly to the local 'dist/' directory.
+    deps:
+      - task: apt-cache
+      - task: create-ffmpeg-builder
+    cmds:
+      # 1. Build the compiler-toolchain runner image using our local Dockerfile
+      - |
+        docker buildx build --progress=plain \
+          --builder ffmpeg-builder \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --cache-from=type=local,src={{.TASKFILE_DIR}}/build_cache/buildx \
+          --cache-to=type=local,dest={{.TASKFILE_DIR}}/build_cache/buildx,mode=max \
+          --cache-to=type=inline \
+          -t ffmpeg-builder \
+          -f {{.TASKFILE_DIR}}/Dockerfile \
+          --load {{.TASKFILE_DIR}}
+
+      # 2. Cross-compile across target OS and Architecture arrays
+      - |
+        {{- $os_list := .GOOS_VAR | default "windows,linux,darwin" | replace "[" "" | replace "]" "" | replace "'" "" | replace " " "" | splitList "," -}}
+        {{- $arch_list := .ARCH_VAR | default "amd64,arm64" | replace "[" "" | replace "]" "" | replace "'" "" | replace " " "" | splitList "," -}}
+
+        {{- range $os := $os_list }}
+          {{- range $arch := $arch_list }}
+
+        echo ">> Building FFmpeg for {{$os}}/{{$arch}}..."
+
+        # Create localized workspace build caching structures
+        mkdir -p "{{$.TASKFILE_DIR}}/build_cache/cargo_git" \
+                 "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_src" \
+                 "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_sysroot" \
+                 "{{$.TASKFILE_DIR}}/build_cache/meson_cache" \
+                 "{{$.TASKFILE_DIR}}/build_cache/apt_cache" \
+                 "{{$.TASKFILE_DIR}}/build_cache/apt_lib_cache" \
+                 "{{$.TASKFILE_DIR}}/build_cache/llvm-mingw" \
+                 "{{$.TASKFILE_DIR}}/build_cache/ccache" \
+                 "{{$.TASKFILE_DIR}}/build_cache/compiler-rt" \
+                 "{{$.TASKFILE_DIR}}/dist/{{$os}}/{{$arch}}"
+
+        docker run --rm \
+          --add-host=host.docker.internal:host-gateway \
+          -e MACOSX_DEPLOYMENT_TARGET="{{$.MACOSX_DEPLOYMENT_TARGET}}" \
+          -v "{{$.TASKFILE_DIR}}/dist/{{$os}}/{{$arch}}:/output" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_src:/build" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_sysroot:/sysroot" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/meson_cache:/root/.cache/meson" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/apt_cache:/var/cache/apt" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/apt_lib_cache:/var/lib/apt" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/llvm-mingw:/var/cache/llvm-mingw" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/ccache:/var/cache/ccache" \
+          -v "{{$.TASKFILE_DIR}}/patches:/patches" \
+          -v "{{$.TASKFILE_DIR}}/build_cache/compiler-rt:/var/cache/compiler-rt" \
+          ffmpeg-builder {{$os}} {{$arch}}
+
+          {{- end }}
+        {{- end }}
+
+        echo ">> All FFmpeg builds complete."
+    env:
+      DOCKER_BUILDKIT: 1
+      MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
