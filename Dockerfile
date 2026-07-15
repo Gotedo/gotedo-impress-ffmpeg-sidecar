@@ -1416,7 +1416,7 @@ esac
 
 # Resolve the correct linker & OS-specific config arguments
 FFMPEG_LINKER="clang"
-local EXTRA_FFMPEG_FLAGS=""
+EXTRA_FFMPEG_FLAGS=""
 
 if [[ "$OS" == "darwin" ]]; then
     # CRITICAL: Let clang drive the linking so it resolves the macOS sysroot!
