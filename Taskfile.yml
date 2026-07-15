@@ -1,8 +1,5 @@
 version: '3'
 
-vars:
-  MACOSX_DEPLOYMENT_TARGET: '10.15'
-
 tasks:
   apt-cache:
     desc: Ensure the apt-cache-proxy container is running
@@ -84,12 +81,12 @@ tasks:
                  "{{$.TASKFILE_DIR}}/build_cache/llvm-mingw" \
                  "{{$.TASKFILE_DIR}}/build_cache/ccache" \
                  "{{$.TASKFILE_DIR}}/build_cache/compiler-rt" \
-                 "{{$.TASKFILE_DIR}}/dist/{{$os}}/{{$arch}}"
+                 "{{$.OUT_DIR}}/{{$os}}/{{$arch}}"
 
         docker run --rm \
           --add-host=host.docker.internal:host-gateway \
           -e MACOSX_DEPLOYMENT_TARGET="{{$.MACOSX_DEPLOYMENT_TARGET}}" \
-          -v "{{$.TASKFILE_DIR}}/dist/{{$os}}/{{$arch}}:/output" \
+          -v "{{$.OUT_DIR}}/{{$os}}/{{$arch}}:/output" \
           -v "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_src:/build" \
           -v "{{$.TASKFILE_DIR}}/build_cache/ffmpeg_sysroot:/sysroot" \
           -v "{{$.TASKFILE_DIR}}/build_cache/meson_cache:/root/.cache/meson" \
@@ -97,7 +94,6 @@ tasks:
           -v "{{$.TASKFILE_DIR}}/build_cache/apt_lib_cache:/var/lib/apt" \
           -v "{{$.TASKFILE_DIR}}/build_cache/llvm-mingw:/var/cache/llvm-mingw" \
           -v "{{$.TASKFILE_DIR}}/build_cache/ccache:/var/cache/ccache" \
-          -v "{{$.TASKFILE_DIR}}/patches:/patches" \
           -v "{{$.TASKFILE_DIR}}/build_cache/compiler-rt:/var/cache/compiler-rt" \
           ffmpeg-builder {{$os}} {{$arch}}
 
@@ -108,3 +104,7 @@ tasks:
     env:
       DOCKER_BUILDKIT: 1
       MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
+    vars:
+      DEFAULT_OUT_DIR: '{{$.TASKFILE_DIR}}/dist'
+      OUT_DIR: '{{.OUT_DIR | default .DEFAULT_OUT_DIR }}'
+      MACOSX_DEPLOYMENT_TARGET: '{{{.MACOSX_DEPLOYMENT_TARGET | default "10.15"}}}'
