@@ -900,14 +900,16 @@ build_dep() {
 
             # Manually create zlib.pc and fix library name for zlib
             if [ "$name" = "zlib" ]; then
-              # FIX: Copy libzlibstatic.a to libz.a so autotools (libpng) can find it with -lz
-              if [ -f "${sysroot}/lib/libzlibstatic.a" ]; then
-                  echo "DEBUG: Compat - Copying libzlibstatic.a to libz.a"
-                  cp "${sysroot}/lib/libzlibstatic.a" "${sysroot}/lib/libz.a"
-              elif [ -f "${sysroot}/lib/libzlib.a" ]; then
-                  echo "DEBUG: Compat - Copying libzlib.a to libz.a"
-                  cp "${sysroot}/lib/libzlib.a" "${sysroot}/lib/libz.a"
-              fi
+              echo "DEBUG: Fixing compiled zlib static assets..."
+
+              # FIX: Copy libzs.a to libz.a so autotools (libpng) can find it with -lz
+              for file in libzs.a libzlibstatic.a libzlib.a libz_static.a zlib.a; do
+                  if [ -f "${sysroot}/lib/${file}" ]; then
+                      echo "DEBUG: Compat - Copying ${file} to libz.a"
+                      cp "${sysroot}/lib/${file}" "${sysroot}/lib/libz.a"
+                      break
+                  fi
+              done
 
               mkdir -p "${sysroot}/lib/pkgconfig"
               cat > "${sysroot}/lib/pkgconfig/zlib.pc" <<EOF
