@@ -334,6 +334,7 @@ LIBVORBIS_VERSION="1.3.7"
 LIBOGG_VERSION="1.3.5"
 BZIP2_VERSION="1.0.8"
 XZ_VERSION="5.8.3"
+MINIAUDIO_VERSION="0.11.25"
 
 DEP_LIBRARY_TYPE="static"      # Sidecar is open-sourced for GPL compliance so libraries can be statically built
 
@@ -798,7 +799,7 @@ EOF
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
 ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
-BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}"
+BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
 if [ -f "/output/build.checksum" ]; then
@@ -860,6 +861,28 @@ build_dep() {
     fi
 
     case "${build_type}" in
+        header-only)
+            echo ">>> Copying header assets for ${name} to ${sysroot}/include..."
+            mkdir -p "${sysroot}/include"
+            
+            # Use extra_flags to pass the specific header file name(s) we want to copy
+            local target_header="${extra_flags}"
+            
+            if [ -f "${src_dir}/${target_header}" ]; then
+                cp "${src_dir}/${target_header}" "${sysroot}/include/"
+                echo ">>> Successfully copied ${target_header} to ${sysroot}/include/"
+            else
+                # Fallback search if directory structure differs
+                local found_file=$(find "${src_dir}" -name "${target_header}" -print -quit)
+                if [ -n "${found_file}" ]; then
+                    cp "${found_file}" "${sysroot}/include/"
+                    echo ">>> Successfully found and copied ${target_header} to ${sysroot}/include/"
+                else
+                    echo "ERROR: Could not find ${target_header} in ${src_dir}"
+                    exit 1
+                fi
+            fi
+            ;;
         meson)
             BUILD_DIR="${src_dir}/build_${OS}_${ARCH}"
             find "${src_dir}" -exec touch -t $(date +%Y%m%d%H%M.%S) {} + 2>/dev/null || true
@@ -1247,6 +1270,10 @@ EOF
 # Build all dependencies (order matters for pkg-config)
 # -----------------------------------------------------------------------------
 echo ">>> Building dependencies into ${sysroot}..."
+
+build_dep "miniaudio" \
+    "https://github.com/mackron/miniaudio/archive/refs/tags/${MINIAUDIO_VERSION}.tar.gz" \
+    "${MINIAUDIO_VERSION}" "header-only" "miniaudio.h" ".tar.gz" "tar -xzf"
 
 build_dep "lame" \
     "https://downloads.sourceforge.net/project/lame/lame/${LAME_VERSION}/lame-${LAME_VERSION}.tar.gz" \

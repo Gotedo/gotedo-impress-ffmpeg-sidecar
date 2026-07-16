@@ -4,6 +4,7 @@ package main
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <miniaudio.h>
 */
 import "C"
 import (
@@ -12,7 +13,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Gotedo FFmpeg Sidecar (Static Build)")
+	fmt.Println("Gotedo FFmpeg Sidecar with Miniaudio Support")
 
 	codecVer := C.avcodec_version()
 	formatVer := C.avformat_version()
