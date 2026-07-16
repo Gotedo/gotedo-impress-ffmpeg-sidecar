@@ -415,6 +415,8 @@ growing_stack = false
             MESON_ARCH="x86_64"; TGT="x86_64-linux-gnu"
         else
             MESON_ARCH="aarch64"; TGT="aarch64-linux-gnu"
+            # ARM64 assembly links perfectly fine with lld
+            # EXTRA_FFMPEG_FLAGS="--disable-asm"
         fi
         MESON_SYSTEM="linux"
         TRIPLE="$TGT"
@@ -1352,16 +1354,25 @@ echo ">>> All dependencies built successfully."
 echo ">>> Building FFmpeg ${FFMPEG_VERSION} (static, GPL, with subtitles + image support)..."
 
 DIRNAME="ffmpeg-${FFMPEG_VERSION}"
-if [ ! -d "$DIRNAME" ]; then
-    curl -L -f "https://ffmpeg.org/releases/${DIRNAME}.tar.xz" -o ffmpeg.tar.xz
-    tar -xf ffmpeg.tar.xz
-    rm ffmpeg.tar.xz
+TARBALL="ffmpeg-${FFMPEG_VERSION}.tar.xz"
+
+# Only download the tarball if it doesn't already exist in your cache
+if [ ! -f "${WORKDIR}/${TARBALL}" ]; then
+    echo ">>> Downloading clean FFmpeg source..."
+    curl -L -f "https://ffmpeg.org/releases/${TARBALL}" -o "${WORKDIR}/${TARBALL}"
 fi
 
-cd "${WORKDIR}/${DIRNAME}"
+# Always delete the old compilation directory to clear out foreign Mach-O/ELF artifacts
+if [ -d "${WORKDIR}/${DIRNAME}" ]; then
+    echo ">>> Wiping old build directory to prevent cross-architecture cache leakage..."
+    rm -rf "${WORKDIR}/${DIRNAME}"
+fi
 
-# Clean up stale object files from any previous architecture builds
-make distclean || true
+# Fresh extraction guaranteed to be 100% clean
+echo ">>> Extracting fresh workspace for ${OS}-${ARCH}..."
+tar -xf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
+
+cd "${WORKDIR}/${DIRNAME}"
 
 # Help pkg-config and compiler find our sysroot deps
 export PKG_CONFIG_PATH="${sysroot}/lib/pkgconfig:${sysroot}/usr/lib/pkgconfig:${PKG_CONFIG_PATH}"
