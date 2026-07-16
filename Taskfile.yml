@@ -45,17 +45,7 @@ tasks:
           docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap
         fi
       - docker buildx use ffmpeg-builder
-
-  build:ffmpeg:
-    desc: Build FFmpeg dynamically using multi-platform cross-compilation
-    summary: |
-      Compiles FFmpeg and its libraries across Linux, macOS, and Windows.
-      Outputs built components directly to the local 'dist/' directory.
-    deps:
-      - task: apt-cache
-      - task: create-ffmpeg-builder
-    cmds:
-      # 1. Build the compiler-toolchain runner image using our local Dockerfile
+      # Build the compiler-toolchain runner image using our local Dockerfile
       - |
         docker buildx build --progress=plain \
           --builder ffmpeg-builder \
@@ -67,7 +57,16 @@ tasks:
           -f {{.TASKFILE_DIR}}/Dockerfile \
           --load {{.TASKFILE_DIR}}
 
-      # 2. Cross-compile across target OS and Architecture arrays
+  build:ffmpeg:
+    desc: Build FFmpeg dynamically using multi-platform cross-compilation
+    summary: |
+      Compiles FFmpeg and its libraries across Linux, macOS, and Windows.
+      Outputs built components directly to the local 'dist/' directory.
+    deps:
+      - task: apt-cache
+      - task: create-ffmpeg-builder
+    cmds:
+      # Cross-compile across target OS and Architecture arrays
       - |
         {{- $os_list := .GOOS_VAR | default "windows,linux,darwin" | replace "[" "" | replace "]" "" | replace "'" "" | replace " " "" | splitList "," -}}
         {{- $arch_list := .ARCH_VAR | default "amd64,arm64" | replace "[" "" | replace "]" "" | replace "'" "" | replace " " "" | splitList "," -}}
@@ -126,11 +125,12 @@ tasks:
         CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" 
         CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" 
         GOOS={{.GOOS}} 
-        GOARCH={{.GOARCH}} 
-        go build -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}/main.go"
+        GOARCH={{.GOARCH}}
+        go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}/main.go"
       - echo "Built sidecar to '{{.OUTFILE}}'"
     vars:
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       # Safely fall back to default output directory if OUT_DIR is empty or unresolved
       OUT_DIR: '{{if .OUT_DIR}}{{.OUT_DIR}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
       GOOS: '{{.GOOS}}'
@@ -139,13 +139,14 @@ tasks:
       FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
       # Match the dynamic build directory to the target platform, not the host machine
       FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
-      OUTFILE: '{{.OUT_DIR}}/sidecar_{{.GOOS}}_{{.GOARCH}}{{if eq .GOOS "windows"}}.exe{{end}}'
+      OUTFILE: '{{.OUT_DIR}}/{{.OUT_FILE_NAME}}{{if eq .GOOS "windows"}}.exe{{end}}'
 
   # Native Platform Tasks
   build:native:darwin:
     desc: "Builds FFmpeg sidecar for macOS"
     vars:
       OUT_DIR: '{{.OUT_DIR}}'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOOS: darwin
       GOARCH: '{{.GOARCH | default "arm64"}}'
       # macOS requires specific frameworks for audio/video toolbox
@@ -157,12 +158,14 @@ tasks:
           GOARCH: '{{.GOARCH}}'
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
+          OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
 
   build:native:windows:
     desc: "Builds FFmpeg sidecar for Windows"
     vars:
       GOOS: windows
       OUT_DIR: '{{.OUT_DIR}}'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOARCH: '{{.GOARCH | default "amd64"}}'
       # Windows requires Winsock and threading libraries
       LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
@@ -173,11 +176,13 @@ tasks:
           GOARCH: '{{.GOARCH}}'
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
+          OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
 
   build:native:linux:
     desc: "Builds FFmpeg sidecar for Linux"
     vars:
       OUT_DIR: '{{.OUT_DIR}}'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOOS: linux
       GOARCH: '{{.GOARCH | default "amd64"}}'
       # Linux requires standard pthread and math libraries for static linking
@@ -189,6 +194,7 @@ tasks:
           GOARCH: '{{.GOARCH}}'
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
+          OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
 
   # The run task now maps dynamically based on passed arguments
   run:
@@ -213,11 +219,51 @@ tasks:
       TARGET_OS: '{{.OS | default "darwin"}}'
       TARGET_ARCH: '{{.ARCH | default "arm64"}}'
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
-      # If OUT_DIR is passed, evaluate it absolute-style from the repo root; otherwise, use local bin
+      # Evaluated via root absolute pathing to enforce strict boundaries
       OUT_DIR: '{{if .OUT_DIR}}{{print .ROOT_DIR "/" .OUT_DIR | clean}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
+      DEFAULT_OUT_FILE_NAME: 'sidecar_{{.TARGET_OS}}_{{.TARGET_ARCH}}'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME | default .DEFAULT_OUT_FILE_NAME}}'
+      # Dynamically choose the target task name based on whether it matches the host OS/Arch
+      TARGET_TASK: '{{if and (eq .TARGET_OS OS) (eq .TARGET_ARCH ARCH)}}build:native:{{.TARGET_OS}}{{else}}build:docker{{end}}'
+      DEFAULT_FFMPEG_LIB_DIR: '{{$.TASKFILE_DIR}}/dist'
+      FFMPEG_LIB_DIR: '{{if .FFMPEG_LIB_DIR}}{{print .ROOT_DIR "/" .FFMPEG_LIB_DIR | clean}}{{else}}{{.DEFAULT_FFMPEG_LIB_DIR}}{{end}}'
     cmds:
-      - task: "build:native:{{.TARGET_OS}}"
-        vars: 
+      # Natively call the resolved task using Task's internal pipeline
+      - task: "{{.TARGET_TASK}}"
+        vars:
           GOOS: '{{.TARGET_OS}}'
           GOARCH: '{{.TARGET_ARCH}}'
+          TARGET_OS: '{{.TARGET_OS}}'
+          TARGET_ARCH: '{{.TARGET_ARCH}}'
           OUT_DIR: '{{.OUT_DIR}}'
+          OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
+          FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+
+  build:docker:
+    desc: "Builds the sidecar via Docker cross-compilation"
+    internal: true
+    deps:
+      - task: apt-cache
+      - task: create-ffmpeg-builder
+    vars:
+      TARGET_OS: '{{.TARGET_OS}}'
+      TARGET_ARCH: '{{.TARGET_ARCH}}'
+      OUT_DIR: '{{.OUT_DIR}}'
+      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
+      FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+    cmds:
+      - echo ">> Routing to Docker cross-compiler for {{.TARGET_OS}}/{{.TARGET_ARCH}}..."
+      - cmd: mkdir -p "{{.OUT_DIR}}"
+        platforms: [linux, darwin]
+      - cmd: powershell -Command "New-Item -ItemType Directory -Force -Path '{{.OUT_DIR}}'"
+        platforms: [windows]
+      - |
+        docker run --rm \
+          --entrypoint /usr/local/bin/build_sidecar.sh \
+          -e SIDECAR_OUT_DIR=/output \
+          -e SIDECAR_OUT_FILE={{.OUT_FILE_NAME}} \
+          -e MACOSX_DEPLOYMENT_TARGET="{{.MACOSX_DEPLOYMENT_TARGET}}" \
+          -v "{{.OUT_DIR}}:/output" \
+          -v "{{.TASKFILE_DIR}}:/src" \
+          -v "{{.FFMPEG_LIB_DIR}}:/ffmpeg_libs" \
+          ffmpeg-builder {{.TARGET_OS}} {{.TARGET_ARCH}} sidecar

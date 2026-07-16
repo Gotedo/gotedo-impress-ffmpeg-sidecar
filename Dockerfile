@@ -45,6 +45,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   nano vim \
   && rm -rf /var/lib/apt/lists/*
 
+# Install Go Toolchain for Sidecar Compilation
+ARG GO_VERSION=1.26.0
+RUN ARCH_SUFFIX=$(dpkg --print-architecture) && \
+  curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH_SUFFIX}.tar.gz" | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
 # Generate Global LLVM 20 System Symlinks (Overriding default LLVM 14)
 RUN ln -sf /usr/bin/clang-20 /usr/bin/clang && \
   ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
@@ -1727,6 +1733,127 @@ echo "Cleanup complete. Build environment is ready for the next target."
 BUILDER
 
 RUN chmod +x /usr/local/bin/builder.sh
+
+# -----------------------------------------------------------------------------
+# Embedded Sidecar Builder Script
+# -----------------------------------------------------------------------------
+RUN cat <<'SIDECAR_BUILDER' > /usr/local/bin/build_sidecar.sh
+#!/bin/bash
+set -e
+
+OS=${1:-linux}
+ARCH=${2:-amd64}
+
+export GOOS="$OS"
+export GOARCH="$ARCH"
+export CGO_ENABLED=1
+
+# Map directly to the mounted FFmpeg libraries
+FFMPEG_LIB_DIR="/ffmpeg_libs/${OS}/${ARCH}"
+
+# Throw an error if the directory is missing or empty
+if [ ! -d "$FFMPEG_LIB_DIR" ] || [ -z "$(ls -A "$FFMPEG_LIB_DIR" 2>/dev/null)" ]; then
+    echo "=========================================================" >&2
+    echo " ERROR: FFmpeg library directory is missing or empty!" >&2
+    echo " Expected Path: $FFMPEG_LIB_DIR" >&2
+    echo " Please build the FFmpeg libraries for ${OS}/${ARCH} first." >&2
+    echo "=========================================================" >&2
+    exit 1
+fi
+
+LLVM_MINGW_PATH="/opt/llvm-mingw/$(uname -m)"
+export PATH="$LLVM_MINGW_PATH/bin:${PATH}"
+
+# 1. Determine Compiler Paths and Target Flags
+case "${OS}-${ARCH}" in
+    windows-amd64)
+        export CC="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang"
+        export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        ;;
+    windows-arm64)
+        export CC="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang"
+        export CXX="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang++"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        ;;
+    linux-amd64)
+        export CC="/usr/bin/clang"
+        export CXX="/usr/bin/clang++"
+        TARGET_FLAG="-target x86_64-linux-gnu"
+        export CGO_CFLAGS="$TARGET_FLAG -fPIC"
+        export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lm -lpthread -ldl -lstdc++"
+        ;;
+    linux-arm64)
+        export CC="/usr/bin/clang"
+        export CXX="/usr/bin/clang++"
+        TARGET_FLAG="-target aarch64-linux-gnu"
+        export CGO_CFLAGS="$TARGET_FLAG -fPIC"
+        export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lm -lpthread -ldl -lstdc++"
+        ;;
+    darwin-amd64 | darwin-arm64)
+        export CC="/usr/bin/clang"
+        export CXX="/usr/bin/clang++"
+        
+        if [ "$ARCH" = "amd64" ]; then
+            MAC_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}"
+            L_ARCH="x86_64"
+            TARGET_FLAG="-target x86_64-apple-macos${MAC_TARGET}"
+        else
+            MAC_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+            L_ARCH="arm64"
+            TARGET_FLAG="-target arm64-apple-macos${MAC_TARGET}"
+        fi
+
+        mkdir -p /tmp/darwin-tools
+        cat << EOF > /tmp/darwin-tools/ld
+#!/bin/bash
+exec /usr/bin/lld -flavor darwin -arch "${L_ARCH}" -platform_version macos "${MAC_TARGET}" "${MAC_TARGET}" "\$@"
+EOF
+        chmod +x /tmp/darwin-tools/ld
+
+        export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
+        export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -lc++ -lSystem -lresolv"
+        ;;
+    *)
+        echo "Unsupported sidecar target: ${OS}-${ARCH}"
+        exit 1
+        ;;
+esac
+
+# 2. Bind paths for header and library discovery to the absolute framework mount
+export CGO_CFLAGS="${CGO_CFLAGS} -I${FFMPEG_LIB_DIR}/include"
+export CGO_LDFLAGS="${CGO_LDFLAGS} -L${FFMPEG_LIB_DIR}/lib ${EXTRA_LIBS}"
+
+OUT_DIR="${SIDECAR_OUT_DIR:-/output}"
+OUT_FILE="${SIDECAR_OUT_FILE:-sidecar_${OS}_${ARCH}}"
+
+if [ "$OS" = "windows" ] && [[ "$OUT_FILE" != *.exe ]]; then
+    OUT_FILE="${OUT_FILE}.exe"
+fi
+
+echo "========================================================="
+echo ">>> Building Go Sidecar for $OS-$ARCH..."
+echo ">>> CC Target: $CC"
+echo "========================================================="
+
+# 3. Compile
+cd /src
+
+# Declare windowsgui linker flag if OS is windows to hide terminal window
+GO_BUILDFLAGS=""
+if [ "$OS" = "windows" ]; then
+    GO_BUILDFLAGS="-ldflags=-H=windowsgui"
+fi
+
+go build $GO_BUILDFLAGS -o "${OUT_DIR}/${OUT_FILE}" main.go
+
+echo ">>> Sidecar successfully built at ${OUT_DIR}/${OUT_FILE}"
+SIDECAR_BUILDER
+
+RUN chmod +x /usr/local/bin/build_sidecar.sh
 
 ENTRYPOINT ["/usr/local/bin/builder.sh"]
 CMD ["linux", "amd64"]
