@@ -2,7 +2,7 @@ version: '3'
 
 vars:
   # Detect host OS and ARCH if not explicitly passed
-  OS: '{{.OS | default OS}}'
+  OS: '{{.OS | default .GOOS | default (env "GOOS") | default OS}}'
   ARCH: '{{.ARCH | default ARCH}}'
   DEFAULT_FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
 
@@ -216,6 +216,8 @@ tasks:
   build:
     desc: "Builds the sidecar for a specific platform (e.g., task build -- OS=linux ARCH=amd64)"
     vars:
+      OS: '{{.OS | default "darwin"}}'
+      ARCH: '{{.ARCH | default "darwin"}}'
       TARGET_OS: '{{.OS | default "darwin"}}'
       TARGET_ARCH: '{{.ARCH | default "arm64"}}'
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
