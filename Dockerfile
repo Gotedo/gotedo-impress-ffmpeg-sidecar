@@ -439,7 +439,7 @@ growing_stack = false
         else
             MESON_ARCH="aarch64"; TGT="arm64-apple-macos$MACOSX_DEPLOYMENT_TARGET"
             # ARM64 assembly links perfectly fine with lld
-            EXTRA_FFMPEG_FLAGS=""
+            EXTRA_FFMPEG_FLAGS="--disable-asm"
         fi
         MESON_SYSTEM="darwin"
         TRIPLE="${MESON_ARCH}-apple-darwin"
@@ -1466,6 +1466,7 @@ fi
     --arch="${FFMPEG_ARCH}" \
     --cc="${CC}" \
     --cxx="${CXX}" \
+    --as="${CC} -I${sysroot}/include -fPIC ${FFMPEG_CFLAGS}" \
     --ld="${FFMPEG_LINKER}" \
     --strip="${STRIP}" \
     --ar="${AR}" \
