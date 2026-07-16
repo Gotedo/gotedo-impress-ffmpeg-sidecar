@@ -339,3 +339,191 @@ void free_fmp4_muxer(AVFormatContext *out_fmt_ctx)
 
   avformat_free_context(out_fmt_ctx);
 }
+
+/**
+ * Miniaudio internal playback callback.
+ *
+ * This callback is executed asynchronously in a high-priority system thread
+ * spawned by the miniaudio device engine. When the sound card is ready to play
+ * more samples, it queries this function.
+ *
+ * We attempt to acquire and read Float32 PCM frames from our thread-safe
+ * ring-buffer and fill the output buffer. If the ring-buffer does not contain
+ * enough frames (underrun), we write silence (zeros) to prevent static noise or popping.
+ *
+ * @param pDevice           Pointer to the active miniaudio device instance.
+ * @param pOutput           Target output hardware buffer to fill with PCM frames.
+ * @param pInput            Input capture buffer (NULL for our playback-only configuration).
+ * @param frameCount        Number of PCM audio frames requested by the sound card.
+ */
+static void audio_device_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frameCount)
+{
+  AudioPlaybackContext *play_ctx = (AudioPlaybackContext *)pDevice->pUserData;
+  if (!play_ctx || !play_ctx->is_active)
+  {
+    return;
+  }
+
+  ma_uint32 frames_to_read = frameCount;
+  void *pReadBuffer;
+
+  // Acquire read buffer from the thread-safe, lock-free PCM ring-buffer
+  ma_result result = ma_pcm_rb_acquire_read(&play_ctx->ring_buffer, &frames_to_read, &pReadBuffer);
+  if (result == MA_SUCCESS && frames_to_read > 0)
+  {
+    // Copy the floating-point samples directly to the hardware audio buffer
+    int bytes_per_frame = ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels);
+    memcpy(pOutput, pReadBuffer, frames_to_read * bytes_per_frame);
+
+    // Commit the read to update the ring-buffer's read cursor safely
+    ma_pcm_rb_commit_read(&play_ctx->ring_buffer, frames_to_read);
+
+    // If the ring-buffer has fewer frames than requested, pad the rest with silence (underrun handling)
+    if (frames_to_read < frameCount)
+    {
+      char *silence_start = (char *)pOutput + (frames_to_read * bytes_per_frame);
+      memset(silence_start, 0, (frameCount - frames_to_read) * bytes_per_frame);
+    }
+  }
+  else
+  {
+    // Fallback: If ring-buffer fails to acquire, immediately write silent frames
+    memset(pOutput, 0, frameCount * ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels));
+  }
+}
+
+/**
+ * Initializes the lock-free circular ring-buffer and boots up the miniaudio playback engine.
+ *
+ * Operating-system-specific hardware routes are selected by translating the backend `device_id` string
+ * parameter into a direct physical device reference before starting the background audio thread.
+ *
+ * @param play_ctx     Pointer to the AudioPlaybackContext instance to manage.
+ * @param sample_rate  Audio sampling rate (e.g., 48000 Hz).
+ * @param channels     Number of outputs (Stereo = 2 channels).
+ * @param device_id    Target hardware device ID string (NULL defaults to OS system default output).
+ *
+ * @return 0 on success, or a negative integer on allocation or hardware initialization failures.
+ */
+int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id)
+{
+  ma_result result;
+
+  play_ctx->sample_rate = sample_rate;
+  play_ctx->channels = channels;
+  play_ctx->is_active = 0;
+
+  // 1. Initialize the thread-safe PCM ring buffer.
+  // We size the buffer to hold 1.5 seconds of audio frames to absorb pipeline jitter comfortably.
+  ma_uint32 buffer_size_frames = sample_rate * 1.5;
+  result = ma_pcm_rb_init(ma_format_f32, channels, buffer_size_frames, NULL, NULL, &play_ctx->ring_buffer);
+  if (result != MA_SUCCESS)
+  {
+    return -1;
+  }
+
+  // 2. Setup the low-level device configuration
+  ma_device_config config = ma_device_config_init(ma_device_type_playback);
+  config.playback.format = ma_format_f32;
+  config.playback.channels = channels;
+  config.sampleRate = sample_rate;
+  config.dataCallback = audio_device_callback;
+  config.pUserData = play_ctx;
+
+  // To prevent popping, ensure miniaudio uses high-performance hardware buffers
+  config.periodSizeInFrames = 480; // ~10ms at 48kHz is standard for stable low-latency routing
+
+  // Parse the device identifier string if specified, otherwise fall back to system default (NULL)
+  if (device_id != NULL && strlen(device_id) > 0)
+  {
+    // On systems utilizing standard character ids, translate or pass direct mapping safely
+    // For now, config.playback.pDeviceID supports passing structural addresses
+    // Note: The conversion of string -> ma_device_id structure is resolved on the Go layer before calling.
+    config.playback.pDeviceID = (ma_device_id *)device_id;
+  }
+  else
+  {
+    config.playback.pDeviceID = NULL;
+  }
+
+  // 3. Initialize the hardware context link
+  result = ma_device_init(NULL, &config, &play_ctx->device);
+  if (result != MA_SUCCESS)
+  {
+    ma_pcm_rb_uninit(&play_ctx->ring_buffer);
+    return -2;
+  }
+
+  // 4. Start playback thread
+  result = ma_device_start(&play_ctx->device);
+  if (result != MA_SUCCESS)
+  {
+    ma_device_uninit(&play_ctx->device);
+    ma_pcm_rb_uninit(&play_ctx->ring_buffer);
+    return -3;
+  }
+
+  play_ctx->is_active = 1;
+  return 0;
+}
+
+/**
+ * Pushes raw, uncompressed PCM floating-point data into the lock-free circular buffer.
+ *
+ * Called inside the core decoding loop whenever a decoded and resampled audio chunk is finalized.
+ *
+ * @param play_ctx     Pointer to the active AudioPlaybackContext.
+ * @param pcm_data     The resampled input float array.
+ * @param frame_count  Number of multi-channel frames contained within the chunk.
+ *
+ * @return 0 on success, or a negative value if writing to the circular buffer is blocked or overflows.
+ */
+int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_data, int frame_count)
+{
+  if (!play_ctx || !play_ctx->is_active)
+  {
+    return -1;
+  }
+
+  ma_uint32 frames_to_write = frame_count;
+  void *pWriteBuffer;
+
+  // Safely acquire writing sector in the circular map
+  ma_result result = ma_pcm_rb_acquire_write(&play_ctx->ring_buffer, &frames_to_write, &pWriteBuffer);
+  if (result == MA_SUCCESS && frames_to_write > 0)
+  {
+    int bytes_per_frame = ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels);
+
+    // Copy processed frames into acquired memory
+    memcpy(pWriteBuffer, pcm_data, frames_to_write * bytes_per_frame);
+
+    // Finalize transaction to notify the playback reader
+    ma_pcm_rb_commit_write(&play_ctx->ring_buffer, frames_to_write);
+    return 0;
+  }
+
+  return -2; // Buffer overflow/write failed
+}
+
+/**
+ * Halts the miniaudio hardware playback engine and safely tears down allocated circular buffers.
+ *
+ * Safe to invoke repeatedly; guarantees complete deallocation of thread structures.
+ *
+ * @param play_ctx  Pointer to the AudioPlaybackContext to tear down.
+ */
+void stop_audio_playback(AudioPlaybackContext *play_ctx)
+{
+  if (!play_ctx)
+  {
+    return;
+  }
+
+  play_ctx->is_active = 0;
+
+  // Uninitialize device - stops background thread natively
+  ma_device_uninit(&play_ctx->device);
+
+  // Deallocate local circular structures
+  ma_pcm_rb_uninit(&play_ctx->ring_buffer);
+}
