@@ -1762,6 +1762,7 @@ if [ ! -d "$FFMPEG_LIB_DIR" ] || [ -z "$(ls -A "$FFMPEG_LIB_DIR" 2>/dev/null)" ]
 fi
 
 LLVM_MINGW_PATH="/opt/llvm-mingw/$(uname -m)"
+GO_BUILDFLAGS=""
 export PATH="$LLVM_MINGW_PATH/bin:${PATH}"
 
 # 1. Determine Compiler Paths and Target Flags
@@ -1770,11 +1771,15 @@ case "${OS}-${ARCH}" in
         export CC="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
         EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        # Declare windowsgui linker flag if OS is windows to hide terminal window
+        GO_BUILDFLAGS="-ldflags=-s -ldflags=-w -ldflags=-H=windowsgui"
         ;;
     windows-arm64)
         export CC="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang++"
         EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        # Declare windowsgui linker flag if OS is windows to hide terminal window
+        GO_BUILDFLAGS="-ldflags=-s -ldflags=-w -ldflags=-H=windowsgui"
         ;;
     linux-amd64)
         export CC="/usr/bin/clang"
@@ -1795,6 +1800,8 @@ case "${OS}-${ARCH}" in
     darwin-amd64 | darwin-arm64)
         export CC="/usr/bin/clang"
         export CXX="/usr/bin/clang++"
+        # Prevent ELF strip collisions
+        GO_BUILDFLAGS="-ldflags=-s -ldflags=-w"
         
         if [ "$ARCH" = "amd64" ]; then
             MAC_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}"
@@ -1812,6 +1819,16 @@ case "${OS}-${ARCH}" in
 exec /usr/bin/lld -flavor darwin -arch "${L_ARCH}" -platform_version macos "${MAC_TARGET}" "${MAC_TARGET}" "\$@"
 EOF
         chmod +x /tmp/darwin-tools/ld
+
+        # Strip wrapper script: Intercepts Go linker strip actions, mapping them to llvm-strip
+        cat << EOF > /tmp/darwin-tools/strip
+#!/bin/bash
+/usr/bin/llvm-strip "\$@" || true
+EOF
+        chmod +x /tmp/darwin-tools/strip
+
+        # Prepend the tool wrapper directory to PATH so Go resolves our strip wrapper first
+        export PATH="/tmp/darwin-tools:${PATH}"
 
         export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
@@ -1837,16 +1854,11 @@ fi
 echo "========================================================="
 echo ">>> Building Go Sidecar for $OS-$ARCH..."
 echo ">>> CC Target: $CC"
+echo ">>> Linker Flags: $GO_BUILDFLAGS"
 echo "========================================================="
 
 # 3. Compile
 cd /src
-
-# Declare windowsgui linker flag if OS is windows to hide terminal window
-GO_BUILDFLAGS=""
-if [ "$OS" = "windows" ]; then
-    GO_BUILDFLAGS="-ldflags=-H=windowsgui"
-fi
 
 go build $GO_BUILDFLAGS -o "${OUT_DIR}/${OUT_FILE}" main.go
 
