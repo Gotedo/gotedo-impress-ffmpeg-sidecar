@@ -4,15 +4,7 @@ vars:
   # Detect host OS and ARCH if not explicitly passed
   OS: '{{.OS | default OS}}'
   ARCH: '{{.ARCH | default ARCH}}'
-
-  # Dynamically calculate the absolute path of the directory containing THIS Taskfile.
-  # This resolves flawlessly whether called directly or via "wails3 task" from the parent directory.
-  CURRENT_DIR:
-    sh: pwd
-    
-  # Anchor directly to the monorepo root directory using Task's built-in .ROOT_DIR
-  FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .ROOT_DIR "/libs/ffmpeg") | clean}}'
-  FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .OS "/" .ARCH) | clean}}'
+  DEFAULT_FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
 
 tasks:
   apt-cache:
@@ -126,49 +118,77 @@ tasks:
   # Base shared command
   build_base:
     internal: true
+    dir: '{{.TASKFILE_DIR}}' # Force compilation directory to always be here
     cmds:
-      - echo "Building sidecar for {{.GOOS}}/{{.GOARCH}}..."
+      - echo "Building sidecar for {{.GOOS}}/{{.GOARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}..."
       - >
         CGO_ENABLED=1 
         CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" 
         CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" 
         GOOS={{.GOOS}} 
         GOARCH={{.GOARCH}} 
-        go build -o "{{.TASKFILE_DIR}}/bin/sidecar_{{.GOOS}}_{{.GOARCH}}" "{{.TASKFILE_DIR}}/main.go"
+        go build -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}/main.go"
+      - echo "Built sidecar to '{{.OUTFILE}}'"
+    vars:
+      DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
+      # Safely fall back to default output directory if OUT_DIR is empty or unresolved
+      OUT_DIR: '{{if .OUT_DIR}}{{.OUT_DIR}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
+      GOOS: '{{.GOOS}}'
+      GOARCH: '{{.GOARCH}}'
+      LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
+      FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
+      # Match the dynamic build directory to the target platform, not the host machine
+      FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
+      OUTFILE: '{{.OUT_DIR}}/sidecar_{{.GOOS}}_{{.GOARCH}}{{if eq .GOOS "windows"}}.exe{{end}}'
 
   # Native Platform Tasks
   build:native:darwin:
     desc: "Builds FFmpeg sidecar for macOS"
     vars:
+      OUT_DIR: '{{.OUT_DIR}}'
       GOOS: darwin
-      GOARCH: '{{.GOARCH}}'
+      GOARCH: '{{.GOARCH | default "arm64"}}'
       # macOS requires specific frameworks for audio/video toolbox
       LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox"
     cmds:
       - task: build_base
-        vars: { GOOS: "{{.GOOS}}", GOARCH: "{{.GOARCH}}", LDFLAGS_EXTRA: "{{.LDFLAGS_EXTRA}}" }
+        vars:
+          GOOS: '{{.GOOS}}'
+          GOARCH: '{{.GOARCH}}'
+          LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
+          OUT_DIR: '{{.OUT_DIR}}'
 
   build:native:windows:
     desc: "Builds FFmpeg sidecar for Windows"
     vars:
       GOOS: windows
-      GOARCH: '{{.GOARCH}}'
+      OUT_DIR: '{{.OUT_DIR}}'
+      GOARCH: '{{.GOARCH | default "amd64"}}'
       # Windows requires Winsock and threading libraries
       LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
     cmds:
       - task: build_base
-        vars: { GOOS: "{{.GOOS}}", GOARCH: "{{.GOARCH}}", LDFLAGS_EXTRA: "{{.LDFLAGS_EXTRA}}" }
+        vars:
+          GOOS: '{{.GOOS}}'
+          GOARCH: '{{.GOARCH}}'
+          LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
+          OUT_DIR: '{{.OUT_DIR}}'
 
   build:native:linux:
     desc: "Builds FFmpeg sidecar for Linux"
     vars:
+      OUT_DIR: '{{.OUT_DIR}}'
       GOOS: linux
-      GOARCH: '{{.GOARCH}}'
+      GOARCH: '{{.GOARCH | default "amd64"}}'
       # Linux requires standard pthread and math libraries for static linking
       LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -lm -lpthread -ldl"
     cmds:
       - task: build_base
-        vars: { GOOS: "{{.GOOS}}", GOARCH: "{{.GOARCH}}", LDFLAGS_EXTRA: "{{.LDFLAGS_EXTRA}}" }
+        vars:
+          GOOS: '{{.GOOS}}'
+          GOARCH: '{{.GOARCH}}'
+          LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
+          OUT_DIR: '{{.OUT_DIR}}'
 
   # The run task now maps dynamically based on passed arguments
   run:
@@ -180,6 +200,24 @@ tasks:
     deps:
       # This dynamically calls the correct build task
       - task: "build:native:{{.TARGET_OS}}"
-        vars: { GOOS: "{{.TARGET_OS}}", GOARCH: "{{.TARGET_ARCH}}" }
+        vars: 
+          GOOS: '{{.TARGET_OS}}'
+          GOARCH: '{{.TARGET_ARCH}}'
     cmds:
       - "{{.TASKFILE_DIR}}/bin/sidecar_{{.TARGET_OS}}_{{.TARGET_ARCH}}"
+
+  # The build entrypoint mapping dynamically based on passed arguments
+  build:
+    desc: "Builds the sidecar for a specific platform (e.g., task build -- OS=linux ARCH=amd64)"
+    vars:
+      TARGET_OS: '{{.OS | default "darwin"}}'
+      TARGET_ARCH: '{{.ARCH | default "arm64"}}'
+      DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
+      # If OUT_DIR is passed, evaluate it absolute-style from the repo root; otherwise, use local bin
+      OUT_DIR: '{{if .OUT_DIR}}{{print .ROOT_DIR "/" .OUT_DIR | clean}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
+    cmds:
+      - task: "build:native:{{.TARGET_OS}}"
+        vars: 
+          GOOS: '{{.TARGET_OS}}'
+          GOARCH: '{{.TARGET_ARCH}}'
+          OUT_DIR: '{{.OUT_DIR}}'
