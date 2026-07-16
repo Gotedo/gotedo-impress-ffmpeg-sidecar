@@ -1,5 +1,19 @@
 version: '3'
 
+vars:
+  # Detect host OS and ARCH if not explicitly passed
+  OS: '{{.OS | default OS}}'
+  ARCH: '{{.ARCH | default ARCH}}'
+
+  # Dynamically calculate the absolute path of the directory containing THIS Taskfile.
+  # This resolves flawlessly whether called directly or via "wails3 task" from the parent directory.
+  CURRENT_DIR:
+    sh: pwd
+    
+  # Anchor directly to the monorepo root directory using Task's built-in .ROOT_DIR
+  FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .ROOT_DIR "/libs/ffmpeg") | clean}}'
+  FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .OS "/" .ARCH) | clean}}'
+
 tasks:
   apt-cache:
     desc: Ensure the apt-cache-proxy container is running
@@ -108,3 +122,26 @@ tasks:
       DEFAULT_OUT_DIR: '{{$.TASKFILE_DIR}}/dist'
       OUT_DIR: '{{.OUT_DIR | default .DEFAULT_OUT_DIR }}'
       MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET | default "10.15"}}'
+
+  build:
+    desc: "Builds the FFmpeg sidecar using the configured FFmpeg source directory."
+    cmds:
+      - echo "Building sidecar for {{.OS}}/{{.ARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}"
+      - >
+        CGO_ENABLED=1 
+        CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" 
+        CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib -lavformat -lavcodec -lavutil" 
+        go build -o "{{.TASKFILE_DIR}}/bin/sidecar_{{.OS}}_{{.ARCH}}" "{{.TASKFILE_DIR}}/main.go"
+    env:
+      # For macOS (.dylib) and Linux (.so), we need to ensure the runtime linker can find the libraries when executing locally.
+      # This sets the rpath in the binary so it looks in the specified lib folder at runtime.
+      CGO_LDFLAGS: '-Wl,-rpath,{{.FFMPEG_SRC_DIR}}/lib'
+      GOOS: '{{.OS}}'
+      GOARCH: '{{.ARCH}}'
+
+  run:
+    desc: "Builds and runs the sidecar locally."
+    deps:
+      - task: build
+    cmds:
+      - "{{.TASKFILE_DIR}}/bin/sidecar_{{.OS}}_{{.ARCH}}"
