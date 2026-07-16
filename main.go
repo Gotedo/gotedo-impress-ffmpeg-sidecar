@@ -1,30 +1,19 @@
 package main
 
 /*
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/avutil.h>
-#include <miniaudio.h>
+#include "decoder.h"
 */
 import "C"
 import (
-	"fmt"
-	"log"
+	"unsafe"
 )
 
 func main() {
-	fmt.Println("Gotedo FFmpeg Sidecar with Miniaudio Support")
+	var ctx C.DemuxDecContext
+	path := C.CString("file.mkv")
+	defer C.free(unsafe.Pointer(path))
 
-	codecVer := C.avcodec_version()
-	formatVer := C.avformat_version()
-	utilVer := C.avutil_version()
-
-	log.Printf("libavcodec version: %d", codecVer)
-	log.Printf("libavformat version: %d", formatVer)
-	log.Printf("libavutil version:  %d", utilVer)
-
-	configStr := C.GoString(C.avcodec_configuration())
-	fmt.Printf("\nFFmpeg Build Configuration:\n%s\n", configStr)
-
-	fmt.Println("\nSuccess: FFmpeg statically linked into a single binary!")
+	// We cleanly invoke our C function
+	_ = C.open_input_and_decoders(&ctx, path)
+	C.free_demux_dec_context(&ctx)
 }

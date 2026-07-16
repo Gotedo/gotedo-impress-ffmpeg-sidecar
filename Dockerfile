@@ -1643,10 +1643,15 @@ if [[ "$OS" == "linux" && "$ARCH" == "$HOST_ARCH" ]]; then
 # CASE B: Windows cross-test via Wine (utilizing the Wine packages in the Dockerfile)
 elif [[ "$OS" == "windows" ]]; then
     echo ">>> Running Windows test via Wine compatibility layer..."
-    # Choose appropriate wine runner based on the binary target architecture
+    
     WINE_CMD="wine"
     if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
-        WINE_CMD="wine64"
+        # Check standard path, otherwise fall back to full multiarch path
+        if command -v wine64 &> /dev/null; then
+            WINE_CMD="wine64"
+        elif [ -f "/usr/lib/wine/wine64" ]; then
+            WINE_CMD="/usr/lib/wine/wine64"
+        fi
     fi
     
     if WINEDEBUG=-all "$WINE_CMD" "$TEST_BINARY"; then
