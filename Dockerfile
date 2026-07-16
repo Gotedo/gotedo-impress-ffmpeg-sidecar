@@ -3,70 +3,70 @@
 FROM rust:1.93.1-slim-bookworm
 
 RUN echo 'Acquire::HTTP::Proxy "http://host.docker.internal:3142";' >> /etc/apt/apt.conf.d/01proxy \
-    && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
+  && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
 
 # Install prerequisites to fetch external secure repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget ca-certificates gnupg \
-    && rm -rf /var/lib/apt/lists/*
+  wget ca-certificates gnupg \
+  && rm -rf /var/lib/apt/lists/*
 
 # Add the official LLVM 20 repository key and source lists
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
-    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
-    echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
+  echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
+  echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
 
 # -----------------------------------------------------------------------------
 # Base packages + FFmpeg-specific build tools
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    # Cross compilers & toolchains (Linux & Windows)
-    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-    gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-    mingw-w64 \
-    # Native Base Utilities
-    git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
-    bison flex gperf gettext libglib2.0-dev file binfmt-support \
-    # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
-    clang-20 \
-    lld-20 \
-    llvm-20 \
-    llvm-20-linker-tools \
-    llvm-20-dev \
-    libclang-rt-20-dev \
-    # Windows Execution Compatibility
-    wine wine64 libwine \
-    # FFmpeg-specific Assemblers & Build Tools
-    nasm yasm ccache autoconf automake libtool texinfo \
-    libfreetype6-dev libharfbuzz-dev \
-    # Debugging Tools
-    nano vim \
-    && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y --no-install-recommends \
+  # Cross compilers & toolchains (Linux & Windows)
+  gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+  gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+  mingw-w64 \
+  # Native Base Utilities
+  git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
+  bison flex gperf gettext libglib2.0-dev file binfmt-support \
+  # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
+  clang-20 \
+  lld-20 \
+  llvm-20 \
+  llvm-20-linker-tools \
+  llvm-20-dev \
+  libclang-rt-20-dev \
+  # Windows Execution Compatibility
+  wine wine64 libwine \
+  # FFmpeg-specific Assemblers & Build Tools
+  nasm yasm ccache autoconf automake libtool texinfo \
+  libfreetype6-dev libharfbuzz-dev \
+  # Debugging Tools
+  nano vim \
+  && rm -rf /var/lib/apt/lists/*
 
 # Generate Global LLVM 20 System Symlinks (Overriding default LLVM 14)
 RUN ln -sf /usr/bin/clang-20 /usr/bin/clang && \
-    ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
-    ln -sf /usr/bin/lld-20 /usr/bin/lld && \
-    ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
-    ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
-    ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
-    ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
-    ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
-    ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
+  ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
+  ln -sf /usr/bin/lld-20 /usr/bin/lld && \
+  ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
+  ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
+  ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
+  ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
+  ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
+  ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
 
 # Install Meson (needed for dav1d, harfbuzz, etc.)
 RUN pip3 install meson --break-system-packages
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
 
 # LLVM tool symlinks
 RUN ln -s /usr/bin/llvm-install-name-tool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-install-name-tool && \
-    ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
-    ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
+  ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
+  ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
 
 # -----------------------------------------------------------------------------
 # Cache & Install LLVM-Mingw (Windows Toolchain) - identical caching pattern
@@ -120,9 +120,9 @@ EOF
 
 # Install patchelf for Linux relocatable SDK patching
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y patchelf \
-    && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y patchelf \
+  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Cache & Build Apple compiler-rt (builtins) for macOS cross-compilation
@@ -289,7 +289,7 @@ EOF
 
 # Install gas-preprocessor for macOS assembly optimization parsing
 RUN curl -L https://github.com/FFmpeg/gas-preprocessor/raw/master/gas-preprocessor.pl -o /usr/local/bin/gas-preprocessor.pl && \
-    chmod +x /usr/local/bin/gas-preprocessor.pl
+  chmod +x /usr/local/bin/gas-preprocessor.pl
 
 # -----------------------------------------------------------------------------
 # The main builder script
@@ -1438,7 +1438,7 @@ elif [[ "$OS" == "windows" ]]; then
     FFMPEG_LINKER="${CC}"
 else
     # Linux defaults
-    FFMPEG_LINKER="${LD_PATH:-clang}"
+    FFMPEG_LINKER="${CC}"
 fi
 
 # DLLTOOL PATH MAPPER (Only for Windows builds)
@@ -1466,7 +1466,7 @@ fi
     --arch="${FFMPEG_ARCH}" \
     --cc="${CC}" \
     --cxx="${CXX}" \
-    --as="${CC} -I${sysroot}/include -fPIC ${FFMPEG_CFLAGS}" \
+    --as="${CC} -c -I${sysroot}/include -fPIC ${FFMPEG_CFLAGS}" \
     --ld="${FFMPEG_LINKER}" \
     --strip="${STRIP}" \
     --ar="${AR}" \
@@ -1559,9 +1559,9 @@ if [ -z "$STATIC_DEP_LIBS" ]; then
     STATIC_DEP_LIBS="-lavformat -lavcodec -lswscale -lswresample -lavutil ${PLATFORM_LIBS} -lz -lm -lpthread"
 fi
 
-# Set the static compiling flag where supported (Windows/Linux)
+# Only use static flag for Windows (where it is required and supported cleanly by llvm-mingw)
 STATIC_LINK_FLAG=""
-if [[ "$OS" != "darwin" ]]; then
+if [[ "$OS" == "windows" ]]; then
     STATIC_LINK_FLAG="-static"
 fi
 
