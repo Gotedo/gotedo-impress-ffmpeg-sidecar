@@ -232,6 +232,8 @@ tasks:
       TARGET_TASK: '{{if and (eq .TARGET_OS OS) (eq .TARGET_ARCH ARCH)}}build:native:{{.TARGET_OS}}{{else}}build:docker{{end}}'
       DEFAULT_FFMPEG_LIB_DIR: '{{$.TASKFILE_DIR}}/dist'
       FFMPEG_LIB_DIR: '{{if .FFMPEG_LIB_DIR}}{{print .ROOT_DIR "/" .FFMPEG_LIB_DIR | clean}}{{else}}{{.DEFAULT_FFMPEG_LIB_DIR}}{{end}}'
+      FFMPEG_LIB_ARCH_DIR: '{{.FFMPEG_LIB_DIR}}/{{.TARGET_OS}}/{{.TARGET_ARCH}}'
+      MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
     cmds:
       # Natively call the resolved task using Task's internal pipeline
       - task: "{{.TARGET_TASK}}"
@@ -243,6 +245,11 @@ tasks:
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
           FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+          MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
+    preconditions:
+      # Cross-platform directory & contents check (works on macOS, Linux, and Windows PowerShell/cmd)
+      - sh: '{{if eq OS "windows"}}powershell -Command "if (!(Test-Path ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'')) { exit 1 }; if ((Get-ChildItem ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'').Count -eq 0) { exit 1 }"{{else}}[ -d "{{.FFMPEG_LIB_ARCH_DIR}}/lib" ] && [ "$(ls -A "{{.FFMPEG_LIB_ARCH_DIR}}/lib" 2>/dev/null)" ]{{end}}'
+        msg: "FFmpeg static dependencies are missing or empty at '{{.FFMPEG_LIB_ARCH_DIR}}'. Please run 'task build:ffmpeg' first."
 
   build:docker:
     desc: "Builds the sidecar via Docker cross-compilation"
@@ -256,6 +263,7 @@ tasks:
       OUT_DIR: '{{.OUT_DIR}}'
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+      MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
     cmds:
       - echo ">> Routing to Docker cross-compiler for {{.TARGET_OS}}/{{.TARGET_ARCH}}..."
       - cmd: mkdir -p "{{.OUT_DIR}}"
