@@ -130,7 +130,6 @@ tasks:
       - echo "Built sidecar to '{{.OUTFILE}}'"
     vars:
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
-      OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       # Safely fall back to default output directory if OUT_DIR is empty or unresolved
       OUT_DIR: '{{if .OUT_DIR}}{{.OUT_DIR}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
       GOOS: '{{.GOOS}}'
@@ -139,7 +138,11 @@ tasks:
       FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
       # Match the dynamic build directory to the target platform, not the host machine
       FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
-      OUTFILE: '{{.OUT_DIR}}/{{.OUT_FILE_NAME}}{{if eq .GOOS "windows"}}.exe{{end}}'
+
+      # Safe filename resolver with defensive extension appending
+      DEFAULT_FILE_NAME: 'sidecar_{{.GOOS}}_{{.GOARCH}}'
+      RESOLVED_FILE_NAME: '{{.OUT_FILE_NAME | default .DEFAULT_FILE_NAME}}'
+      OUTFILE: '{{.OUT_DIR}}/{{.RESOLVED_FILE_NAME}}{{if and (eq .GOOS "windows") (not (hasSuffix ".exe" .RESOLVED_FILE_NAME))}}.exe{{end}}'
 
   # Native Platform Tasks
   build:native:darwin:
