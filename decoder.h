@@ -41,6 +41,10 @@ typedef struct AudioPlaybackContext
   int sample_rate;
   int channels;
   volatile int is_active;
+
+  // Thread-Safe Latency Management Variables
+  volatile int target_delay_ms;       // Desired delay targeted by Go feedback loop
+  volatile int current_delay_samples; // Cumulative live sample offset balance
 } AudioPlaybackContext;
 
 // Function prototypes
@@ -55,5 +59,7 @@ void free_fmp4_muxer(AVFormatContext *out_fmt_ctx);
 int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id);
 int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_data, int frame_count);
 void stop_audio_playback(AudioPlaybackContext *play_ctx);
+
+void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
 
 #endif // DECODER_H

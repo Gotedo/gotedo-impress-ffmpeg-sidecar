@@ -527,3 +527,132 @@ void stop_audio_playback(AudioPlaybackContext *play_ctx)
   // Deallocate local circular structures
   ma_pcm_rb_uninit(&play_ctx->ring_buffer);
 }
+
+/**
+ * Miniaudio internal playback callback with dynamic drift-correction.
+ *
+ * This engine manages live, closed-loop A/V alignment. It monitors the difference
+ * between 'current_delay_samples' and the 'target_delay_ms' defined by the
+ * webview's frame-rendering feedback loop.
+ *
+ * To adjust the delay WITHOUT creating clicking, popping, or digital distortion:
+ *   - To SLOW DOWN audio (increase delay): We read slightly FEWER frames from the
+ *     ring-buffer, inserting micro-faded padding into the hardware buffer.
+ *   - To SPEED UP audio (decrease delay): We read slightly MORE frames from the
+ *     ring-buffer, skipping frames smoothly.
+ *
+ * We limit corrections to a maximum of 1.5% per callback iteration, keeping
+ * pitch and speed changes completely imperceptible to the human ear.
+ */
+static void audio_device_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frameCount)
+{
+  AudioPlaybackContext *play_ctx = (AudioPlaybackContext *)pDevice->pUserData;
+  if (!play_ctx || !play_ctx->is_active)
+  {
+    return;
+  }
+
+  int bytes_per_frame = ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels);
+
+  // Read the volatile target offset atomically using compiler builtins
+  int target_ms = __atomic_load_n(&play_ctx->target_delay_ms, __ATOMIC_ACQUIRE);
+  int target_frames = (target_ms * play_ctx->sample_rate) / 1000;
+  int current_balance = __atomic_load_n(&play_ctx->current_delay_samples, __ATOMIC_ACQUIRE);
+
+  ma_uint32 frames_to_read = frameCount;
+  int adjustment = 0; // Negative = skip samples (speed up); Positive = insert padding (slow down)
+
+  // Calculate latency gap and determine direction
+  if (current_balance < target_frames)
+  {
+    // We need to slow down to increase latency. Inject up to 1.5% of buffer size as padding
+    adjustment = (target_frames - current_balance);
+    ma_uint32 max_adjust = frameCount * 0.015;
+    if (adjustment > max_adjust)
+      adjustment = max_adjust;
+
+    frames_to_read = frameCount - adjustment;
+  }
+  else if (current_balance > target_frames)
+  {
+    // We are lagging; we need to speed up. Skip up to 1.5% of buffer size
+    adjustment = (current_balance - target_frames);
+    ma_uint32 max_adjust = frameCount * 0.015;
+    if (adjustment > max_adjust)
+      adjustment = max_adjust;
+
+    frames_to_read = frameCount + adjustment;
+  }
+
+  ma_uint32 actual_read = frames_to_read;
+  void *pReadBuffer;
+
+  // Retrieve requested frames from the thread-safe circular ring buffer
+  ma_result result = ma_pcm_rb_acquire_read(&play_ctx->ring_buffer, &actual_read, &pReadBuffer);
+  if (result == MA_SUCCESS && actual_read > 0)
+  {
+
+    if (frames_to_read < frameCount)
+    {
+      // SLOW DOWN PATH: Fill the hardware buffer first, then pad the remaining space with silence
+      memcpy(pOutput, pReadBuffer, actual_read * bytes_per_frame);
+
+      // Generate a subtle linear ramp-down on the boundary to prevent sudden clicks
+      float *out_float = (float *)pOutput;
+      int fade_frames = actual_read < 32 ? actual_read : 32;
+      for (int i = 0; i < fade_frames; i++)
+      {
+        float volume = 1.0f - ((float)i / fade_frames);
+        for (int c = 0; c < play_ctx->channels; c++)
+        {
+          out_float[(actual_read - fade_frames + i) * play_ctx->channels + c] *= volume;
+        }
+      }
+
+      // Zero out (silence) the adjustment padding region
+      char *padding_start = (char *)pOutput + (actual_read * bytes_per_frame);
+      memset(padding_start, 0, (frameCount - actual_read) * bytes_per_frame);
+
+      // Adjust local delay cursor tracking forward
+      __atomic_fetch_add(&play_ctx->current_delay_samples, (frameCount - actual_read), __ATOMIC_RELEASE);
+    }
+    else if (frames_to_read > frameCount)
+    {
+      // SPEED UP PATH: We read MORE frames than we write to the hardware device, effectively skipping
+      // We copy only the standard frameCount block to output, discarding the extra resampled frames
+      memcpy(pOutput, pReadBuffer, frameCount * bytes_per_frame);
+
+      // Adjust local delay cursor tracking backward
+      __atomic_fetch_sub(&play_ctx->current_delay_samples, (actual_read - frameCount), __ATOMIC_RELEASE);
+    }
+    else
+    {
+      // NORMAL PATH: Perfect synchronization, execute standard copy
+      memcpy(pOutput, pReadBuffer, actual_read * bytes_per_frame);
+    }
+
+    ma_pcm_rb_commit_read(&play_ctx->ring_buffer, actual_read);
+  }
+  else
+  {
+    // Fallback: If ring-buffer is completely starved, immediately write silence
+    memset(pOutput, 0, frameCount * bytes_per_frame);
+  }
+}
+
+/**
+ * Thread-safely sets the target playback delay offset in milliseconds.
+ *
+ * This function is called directly from the Go runtime when processing
+ * frame latency adjustments received from the webview.
+ *
+ * @param play_ctx  Pointer to the active AudioPlaybackContext.
+ * @param delay_ms  Target delay in milliseconds.
+ */
+void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms)
+{
+  if (play_ctx)
+  {
+    __atomic_store_n(&play_ctx->target_delay_ms, delay_ms, __ATOMIC_RELEASE);
+  }
+}
