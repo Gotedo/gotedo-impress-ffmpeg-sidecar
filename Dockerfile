@@ -1561,26 +1561,66 @@ fi
 
 # Only use static flag for Windows (where it is required and supported cleanly by llvm-mingw)
 STATIC_LINK_FLAG=""
+EXTRA_VERIFY_LIBS=""
+TEST_BINARY="/tmp/ffmpeg_version_test"
+
 if [[ "$OS" == "windows" ]]; then
     STATIC_LINK_FLAG="-static"
+    TEST_BINARY="/tmp/ffmpeg_version_test.exe"
+elif [[ "$OS" == "darwin" ]]; then
+    # We must explicitly link the Darwin system frameworks and compiler-rt builtins
+    # so the compiler driver can resolve standard symbols during static linking.
+    EXTRA_VERIFY_LIBS="${PLATFORM_LIBS}"
 fi
 
 # Compile the test using static flag and the fully expanded static dependencies
+echo ">>> Compiling static verification binary for ${OS}-${ARCH}..."
 $CC $CFLAGS $STATIC_LINK_FLAG -o /tmp/ffmpeg_version_test \
     /tmp/ffmpeg_version_test.c \
     -I"${sysroot}/include" \
     -L"${sysroot}/lib" \
-    $STATIC_DEP_LIBS
+    $STATIC_DEP_LIBS \
+    $EXTRA_VERIFY_LIBS
 
-# Run it (Only if we are not cross-compiling to a different architecture)
-if [[ "$OS" == "linux" && "$ARCH" == "amd64" ]]; then
-    if /tmp/ffmpeg_version_test; then
-        echo ">>> SUCCESS: Static FFmpeg libraries are correctly built, fully self-contained, and linkable!"
-    else
-        echo ">>> WARNING: Static verification run failed."
+# Dynamic Execution Engine
+HOST_ARCH=$(uname -m)
+[ "$HOST_ARCH" = "aarch64" ] && HOST_ARCH="arm64"
+[ "$HOST_ARCH" = "x86_64" ] && HOST_ARCH="amd64"
+
+EXECUTION_SUCCESS=false
+
+# CASE A: Native Linux execution (AMD64 on Intel host, or ARM64 on Apple Silicon Host)
+if [[ "$OS" == "linux" && "$ARCH" == "$HOST_ARCH" ]]; then
+    echo ">>> Running native Linux test..."
+    if "$TEST_BINARY"; then
+        EXECUTION_SUCCESS=true
     fi
+
+# CASE B: Windows cross-test via Wine (utilizing the Wine packages in the Dockerfile)
+elif [[ "$OS" == "windows" ]]; then
+    echo ">>> Running Windows test via Wine compatibility layer..."
+    # Choose appropriate wine runner based on the binary target architecture
+    WINE_CMD="wine"
+    if [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]]; then
+        WINE_CMD="wine64"
+    fi
+    
+    if WINEDEBUG=-all "$WINE_CMD" "$TEST_BINARY"; then
+        EXECUTION_SUCCESS=true
+    fi
+
+# CASE C: Darwin cross-target (Mach-O executable is non-runnable on Linux kernel)
 else
-    echo ">>> Static compilation verification successful (Skipping execution check because we are cross-compiling to ${OS}-${ARCH})."
+    echo ">>> Static compilation verification successful!"
+    echo ">>> (Skipping execution check: cannot run Mach-O Darwin binaries on a Linux container kernel)."
+    EXECUTION_SUCCESS=true
+fi
+
+if [ "$EXECUTION_SUCCESS" = false ]; then
+    echo "========================================================="
+    echo " ERROR: Static verification execution failed for ${OS}-${ARCH}!"
+    echo "========================================================="
+    exit 1
 fi
 
 # Also show pkg-config results for key libraries (useful for your CGO build)
