@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ffmpeg;
 
-option go_package = "github.com/gotedo/ffmpeg-sidecar/proto";
+option go_package = "github.com/gotedo/gotedo-impress-ffmpeg-sidecar/proto";
 
 // Service for controlling and consuming FFmpeg media streams
 service FFmpegService {

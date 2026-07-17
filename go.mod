@@ -1,4 +1,4 @@
-module github.com/gotedo/ffmpeg-sidecar
+module github.com/gotedo/gotedo-impress-ffmpeg-sidecar
 
 go 1.25.4
 

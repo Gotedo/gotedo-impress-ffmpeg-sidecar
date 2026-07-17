@@ -8,12 +8,24 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/cgo"
+	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/gotedo/gotedo-impress-ffmpeg-sidecar/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+type ffmpegServer struct {
+	proto.UnimplementedFFmpegServiceServer
+}
 
 // Global Go Channel to collect stream chunks
 var testChunkChan = make(chan []byte, 100)
@@ -32,6 +44,7 @@ func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 }
 
 func main() {
+	socketPath := flag.String("socket", "", "Path to the Unix Domain Socket for IPC")
 	testMode := flag.Bool("test", false, "Run application in pipeline verification test mode")
 	videoPath := flag.String("video", "", "Absolute path to the video file")
 	flag.Parse()
@@ -41,18 +54,36 @@ func main() {
 		return
 	}
 
-	fmt.Println("Gotedo FFmpeg Sidecar running in production mode...")
+	if *socketPath == "" {
+		log.Fatal("Error: Sidecar must be started with a valid -socket path.")
+	}
 
-	// Allocate context directly in C-memory to satisfy Cgo pointer rules
-	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
-	defer C.free(unsafe.Pointer(decCtx))
+	// Clean up stale socket files if they exist from previous unexpected crashes
+	_ = os.Remove(*socketPath)
 
-	path := C.CString("file.mkv")
-	defer C.free(unsafe.Pointer(path))
+	listener, err := net.Listen("unix", *socketPath)
+	if err != nil {
+		log.Fatalf("Failed to bind Unix Domain Socket: %v", err)
+	}
 
-	// We cleanly invoke our C function (decCtx is already a pointer now)
-	_ = C.open_input_and_decoders(decCtx, path)
-	C.free_demux_dec_context(decCtx)
+	grpcServer := grpc.NewServer()
+	proto.RegisterFFmpegServiceServer(grpcServer, &ffmpegServer{})
+
+	// Handle graceful termination signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		log.Println("Stopping gRPC sidecar server safely...")
+		grpcServer.GracefulStop()
+		_ = os.Remove(*socketPath)
+		os.Exit(0)
+	}()
+
+	log.Printf("FFmpeg Go-gRPC Sidecar listening on UDS: %s", *socketPath)
+	if err := grpcServer.Serve(listener); err != nil {
+		log.Fatalf("gRPC server run failure: %v", err)
+	}
 }
 
 func runPipelineTest(path string) {
@@ -149,4 +180,78 @@ func runPipelineTest(path string) {
 	C.free_demux_dec_context(decCtx)
 	log.Println("[TEST] SUCCESS: All context structures freed cleanly. No leaks found!")
 	log.Println("[TEST] PIPELINE RUN CONCLUDED SUCCESSFULLY!")
+}
+
+// StartStream implements the gRPC streaming endpoint
+func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpegService_StartStreamServer) error {
+	log.Printf("[SIDECAR] Received StartStream request for file: %s", req.GetFilePath())
+
+	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
+		return status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
+	}
+
+	// Allocate context structures directly in C memory to avoid unpinned pointer GC checks
+	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
+	defer C.free(unsafe.Pointer(decCtx))
+
+	playCtx := (*C.AudioPlaybackContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.AudioPlaybackContext{}))))
+	defer C.free(unsafe.Pointer(playCtx))
+
+	cPath := C.CString(req.GetFilePath())
+	defer C.free(unsafe.Pointer(cPath))
+
+	// Step 1: Open input contexts
+	if ret := C.open_input_and_decoders(decCtx, cPath); ret < 0 {
+		return status.Errorf(codes.Internal, "FFmpeg decoder initialization failed with code: %d", ret)
+	}
+
+	// Step 2: Initialize system soundcard bindings
+	// Note: Pass hardware device routing parameters if requested by req.GetAudioDeviceId()
+	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil); ret < 0 {
+		C.free_demux_dec_context(decCtx)
+		return status.Errorf(codes.Internal, "Miniaudio hardware initialization failed with code: %d", ret)
+	}
+
+	// Establish Cgo lifecycle handles
+	handle := cgo.NewHandle(testChunkChan)
+	defer handle.Delete()
+
+	// Spin up the C processing pipeline thread
+	pipelineErrChan := make(chan int, 1)
+	go func() {
+		ret := C.run_test_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
+		pipelineErrChan <- int(ret)
+	}()
+
+	// Loop and push fMP4 packets across the gRPC network boundary as they arrive from C
+	for {
+		select {
+		case <-stream.Context().Done():
+			log.Println("[SIDECAR] Client closed connection stream.")
+			C.stop_audio_playback(playCtx)
+			C.free_demux_dec_context(decCtx)
+			return stream.Context().Err()
+
+		case errCode := <-pipelineErrChan:
+			log.Printf("[SIDECAR] C-pipeline demuxing complete. Exit code: %d", errCode)
+			C.stop_audio_playback(playCtx)
+			C.free_demux_dec_context(decCtx)
+			if errCode < 0 {
+				return status.Errorf(codes.Internal, "C-pipeline processing failed with error code: %d", errCode)
+			}
+			return nil
+
+		case chunk := <-testChunkChan:
+			// Send binary payload packet over the network
+			err := stream.Send(&proto.StreamResponse{
+				Fmp4Chunk: chunk,
+			})
+			if err != nil {
+				log.Printf("[SIDECAR ERROR] Failed to send gRPC response packet: %v", err)
+				C.stop_audio_playback(playCtx)
+				C.free_demux_dec_context(decCtx)
+				return err
+			}
+		}
+	}
 }

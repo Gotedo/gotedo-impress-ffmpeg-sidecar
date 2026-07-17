@@ -520,7 +520,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
 	"StopStream\x12\x1c.ffmpeg.StreamControlRequest\x1a\x1d.ffmpeg.StreamControlResponse\x12@\n" +
 	"\rAdjustLatency\x12\x16.ffmpeg.LatencyRequest\x1a\x17.ffmpeg.LatencyResponse\x12@\n" +
-	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponseB(Z&github.com/gotedo/ffmpeg-sidecar/protob\x06proto3"
+	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
