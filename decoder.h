@@ -30,8 +30,8 @@ typedef struct DemuxDecContext
 
 typedef struct TranscodeContext
 {
-  void *go_user_data;
-  void (*go_callback)(uint8_t *buf, int buf_size, void *user_data);
+  uintptr_t go_user_token;
+  void (*go_callback)(uint8_t *buf, int buf_size, uintptr_t user_token);
 } TranscodeContext;
 
 // Native Playback Context
@@ -64,6 +64,6 @@ void stop_audio_playback(AudioPlaybackContext *play_ctx);
 void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
 
 // Test Pipeline Declaration
-int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, void *go_chan_ptr);
+int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
 
 #endif // DECODER_H

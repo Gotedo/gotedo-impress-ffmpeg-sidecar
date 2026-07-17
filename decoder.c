@@ -211,7 +211,7 @@ void free_demux_dec_context(DemuxDecContext *ctx)
  * This function is triggered by the FFmpeg muxer whenever a chunk or fragment
  * of the fragmented MP4 (fMP4) stream is finalized in memory. It immediately
  * passes the pointer and size of the generated binary buffer back to the Go
- * runtime using the registered Go callback function and user context data pointer.
+ * runtime using the registered Go callback function and integer user token.
  *
  * @param opaque    A pointer to the user-defined TranscodeContext struct.
  * @param buf       The raw binary buffer containing fMP4 data.
@@ -224,7 +224,8 @@ static int write_to_memory_cb(void *opaque, const uint8_t *buf, int buf_size)
   TranscodeContext *ctx = (TranscodeContext *)opaque;
   if (ctx && ctx->go_callback)
   {
-    ctx->go_callback((uint8_t *)buf, buf_size, ctx->go_user_data);
+    // Pass the integer token back to Go
+    ctx->go_callback((uint8_t *)buf, buf_size, ctx->go_user_token);
   }
   return buf_size;
 }
@@ -629,11 +630,11 @@ void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms)
  *
  * @param dec_ctx      Pointer to the active and opened DemuxDecContext.
  * @param play_ctx     Pointer to the running AudioPlaybackContext.
- * @param go_chan_ptr  Pointer to the Go-level channel wrapper to route bytes.
+ * @param go_token     Integer token wrapping the Go-level channel to route bytes.
  *
  * @return 0 on success, or a negative integer error code on mapping failure.
  */
-int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, void *go_chan_ptr)
+int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
 {
   int ret;
   TranscodeContext tx_ctx;
@@ -643,8 +644,8 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
   float *resample_buf = NULL;
   int frame_count = 0;
 
-  // Set up the Go callback wrapper context
-  tx_ctx.go_user_data = go_chan_ptr;
+  // Set up the Go callback wrapper context using the integer token
+  tx_ctx.go_user_token = go_token;
   tx_ctx.go_callback = goTestWriteCallback;
 
   // Initialize in-memory custom fMP4 muxer
@@ -652,6 +653,27 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
   if (ret < 0)
   {
     return ret;
+  }
+
+  // ADD THE VIDEO STREAM TO THE OUTPUT MUXER
+  if (dec_ctx->video_stream_idx >= 0)
+  {
+    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+    if (!out_stream)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+
+    // Copy the exact codec parameters (H.264/H.265, resolution, etc.) to the new stream
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+    if (ret < 0)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return ret;
+    }
+    out_stream->codecpar->codec_tag = 0; // Clear the codec tag so the MP4 muxer assigns a compliant one
   }
 
   // Write initial fMP4 segments to spark the browser initialization sequence
@@ -683,6 +705,16 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
 
     if (pkt->stream_index == dec_ctx->video_stream_idx)
     {
+      // RESCALE TIMESTAMPS AND MAP STREAM INDEX
+      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+      AVStream *out_stream = out_fmt_ctx->streams[0]; // We only mapped 1 stream (video)
+
+      // Rescale presentation/decompression timestamps to the new fMP4 time base
+      av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+
+      // Assign the packet to the 0th index (our single output video stream)
+      pkt->stream_index = 0;
+
       // Write frame to fMP4 output context. This fires write_to_memory_cb internally
       av_interleaved_write_frame(out_fmt_ctx, pkt);
       frame_count++;
@@ -713,6 +745,9 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
     }
     av_packet_unref(pkt);
   }
+
+  // Force flush the muxer to finalize any pending fragments in the queue
+  av_write_trailer(out_fmt_ctx);
 
 cleanup:
   // Safely deallocate all temporary testing allocations
