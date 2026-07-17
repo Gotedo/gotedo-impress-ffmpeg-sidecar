@@ -710,6 +710,17 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
       AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
       AVStream *out_stream = out_fmt_ctx->streams[0]; // We only mapped 1 stream (video)
 
+      // Convert the raw packet timestamp into seconds before updating Go state
+      double calculated_pts = 0.0;
+      if (pkt->pts != AV_NOPTS_VALUE)
+      {
+        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
+      }
+
+      // Update the session context BEFORE the write callback triggers
+      extern void set_session_pts(uintptr_t token, double pts);
+      set_session_pts(tx_ctx.go_user_token, calculated_pts);
+
       // Rescale presentation/decompression timestamps to the new fMP4 time base
       av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
 

@@ -32,6 +32,8 @@ typedef struct DemuxDecContext
 typedef struct TranscodeContext
 {
   uintptr_t go_user_token;
+  // Holds the current frame's PTS context dynamically
+  double current_pts;
   void (*go_callback)(uint8_t *buf, int buf_size, uintptr_t user_token);
 } TranscodeContext;
 

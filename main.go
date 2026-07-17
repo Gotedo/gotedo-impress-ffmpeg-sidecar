@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/cgo"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -28,20 +29,41 @@ type ffmpegServer struct {
 	proto.UnimplementedFFmpegServiceServer
 }
 
-// Global Go Channel to collect stream chunks
-var testChunkChan = make(chan []byte, 100)
+// ChunkPayload bundles the binary fMP4 data with its extraction PTS
+type ChunkPayload struct {
+	Data []byte
+	PTS  float64
+}
+
+// SessionContext tracks the state isolated to a single active playback monitor
+type SessionContext struct {
+	StreamChan chan ChunkPayload
+	CurrentPTS float64
+	Mu         sync.Mutex
+}
 
 //export goTestWriteCallback
 func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	// Reconstruct the Handle directly from the integer token
 	handle := cgo.Handle(userToken)
 
-	// Fetch our original Go channel safely
-	channel := handle.Value().(chan []byte)
+	// Fetch our original Go session context safely
+	session := handle.Value().(*SessionContext)
 
 	// Convert buffer and send
 	data := C.GoBytes(unsafe.Pointer(buf), bufSize)
-	channel <- data
+
+	session.Mu.Lock()
+	pts := session.CurrentPTS
+	session.Mu.Unlock()
+
+	// Push data cleanly into this monitor's private channel array
+	// Stream the chunk alongside the current active time context
+	select {
+	case session.StreamChan <- ChunkPayload{Data: data, PTS: pts}:
+	default:
+		// Drop frame if buffer backs up heavily to prevent core thread locks
+	}
 }
 
 func main() {
@@ -132,8 +154,13 @@ func runPipelineTest(path string) {
 	}
 	log.Println("[TEST] SUCCESS: Miniaudio successfully opened system hardware soundcard!")
 
+	// Instantiate a perfectly isolated, thread-safe session container for this test
+	sessionCtx := &SessionContext{
+		StreamChan: make(chan ChunkPayload, 100),
+	}
+
 	// CREATE A SAFE CGO HANDLE FOR THE CHANNEL
-	handle := cgo.NewHandle(testChunkChan)
+	handle := cgo.NewHandle(sessionCtx)
 	defer handle.Delete() // Ensure we release the handle when the test finishes to avoid leaks
 
 	// Step 3: Spin up the C-processing pipeline loop on a concurrent Go thread
@@ -159,8 +186,8 @@ func runPipelineTest(path string) {
 
 	// Step 4: Stream consumer
 	go func() {
-		for chunk := range testChunkChan {
-			fmt.Printf("[TEST STREAM] Captured %d bytes of browser-ready fMP4 in Go memory!\n", len(chunk))
+		for chunk := range sessionCtx.StreamChan {
+			fmt.Printf("[TEST STREAM] Captured %d bytes of browser-ready fMP4 in Go memory!\n", len(chunk.Data))
 		}
 	}()
 
@@ -183,13 +210,22 @@ func runPipelineTest(path string) {
 	log.Println("[TEST] PIPELINE RUN CONCLUDED SUCCESSFULLY!")
 }
 
-// StartStream implements the gRPC streaming endpoint
+// StartStream implements the gRPC streaming endpoint with isolated multi-monitor support
 func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpegService_StartStreamServer) error {
 	log.Printf("[SIDECAR] Received StartStream request for file: %s", req.GetFilePath())
 
 	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
 	}
+
+	// Instantiate a perfectly isolated, thread-safe session container for this specific stream context
+	sessionCtx := &SessionContext{
+		StreamChan: make(chan ChunkPayload, 100),
+	}
+
+	// Wrap this private instance in a localized runtime Cgo handle
+	handle := cgo.NewHandle(sessionCtx)
+	defer handle.Delete()
 
 	// Allocate context structures directly in C memory to avoid unpinned pointer GC checks
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
@@ -212,10 +248,6 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		C.free_demux_dec_context(decCtx)
 		return status.Errorf(codes.Internal, "Miniaudio hardware initialization failed with code: %d", ret)
 	}
-
-	// Establish Cgo lifecycle handles
-	handle := cgo.NewHandle(testChunkChan)
-	defer handle.Delete()
 
 	// Spin up the C processing pipeline thread
 	pipelineErrChan := make(chan int, 1)
@@ -245,10 +277,11 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 				return status.Errorf(codes.Internal, "C-pipeline processing failed with error code: %d", errCode)
 			}
 
-		case chunk := <-testChunkChan:
+		case chunk := <-sessionCtx.StreamChan: // Read from private channel loop
 			// Send binary payload packet over the network
 			err := stream.Send(&proto.StreamResponse{
-				Fmp4Chunk: chunk,
+				Fmp4Chunk: chunk.Data,
+				Pts:       chunk.PTS,
 			})
 			if err != nil {
 				log.Printf("[SIDECAR ERROR] Failed to send gRPC response packet: %v", err)
@@ -299,4 +332,14 @@ func (s *ffmpegServer) AdjustLatency(ctx context.Context, req *proto.LatencyRequ
 	return &proto.LatencyResponse{
 		Accepted: true,
 	}, nil
+}
+
+//export set_session_pts
+func set_session_pts(userToken C.uintptr_t, pts C.double) {
+	handle := cgo.Handle(userToken)
+	session := handle.Value().(*SessionContext)
+
+	session.Mu.Lock()
+	session.CurrentPTS = float64(pts)
+	session.Mu.Unlock()
 }
