@@ -346,12 +346,13 @@ tasks:
           exit 1
         fi
         protoc \
-          --plugin=protoc-gen-go=./bin/protoc-gen-go{{.EXE_EXT}} \
-          --plugin=protoc-gen-go-grpc=./bin/protoc-gen-go-grpc{{.EXE_EXT}} \
-          --go_out=. --go_opt=paths=source_relative \
-          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-          "./proto/stream.proto"
-      - cmd: go mod tidy
+          --proto_path="{{.TASKFILE_DIR}}" \
+          --plugin=protoc-gen-go="{{.TASKFILE_DIR}}/bin/protoc-gen-go{{.EXE_EXT}}" \
+          --plugin=protoc-gen-go-grpc="{{.TASKFILE_DIR}}/bin/protoc-gen-go-grpc{{.EXE_EXT}}" \
+          --go_out="{{.TASKFILE_DIR}}" --go_opt=paths=source_relative \
+          --go-grpc_out="{{.TASKFILE_DIR}}" --go-grpc_opt=paths=source_relative \
+          "{{.TASKFILE_DIR}}/proto/stream.proto"
+      - cmd: cd "{{.TASKFILE_DIR}}" && go mod tidy
     sources:
       - '{{.TASKFILE_DIR}}/proto/stream.proto'
     generates:
