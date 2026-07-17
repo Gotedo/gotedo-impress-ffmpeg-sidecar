@@ -126,7 +126,13 @@ tasks:
         CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" 
         GOOS={{.GOOS}} 
         GOARCH={{.GOARCH}}
-        go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}/main.go"
+        go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
+      # If compiling on macOS, redirect the libz reference to the native system path
+      - >
+        {{if eq .GOOS "darwin"}}
+        echo "Patching compiled binary dyld paths for macOS..." &&
+        install_name_tool -change "libz.1.dylib" "/usr/lib/libz.1.dylib" "{{.OUTFILE}}"
+        {{end}}
       - echo "Built sidecar to '{{.OUTFILE}}'"
     vars:
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
@@ -135,7 +141,7 @@ tasks:
       GOOS: '{{.GOOS}}'
       GOARCH: '{{.GOARCH}}'
       LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
-      FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
+      FFMPEG_SRC_BASE: '{{.FFMPEG_LIB_DIR | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
       # Match the dynamic build directory to the target platform, not the host machine
       FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
 
@@ -152,8 +158,12 @@ tasks:
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOOS: darwin
       GOARCH: '{{.GOARCH | default "arm64"}}'
-      # macOS requires specific frameworks for audio/video toolbox
-      LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox"
+      FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+      # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
+      LDFLAGS_EXTRA: >-
+        -lavformat -lavcodec -lavutil -lswresample
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma -lc++
+        -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
     cmds:
       - task: build_base
         vars:
@@ -162,6 +172,7 @@ tasks:
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
+          FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
 
   build:native:windows:
     desc: "Builds FFmpeg sidecar for Windows"
@@ -170,8 +181,13 @@ tasks:
       OUT_DIR: '{{.OUT_DIR}}'
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOARCH: '{{.GOARCH | default "amd64"}}'
+      FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
       # Windows requires Winsock and threading libraries
-      LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+      # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
+      LDFLAGS_EXTRA: >-
+        -lavformat -lavcodec -lavutil -lswresample
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma
+        -lws2_32 -lbcrypt -lmfplat -lmfuuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
     cmds:
       - task: build_base
         vars:
@@ -180,16 +196,22 @@ tasks:
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
+          FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
 
   build:native:linux:
     desc: "Builds FFmpeg sidecar for Linux"
     vars:
+      FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
       OUT_DIR: '{{.OUT_DIR}}'
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOOS: linux
       GOARCH: '{{.GOARCH | default "amd64"}}'
       # Linux requires standard pthread and math libraries for static linking
-      LDFLAGS_EXTRA: "-lavformat -lavcodec -lavutil -lm -lpthread -ldl"
+      # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
+      LDFLAGS_EXTRA: >-
+        -lavformat -lavcodec -lavutil -lswresample
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma
+        -lasound -lm -lpthread -ldl
     cmds:
       - task: build_base
         vars:
@@ -198,6 +220,7 @@ tasks:
           LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
+          FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
 
   # The run task now maps dynamically based on passed arguments
   run:

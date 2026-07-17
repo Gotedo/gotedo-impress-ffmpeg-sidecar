@@ -627,12 +627,20 @@ EOF
         ln -sf /tmp/darwin-tools/ld /tmp/darwin-tools/arm64-apple-darwin11.0-ld64
         ln -sf /tmp/darwin-tools/ld /tmp/darwin-tools/arm64-apple-darwin11.0-ld64.lld
 
+        # Create a wrapper for AR to explicitly enforce the Darwin archive format
+        # This prevents llvm-ar from defaulting to the host's GNU format.
+        cat << 'EOF' > /tmp/darwin-tools/ar
+#!/bin/bash
+exec /usr/bin/llvm-ar --format=darwin "$@"
+EOF
+        chmod +x /tmp/darwin-tools/ar
+
         # Use absolute system paths to avoid llvm-mingw interference
         # and ensure Autotools/Libtool find the correct indexer
         CC="/usr/bin/clang"
         CXX="/usr/bin/clang++"
         OBJC="/usr/bin/clang"
-        AR="/usr/bin/llvm-ar"
+        AR="/tmp/darwin-tools/ar"
         STRIP="/usr/bin/llvm-strip"
         RANLIB_CMD="/usr/bin/llvm-ranlib"
         NM_CMD="/usr/bin/llvm-nm"
@@ -654,15 +662,10 @@ EOF
         # FORCE libc++ to prevent clang++ from seeking libstdc++ on the host
         CXXFLAGS="$CFLAGS -stdlib=libc++"
 
-        # Locate the compiler-rt static archive built earlier
-        # Use absolute path to bypass the Mingw toolchain in our PATH
-        RESOURCE_DIR=$(/usr/bin/clang -print-resource-dir)
-        COMPILER_RT_ARCHIVE="${RESOURCE_DIR}/lib/darwin/libclang_rt.builtins_osx.a"
-
         # Add -lresolv specifically for res_query() and isolated Darwin libs
         # Modern macOS uses libc++ NOT lstdc++
         # Inject the natively built compiler-rt archive directly into the linker path
-        PLATFORM_LIBS="-lSystem -liconv -lresolv -lc++ ${COMPILER_RT_ARCHIVE} -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework AudioToolbox -framework CoreGraphics -framework Security"
+        PLATFORM_LIBS="-lSystem -liconv -lresolv -lc++ -framework CoreFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework AudioToolbox -framework CoreGraphics -framework Security"
         # Propagate target flags to the linker so CMake knows we are cross-compiling
         # Include -stdlib=libc++ in LDFLAGS so feature checks don't fail looking for libstdc++
         export LDFLAGS="$CFLAGS -stdlib=libc++ $PLATFORM_LIBS --ld-path=$LD_PATH -L$SDK_PATH/usr/lib -F$FRAMEWORK_PATH -Wl,-platform_version,macos,$MACOSX_DEPLOYMENT_TARGET,$MACOSX_DEPLOYMENT_TARGET"
@@ -1430,6 +1433,17 @@ if [[ "$OS" == "windows" ]]; then
     # 2. Clean our local variables too
     FFMPEG_LDFLAGS=$(echo "${FFMPEG_LDFLAGS}" | sed 's/-Wl,-rpath,[^ ]*//g' | sed 's/-Wno-unused-command-line-argument//g')
     FFMPEG_CFLAGS=$(echo "${FFMPEG_CFLAGS}" | sed 's/-Wno-unused-command-line-argument//g')
+elif [[ "$OS" == "darwin" ]]; then
+    # CAUTION: FFmpeg's dependency libraries (like libopus.a, libvorbis.a, etc.)
+    # must not be bundled with libclang_rt
+    # Grab the exact builtins archive we compiled earlier
+    RESOURCE_DIR=$(/usr/bin/clang -print-resource-dir)
+    COMPILER_RT_ARCHIVE="${RESOURCE_DIR}/lib/darwin/libclang_rt.builtins_osx.a"
+    
+    # Inject it strictly to FFmpeg's link stage
+    FFMPEG_LDFLAGS="${FFMPEG_LDFLAGS} ${COMPILER_RT_ARCHIVE}"
+    # macOS & Linux defaults (keep rpath)
+    export LDFLAGS="-L${sysroot}/lib ${LDFLAGS} ${PLATFORM_LIBS}"
 else
     # macOS & Linux defaults (keep rpath)
     export LDFLAGS="-L${sysroot}/lib ${LDFLAGS} ${PLATFORM_LIBS}"
@@ -1865,7 +1879,9 @@ EOF
 
         export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -lc++ -lSystem -lresolv"
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lswresample
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv ${FFMPEG_LIB_DIR}/lib/libz.a -lbz2 -llzma -lc++
+        -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv"
         ;;
     *)
         echo "Unsupported sidecar target: ${OS}-${ARCH}"
@@ -1876,6 +1892,15 @@ esac
 # 2. Bind paths for header and library discovery to the absolute framework mount
 export CGO_CFLAGS="${CGO_CFLAGS} -I${FFMPEG_LIB_DIR}/include"
 export CGO_LDFLAGS="${CGO_LDFLAGS} -L${FFMPEG_LIB_DIR}/lib ${EXTRA_LIBS}"
+
+# ONLY link compiler-rt when targeting Darwin
+if [ "$OS" = 'darwin' ]; then
+    # Locate the compiler-rt static archive built earlier
+    # Use absolute path to bypass the Mingw toolchain in our PATH
+    RESOURCE_DIR=$(/usr/bin/clang -print-resource-dir)
+    COMPILER_RT_ARCHIVE="${RESOURCE_DIR}/lib/darwin/libclang_rt.builtins_osx.a"
+    export CGO_LDFLAGS="${CGO_LDFLAGS} -Wl,${COMPILER_RT_ARCHIVE}"
+fi
 
 OUT_DIR="${SIDECAR_OUT_DIR:-/output}"
 OUT_FILE="${SIDECAR_OUT_FILE:-sidecar_${OS}_${ARCH}}"
@@ -1893,7 +1918,7 @@ echo "========================================================="
 # 3. Compile
 cd /src
 
-go build $GO_BUILDFLAGS -o "${OUT_DIR}/${OUT_FILE}" main.go
+go build $GO_BUILDFLAGS -o "${OUT_DIR}/${OUT_FILE}" .
 
 echo ">>> Sidecar successfully built at ${OUT_DIR}/${OUT_FILE}"
 SIDECAR_BUILDER

@@ -5,6 +5,7 @@
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>
 #include <miniaudio.h>
+#include <stdlib.h>
 
 typedef struct DemuxDecContext
 {
@@ -30,7 +31,7 @@ typedef struct DemuxDecContext
 typedef struct TranscodeContext
 {
   void *go_user_data;
-  void (*go_callback)(const uint8_t *buf, int buf_size, void *user_data);
+  void (*go_callback)(uint8_t *buf, int buf_size, void *user_data);
 } TranscodeContext;
 
 // Native Playback Context
@@ -61,5 +62,8 @@ int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_da
 void stop_audio_playback(AudioPlaybackContext *play_ctx);
 
 void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
+
+// Test Pipeline Declaration
+int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, void *go_chan_ptr);
 
 #endif // DECODER_H
