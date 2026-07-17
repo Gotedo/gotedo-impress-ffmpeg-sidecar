@@ -180,6 +180,10 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 		t.Error("Hardware context rejected live latency shift configuration.")
 	}
 
+	// Added to manually listen to the playback buffer draining
+	t.Log("Waiting 5 seconds to allow audio buffer to reach speakers...")
+	time.Sleep(5 * time.Second)
+
 	// 4. Gracefully break the context pipeline to assert that C sub-threads shut down instantly
 	t.Log("[HARDWARE CLEANUP] Triggering streaming channel cancellation signal...")
 	cancel()

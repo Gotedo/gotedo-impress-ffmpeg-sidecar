@@ -235,12 +235,15 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 		case errCode := <-pipelineErrChan:
 			log.Printf("[SIDECAR] C-pipeline demuxing complete. Exit code: %d", errCode)
-			C.stop_audio_playback(playCtx)
-			C.free_demux_dec_context(decCtx)
+
+			// ONLY tear down and return if there was an actual error.
+			// If it was successful (0), leave the function running so the audio
+			// ring buffer can drain and the client can finish rendering the video.
 			if errCode < 0 {
+				C.stop_audio_playback(playCtx)
+				C.free_demux_dec_context(decCtx)
 				return status.Errorf(codes.Internal, "C-pipeline processing failed with error code: %d", errCode)
 			}
-			return nil
 
 		case chunk := <-testChunkChan:
 			// Send binary payload packet over the network
