@@ -1880,7 +1880,7 @@ EOF
         export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
         EXTRA_LIBS="-lavformat -lavcodec -lavutil -lswresample
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv ${FFMPEG_LIB_DIR}/lib/libz.a -lbz2 -llzma -lc++
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv"
         ;;
     *)
@@ -1891,7 +1891,7 @@ esac
 
 # 2. Bind paths for header and library discovery to the absolute framework mount
 export CGO_CFLAGS="${CGO_CFLAGS} -I${FFMPEG_LIB_DIR}/include"
-export CGO_LDFLAGS="${CGO_LDFLAGS} -L${FFMPEG_LIB_DIR}/lib ${EXTRA_LIBS}"
+export CGO_LDFLAGS="${CGO_LDFLAGS} -L${FFMPEG_LIB_DIR}/lib ${EXTRA_LIBS} ${FFMPEG_LIB_DIR}/lib/libz.a"
 
 # ONLY link compiler-rt when targeting Darwin
 if [ "$OS" = 'darwin' ]; then

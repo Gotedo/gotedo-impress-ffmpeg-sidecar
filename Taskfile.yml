@@ -5,6 +5,7 @@ vars:
   OS: '{{.OS | default .GOOS | default (env "GOOS") | default OS}}'
   ARCH: '{{.ARCH | default ARCH}}'
   DEFAULT_FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
+  IS_TEST: '{{.IS_TEST}}'
 
 tasks:
   apt-cache:
@@ -119,36 +120,46 @@ tasks:
     internal: true
     dir: '{{.TASKFILE_DIR}}' # Force compilation directory to always be here
     cmds:
-      - echo "Building sidecar for {{.GOOS}}/{{.GOARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}..."
-      - >
-        CGO_ENABLED=1 
-        CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" 
-        CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" 
-        GOOS={{.GOOS}} 
-        GOARCH={{.GOARCH}}
-        go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
-      # If compiling on macOS, redirect the libz reference to the native system path
-      - >
-        {{if eq .GOOS "darwin"}}
-        echo "Patching compiled binary dyld paths for macOS..." &&
-        install_name_tool -change "libz.1.dylib" "/usr/lib/libz.1.dylib" "{{.OUTFILE}}"
-        {{end}}
-      - echo "Built sidecar to '{{.OUTFILE}}'"
+      - |
+        if [ "{{.IS_TEST}}" = "true" ]; then
+          echo ">>> Running integration tests for {{.GOOS}}/{{.GOARCH}}..."
+          CGO_ENABLED=1 \
+          CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" \
+          CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
+          GOOS={{.GOOS}} \
+          GOARCH={{.GOARCH}} \
+          go test -v -race -count=1 ./ -run TestIntegration_
+        else
+          echo "Building sidecar for {{.GOOS}}/{{.GOARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}..."
+          CGO_ENABLED=1 \
+          CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" \
+          CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
+          GOOS={{.GOOS}} \
+          GOARCH={{.GOARCH}} \
+          go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
+          
+          {{if eq .GOOS "darwin"}}
+          echo ">>> Patching compiled binary dyld paths for macOS..."
+          install_name_tool -change "libz.1.dylib" "/usr/lib/libz.1.dylib" "{{.OUTFILE}}"
+          {{end}}
+          echo ">>> Built sidecar to '{{.OUTFILE}}'"
+        fi
     vars:
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
       # Safely fall back to default output directory if OUT_DIR is empty or unresolved
       OUT_DIR: '{{if .OUT_DIR}}{{.OUT_DIR}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
       GOOS: '{{.GOOS}}'
       GOARCH: '{{.GOARCH}}'
-      LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}}'
       FFMPEG_SRC_BASE: '{{.FFMPEG_LIB_DIR | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
       # Match the dynamic build directory to the target platform, not the host machine
       FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
+      LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}} {{.FFMPEG_SRC_DIR}}/lib/libz.a'
 
       # Safe filename resolver with defensive extension appending
       DEFAULT_FILE_NAME: 'sidecar_{{.GOOS}}_{{.GOARCH}}'
       RESOLVED_FILE_NAME: '{{.OUT_FILE_NAME | default .DEFAULT_FILE_NAME}}'
       OUTFILE: '{{.OUT_DIR}}/{{.RESOLVED_FILE_NAME}}{{if and (eq .GOOS "windows") (not (hasSuffix ".exe" .RESOLVED_FILE_NAME))}}.exe{{end}}'
+      IS_TEST: '{{.IS_TEST | default "false"}}'
 
   # Native Platform Tasks
   build:native:darwin:
@@ -162,7 +173,7 @@ tasks:
       # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
       LDFLAGS_EXTRA: >-
         -lavformat -lavcodec -lavutil -lswresample
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma -lc++
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
     cmds:
       - task: build_base
@@ -186,7 +197,7 @@ tasks:
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
       LDFLAGS_EXTRA: >-
         -lavformat -lavcodec -lavutil -lswresample
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lws2_32 -lbcrypt -lmfplat -lmfuuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
     cmds:
       - task: build_base
@@ -210,7 +221,7 @@ tasks:
       # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
       LDFLAGS_EXTRA: >-
         -lavformat -lavcodec -lavutil -lswresample
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lz -lbz2 -llzma
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lasound -lm -lpthread -ldl
     cmds:
       - task: build_base

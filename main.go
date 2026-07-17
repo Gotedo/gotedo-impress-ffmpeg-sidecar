@@ -264,7 +264,7 @@ func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRe
 	cDevices := (*C.NativeAudioDevice)(C.calloc(C.size_t(maxDevices), C.size_t(unsafe.Sizeof(C.NativeAudioDevice{}))))
 	defer C.free(unsafe.Pointer(cDevices))
 
-	count := int(C.get_miniaudio_devices(cDevices), C.int(maxDevices))
+	count := int(C.get_miniaudio_devices(cDevices, C.int(maxDevices)))
 	if count < 0 {
 		return nil, status.Errorf(codes.Internal, "failed to query host miniaudio capabilities: error code %d", count)
 	}

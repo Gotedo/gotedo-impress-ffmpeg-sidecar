@@ -790,14 +790,21 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
   }
 
   int count = 0;
+
   for (ma_uint32 i = 0; i < playbackDeviceCount && count < max_devices; i++)
   {
-    // Build a unique tracking string from miniaudio raw bytes
-    snprintf(devices[count].id, sizeof(devices[count].id), "%u_%u",
-             pPlaybackDeviceInfos[i].id.instance.u, i);
+    // Use the index 'i' (or a simplified name-based ID) to avoid ma_device_id struct issues
+    snprintf(devices[count].id, sizeof(devices[count].id), "%u", i);
 
+    // Use strncpy carefully; ensure 'devices' is a valid pointer
     strncpy(devices[count].name, pPlaybackDeviceInfos[i].name, sizeof(devices[count].name) - 1);
+
+    // Ensure null-termination
+    devices[count].name[sizeof(devices[count].name) - 1] = '\0';
+
     devices[count].is_default = pPlaybackDeviceInfos[i].isDefault;
+
+    // Increment the count at the end of the loop
     count++;
   }
 

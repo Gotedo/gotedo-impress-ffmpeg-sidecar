@@ -128,6 +128,16 @@ rm -rf build_cache/ dist/
 
 ---
 
+## Run Tests
+
+To run integration tests for this sidecar, do:
+
+```bash
+/bin/task build IS_TEST=true
+```
+
+---
+
 ## Licensing
 
 The code in this repository (the sidecar interface, wrappers, and build configurations) is open-source. The compiled binaries produced by this build system link against **FFmpeg**, which is licensed under the **GNU Lesser General Public License (LGPL) v2.1** or the **GNU General Public License (GPL) v3** depending on compilation flags used (e.g. `--enable-gpl`).
