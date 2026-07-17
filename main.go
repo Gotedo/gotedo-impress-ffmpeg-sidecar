@@ -5,6 +5,7 @@ package main
 */
 import "C"
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -254,4 +255,45 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			}
 		}
 	}
+}
+
+// GetAudioDevices queries miniaudio and maps discovered OS soundcards directly to gRPC responses.
+func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRequest) (*proto.DevicesResponse, error) {
+	maxDevices := 32
+	// Allocate sequential buffer in C heap space
+	cDevices := (*C.NativeAudioDevice)(C.calloc(C.size_t(maxDevices), C.size_t(unsafe.Sizeof(C.NativeAudioDevice{}))))
+	defer C.free(unsafe.Pointer(cDevices))
+
+	count := int(C.get_miniaudio_devices(cDevices), C.int(maxDevices))
+	if count < 0 {
+		return nil, status.Errorf(codes.Internal, "failed to query host miniaudio capabilities: error code %d", count)
+	}
+
+	// Slice across C memory layout natively without allocation overheads
+	deviceSlice := (*[1 << 20]C.NativeAudioDevice)(unsafe.Pointer(cDevices))[:count:count]
+	responseDevices := make([]*proto.AudioDevice, 0, count)
+
+	for i := 0; i < count; i++ {
+		responseDevices = append(responseDevices, &proto.AudioDevice{
+			Id:        C.GoString(&deviceSlice[i].id[0]),
+			Name:      C.GoString(&deviceSlice[i].name[0]),
+			IsDefault: bool(deviceSlice[i].is_default),
+		})
+	}
+
+	return &proto.DevicesResponse{
+		Devices: responseDevices,
+	}, nil
+}
+
+// AdjustLatency handles real-time audio delay modifications from the backend client.
+func (s *ffmpegServer) AdjustLatency(ctx context.Context, req *proto.LatencyRequest) (*proto.LatencyResponse, error) {
+	log.Printf("[SIDECAR] AdjustLatency requested for target %s: %d ms", req.GetTargetId(), req.GetDelayMs())
+
+	// TODO: Pass this offset value down to your active miniaudio playback ring context.
+	// C.set_audio_delay_offset(playCtx, C.int(req.DelayMs()))
+
+	return &proto.LatencyResponse{
+		Accepted: true,
+	}, nil
 }

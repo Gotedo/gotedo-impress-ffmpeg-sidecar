@@ -481,6 +481,146 @@ func (x *ControlResponse) GetMessage() string {
 	return ""
 }
 
+type DevicesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DevicesRequest) Reset() {
+	*x = DevicesRequest{}
+	mi := &file_proto_stream_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DevicesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DevicesRequest) ProtoMessage() {}
+
+func (x *DevicesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DevicesRequest.ProtoReflect.Descriptor instead.
+func (*DevicesRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{8}
+}
+
+type AudioDevice struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	IsDefault     bool                   `protobuf:"varint,3,opt,name=is_default,json=isDefault,proto3" json:"is_default,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AudioDevice) Reset() {
+	*x = AudioDevice{}
+	mi := &file_proto_stream_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AudioDevice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AudioDevice) ProtoMessage() {}
+
+func (x *AudioDevice) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AudioDevice.ProtoReflect.Descriptor instead.
+func (*AudioDevice) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AudioDevice) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AudioDevice) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AudioDevice) GetIsDefault() bool {
+	if x != nil {
+		return x.IsDefault
+	}
+	return false
+}
+
+type DevicesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Devices       []*AudioDevice         `protobuf:"bytes,1,rep,name=devices,proto3" json:"devices,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DevicesResponse) Reset() {
+	*x = DevicesResponse{}
+	mi := &file_proto_stream_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DevicesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DevicesResponse) ProtoMessage() {}
+
+func (x *DevicesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DevicesResponse.ProtoReflect.Descriptor instead.
+func (*DevicesResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *DevicesResponse) GetDevices() []*AudioDevice {
+	if x != nil {
+		return x.Devices
+	}
+	return nil
+}
+
 var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
@@ -514,13 +654,22 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x04STOP\x10\x03\"E\n" +
 	"\x0fControlResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage2\x9e\x02\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x10\n" +
+	"\x0eDevicesRequest\"P\n" +
+	"\vAudioDevice\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"is_default\x18\x03 \x01(\bR\tisDefault\"@\n" +
+	"\x0fDevicesResponse\x12-\n" +
+	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices2\xe2\x02\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
 	"StopStream\x12\x1c.ffmpeg.StreamControlRequest\x1a\x1d.ffmpeg.StreamControlResponse\x12@\n" +
 	"\rAdjustLatency\x12\x16.ffmpeg.LatencyRequest\x1a\x17.ffmpeg.LatencyResponse\x12@\n" +
-	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
+	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponse\x12B\n" +
+	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
@@ -535,7 +684,7 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_stream_proto_goTypes = []any{
 	(ControlRequest_Action)(0),    // 0: ffmpeg.ControlRequest.Action
 	(*StreamRequest)(nil),         // 1: ffmpeg.StreamRequest
@@ -546,22 +695,28 @@ var file_proto_stream_proto_goTypes = []any{
 	(*LatencyResponse)(nil),       // 6: ffmpeg.LatencyResponse
 	(*ControlRequest)(nil),        // 7: ffmpeg.ControlRequest
 	(*ControlResponse)(nil),       // 8: ffmpeg.ControlResponse
+	(*DevicesRequest)(nil),        // 9: ffmpeg.DevicesRequest
+	(*AudioDevice)(nil),           // 10: ffmpeg.AudioDevice
+	(*DevicesResponse)(nil),       // 11: ffmpeg.DevicesResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
-	0, // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
-	1, // 1: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
-	3, // 2: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
-	5, // 3: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
-	7, // 4: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
-	2, // 5: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	4, // 6: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	6, // 7: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	8, // 8: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0,  // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
+	10, // 1: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
+	1,  // 2: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
+	3,  // 3: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
+	5,  // 4: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
+	7,  // 5: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
+	9,  // 6: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
+	2,  // 7: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	4,  // 8: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	6,  // 9: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	8,  // 10: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	11, // 11: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	7,  // [7:12] is the sub-list for method output_type
+	2,  // [2:7] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proto_stream_proto_init() }
@@ -575,7 +730,7 @@ func file_proto_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

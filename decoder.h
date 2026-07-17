@@ -6,6 +6,7 @@
 #include <libswresample/swresample.h>
 #include <miniaudio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 typedef struct DemuxDecContext
 {
@@ -48,6 +49,14 @@ typedef struct AudioPlaybackContext
   volatile int current_delay_samples; // Cumulative live sample offset balance
 } AudioPlaybackContext;
 
+// Struct mapping exactly to our proto/Go expectations
+typedef struct
+{
+  char id[128];
+  char name[256];
+  bool is_default;
+} NativeAudioDevice;
+
 // Function prototypes
 int init_audio_resampler(DemuxDecContext *ctx);
 int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path);
@@ -65,5 +74,9 @@ void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
 
 // Test Pipeline Declaration
 int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
+
+// Queries miniaudio context and populates devices buffer up to max_devices.
+// Returns total number of devices found, or a negative error code.
+int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
 
 #endif // DECODER_H

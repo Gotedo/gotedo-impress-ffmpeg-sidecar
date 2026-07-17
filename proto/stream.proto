@@ -17,6 +17,9 @@ service FFmpegService {
 
     // Unified control RPC for playback operations
     rpc ControlStream(ControlRequest) returns (ControlResponse);
+
+    // GetAudioDevices returns available audio devices to the client
+    rpc GetAudioDevices(DevicesRequest) returns (DevicesResponse);
 }
 
 message StreamRequest {
@@ -62,4 +65,16 @@ message ControlRequest {
 message ControlResponse {
     bool success = 1;
     string message = 2;
+}
+
+message DevicesRequest {}
+
+message AudioDevice {
+    string id = 1;
+    string name = 2;
+    bool is_default = 3;
+}
+
+message DevicesResponse {
+    repeated AudioDevice devices = 1;
 }

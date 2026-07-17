@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	FFmpegService_StartStream_FullMethodName   = "/ffmpeg.FFmpegService/StartStream"
-	FFmpegService_StopStream_FullMethodName    = "/ffmpeg.FFmpegService/StopStream"
-	FFmpegService_AdjustLatency_FullMethodName = "/ffmpeg.FFmpegService/AdjustLatency"
-	FFmpegService_ControlStream_FullMethodName = "/ffmpeg.FFmpegService/ControlStream"
+	FFmpegService_StartStream_FullMethodName     = "/ffmpeg.FFmpegService/StartStream"
+	FFmpegService_StopStream_FullMethodName      = "/ffmpeg.FFmpegService/StopStream"
+	FFmpegService_AdjustLatency_FullMethodName   = "/ffmpeg.FFmpegService/AdjustLatency"
+	FFmpegService_ControlStream_FullMethodName   = "/ffmpeg.FFmpegService/ControlStream"
+	FFmpegService_GetAudioDevices_FullMethodName = "/ffmpeg.FFmpegService/GetAudioDevices"
 )
 
 // FFmpegServiceClient is the client API for FFmpegService service.
@@ -39,6 +40,8 @@ type FFmpegServiceClient interface {
 	AdjustLatency(ctx context.Context, in *LatencyRequest, opts ...grpc.CallOption) (*LatencyResponse, error)
 	// Unified control RPC for playback operations
 	ControlStream(ctx context.Context, in *ControlRequest, opts ...grpc.CallOption) (*ControlResponse, error)
+	// GetAudioDevices returns available audio devices to the client
+	GetAudioDevices(ctx context.Context, in *DevicesRequest, opts ...grpc.CallOption) (*DevicesResponse, error)
 }
 
 type fFmpegServiceClient struct {
@@ -98,6 +101,16 @@ func (c *fFmpegServiceClient) ControlStream(ctx context.Context, in *ControlRequ
 	return out, nil
 }
 
+func (c *fFmpegServiceClient) GetAudioDevices(ctx context.Context, in *DevicesRequest, opts ...grpc.CallOption) (*DevicesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DevicesResponse)
+	err := c.cc.Invoke(ctx, FFmpegService_GetAudioDevices_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FFmpegServiceServer is the server API for FFmpegService service.
 // All implementations must embed UnimplementedFFmpegServiceServer
 // for forward compatibility.
@@ -112,6 +125,8 @@ type FFmpegServiceServer interface {
 	AdjustLatency(context.Context, *LatencyRequest) (*LatencyResponse, error)
 	// Unified control RPC for playback operations
 	ControlStream(context.Context, *ControlRequest) (*ControlResponse, error)
+	// GetAudioDevices returns available audio devices to the client
+	GetAudioDevices(context.Context, *DevicesRequest) (*DevicesResponse, error)
 	mustEmbedUnimplementedFFmpegServiceServer()
 }
 
@@ -133,6 +148,9 @@ func (UnimplementedFFmpegServiceServer) AdjustLatency(context.Context, *LatencyR
 }
 func (UnimplementedFFmpegServiceServer) ControlStream(context.Context, *ControlRequest) (*ControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ControlStream not implemented")
+}
+func (UnimplementedFFmpegServiceServer) GetAudioDevices(context.Context, *DevicesRequest) (*DevicesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAudioDevices not implemented")
 }
 func (UnimplementedFFmpegServiceServer) mustEmbedUnimplementedFFmpegServiceServer() {}
 func (UnimplementedFFmpegServiceServer) testEmbeddedByValue()                       {}
@@ -220,6 +238,24 @@ func _FFmpegService_ControlStream_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FFmpegService_GetAudioDevices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DevicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FFmpegServiceServer).GetAudioDevices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FFmpegService_GetAudioDevices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FFmpegServiceServer).GetAudioDevices(ctx, req.(*DevicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FFmpegService_ServiceDesc is the grpc.ServiceDesc for FFmpegService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -238,6 +274,10 @@ var FFmpegService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ControlStream",
 			Handler:    _FFmpegService_ControlStream_Handler,
+		},
+		{
+			MethodName: "GetAudioDevices",
+			Handler:    _FFmpegService_GetAudioDevices_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
