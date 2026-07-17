@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/gotedo/gotedo-impress-ffmpeg-sidecar/proto"
 )
@@ -196,4 +197,72 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("Deadlock Error: Hardware threads failed to release resources within 2 seconds of context cancellation.")
 	}
+}
+
+// -------------------------------------------------------------------------
+// Integration Test 3: Comprehensive Media Properties Probing (FFmpeg C-Layer)
+// -------------------------------------------------------------------------
+func TestIntegration_MediaPropertiesProbing(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateRealTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Dispatch the probing request against the verified baseline video file
+	t.Logf("[PROBE TEST] Dispatching native media prober for asset: %s", mediaPath)
+	resp, err := client.GetMediaProperties(ctx, &proto.MetadataRequest{
+		FilePath: mediaPath,
+	})
+	if err != nil {
+		t.Fatalf("Static media property probing failed over gRPC: %v", err)
+	}
+
+	// 2. Perform comprehensive assertions on structural container constraints
+	t.Logf("[PROBE REPORT] Successfully analyzed media container. Format: %s (%s)", resp.GetFormatName(), resp.GetFormatLongName())
+	t.Logf("[PROBE REPORT] Duration: %d ms | Size: %d bytes | Global Bitrate: %d bps", resp.GetDurationMs(), resp.GetFileSizeBytes(), resp.GetBitRate())
+
+	if resp.GetFormatName() == "" {
+		t.Error("Container probing failed: empty format name returned from C layer")
+	}
+	if resp.GetDurationMs() <= 0 {
+		t.Errorf("Container probing failed: expected a valid duration, got %d ms", resp.GetDurationMs())
+	}
+
+	// 3. Structural Validation of the Video Stream Track (if flagged present)
+	if resp.GetHasVideo() {
+		t.Logf("[PROBE VIDEO] Codec: %s (%s) | Profile: %s", resp.GetVideoCodec(), resp.GetVideoCodecLongName(), resp.GetVideoProfile())
+		t.Logf("[PROBE VIDEO] Resolution: %dx%d | Framerate: %.2f fps | Aspect Ratio: %s", resp.GetWidth(), resp.GetHeight(), resp.GetFramerate(), resp.GetAspectRatio())
+		t.Logf("[PROBE VIDEO] Pixel Format: %s | Color Space: %s", resp.GetPixelFormat(), resp.GetColorSpace())
+
+		if resp.GetWidth() == 0 || resp.GetHeight() == 0 {
+			t.Error("Video track enabled but reported invalid geometry dimensions")
+		}
+		if resp.GetFramerate() <= 0.0 {
+			t.Errorf("Video track enabled but reported unexpected framerate: %.2f", resp.GetFramerate())
+		}
+	} else {
+		t.Log("[PROBE WARNING] Test asset contains no video track stream components.")
+	}
+
+	// 4. Structural Validation of the Audio Stream Track (if flagged present)
+	if resp.GetHasAudio() {
+		t.Logf("[PROBE AUDIO] Codec: %s (%s) | Profile: %s", resp.GetAudioCodec(), resp.GetAudioCodecLongName(), resp.GetAudioProfile())
+		t.Logf("[PROBE AUDIO] Channels: %d | Layout: %s | Sample Rate: %d Hz", resp.GetAudioChannels(), resp.GetChannelLayout(), resp.GetSampleRate())
+
+		if resp.GetAudioChannels() <= 0 {
+			t.Errorf("Audio track enabled but reported invalid channel matrix size: %d", resp.GetAudioChannels())
+		}
+		if resp.GetSampleRate() <= 0 {
+			t.Errorf("Audio track enabled but reported invalid sample rate clock: %d Hz", resp.GetSampleRate())
+		}
+	} else {
+		t.Log("[PROBE WARNING] Test asset contains no audio track stream components.")
+	}
+
+	bytes, _ := protojson.MarshalOptions{Multiline: true}.Marshal(resp)
+	t.Logf("[PROBE REPORT] Full Properties Payload:\n%s", string(bytes))
 }

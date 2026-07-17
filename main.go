@@ -374,7 +374,7 @@ func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.Metada
 		FormatName:     C.GoString(&cProps.format_name[0]),
 		FormatLongName: C.GoString(&cProps.format_long_name[0]),
 		DurationMs:     int64(cProps.duration_ms),
-		FileSizeMbytes: int64(cProps.file_size_bytes), // Maps to protocol layout
+		FileSizeBytes:  int64(cProps.file_size_bytes), // Maps to protocol layout
 		BitRate:        int64(cProps.bit_rate),
 
 		Title:        C.GoString(&cProps.title[0]),
