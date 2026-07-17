@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package ffmpeg;
+
+option go_package = "github.com/gotedo/ffmpeg-sidecar/proto";
+
+// Service for controlling and consuming FFmpeg media streams
+service FFmpegService {
+    // StartStream initializes the decoding/muxing pipeline
+    rpc StartStream(StreamRequest) returns (stream StreamResponse);
+
+    // StopStream terminates an active sidecar pipeline
+    rpc StopStream(StreamControlRequest) returns (StreamControlResponse);
+
+    // AdjustLatency sends real-time drift correction commands to the sidecar
+    rpc AdjustLatency(LatencyRequest) returns (LatencyResponse);
+
+    // Unified control RPC for playback operations
+    rpc ControlStream(ControlRequest) returns (ControlResponse);
+}
+
+message StreamRequest {
+    string target_id = 1; // "preview" or projector screen ID string
+    string file_path = 2;
+    string audio_device_id = 3;
+}
+
+message StreamResponse {
+    bytes fmp4_chunk = 1; // Raw binary fMP4 segment data
+}
+
+message StreamControlRequest {
+    string target_id = 1;
+}
+
+message StreamControlResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message LatencyRequest {
+    string target_id = 1;
+    int32 delay_ms = 2;
+}
+
+message LatencyResponse {
+    bool accepted = 1;
+}
+
+message ControlRequest {
+    string target_id = 1;
+    enum Action {
+        PLAY = 0;
+        PAUSE = 1;
+        SEEK = 2;
+        STOP = 3;
+    }
+    Action action = 2;
+    int32 seek_seconds = 3; // Only used if action == SEEK
+}
+
+message ControlResponse {
+    bool success = 1;
+    string message = 2;
+}

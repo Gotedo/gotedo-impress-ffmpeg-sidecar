@@ -3,3 +3,4 @@ build_cache
 build
 dist
 .DS_Store
+.task/

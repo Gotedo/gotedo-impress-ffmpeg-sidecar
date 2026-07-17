@@ -257,6 +257,8 @@ tasks:
       FFMPEG_LIB_DIR: '{{if .FFMPEG_LIB_DIR}}{{print .ROOT_DIR "/" .FFMPEG_LIB_DIR | clean}}{{else}}{{.DEFAULT_FFMPEG_LIB_DIR}}{{end}}'
       FFMPEG_LIB_ARCH_DIR: '{{.FFMPEG_LIB_DIR}}/{{.TARGET_OS}}/{{.TARGET_ARCH}}'
       MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
+    deps:
+      - task: generate:proto
     cmds:
       # Natively call the resolved task using Task's internal pipeline
       - task: "{{.TARGET_TASK}}"
@@ -303,3 +305,47 @@ tasks:
           -v "{{.TASKFILE_DIR}}:/src" \
           -v "{{.FFMPEG_LIB_DIR}}:/ffmpeg_libs" \
           ffmpeg-builder {{.TARGET_OS}} {{.TARGET_ARCH}} sidecar
+
+  install:proto_plugins:
+    desc: "Checks and installs Go gRPC plugins locally to ./bin"
+    run: once
+    internal: true
+    cmds:
+      - mkdir -p ./bin
+      - |
+        if [ ! -f "./bin/protoc-gen-go.exe" ] && [ ! -f "./bin/protoc-gen-go" ]; then
+          echo "Installing protoc-gen-go..."
+          GOBIN="$(pwd)/bin" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+        fi
+      - |
+        if [ ! -f "./bin/protoc-gen-go-grpc.exe" ] && [ ! -f "./bin/protoc-gen-go-grpc" ]; then
+          echo "Installing protoc-gen-go-grpc..."
+          GOBIN="$(pwd)/bin" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+        fi
+
+  generate:proto:
+    desc: "Generates gRPC Go stubs from stream.proto"
+    run: once
+    deps:
+      - task: install:proto_plugins
+    cmds:
+      - |
+        if ! command -v protoc &> /dev/null; then
+          echo "Error: protoc is not installed.\n\nOn MacOS, run: `brew install protobuf`\n\nOn Windows, run: `winget install protobuf`"
+          exit 1
+        fi
+        protoc \
+          --plugin=protoc-gen-go=./bin/protoc-gen-go{{.EXE_EXT}} \
+          --plugin=protoc-gen-go-grpc=./bin/protoc-gen-go-grpc{{.EXE_EXT}} \
+          --go_out=. --go_opt=paths=source_relative \
+          --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+          "./proto/stream.proto"
+      - cmd: go mod tidy
+    sources:
+      - '{{.TASKFILE_DIR}}/proto/stream.proto'
+    generates:
+      - '{{.TASKFILE_DIR}}/proto/stream.pb.go'
+      - '{{.TASKFILE_DIR}}/proto/stream_grpc.pb.go'
+    vars:
+      # Automatically appends .exe only when executing on Windows
+      EXE_EXT: '{{if eq OS "windows"}}.exe{{else}}{{end}}'
