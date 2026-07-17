@@ -126,4 +126,7 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
 // Probes a file and fills out the CMediaProperties memory layout
 int probe_media_properties(const char *file_path, CMediaProperties *props);
 
+// Extract a compressed image frame into a dynamically allocated buffer
+int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **out_buf, int *out_size);
+
 #endif // DECODER_H

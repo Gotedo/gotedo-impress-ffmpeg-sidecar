@@ -969,6 +969,110 @@ func (x *MetadataResponse) GetAudioBitRate() int64 {
 	return 0
 }
 
+type ScreenshotRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	TimeMs        int64                  `protobuf:"varint,2,opt,name=time_ms,json=timeMs,proto3" json:"time_ms,omitempty"` // Configurable video timeline point in milliseconds
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScreenshotRequest) Reset() {
+	*x = ScreenshotRequest{}
+	mi := &file_proto_stream_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScreenshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScreenshotRequest) ProtoMessage() {}
+
+func (x *ScreenshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScreenshotRequest.ProtoReflect.Descriptor instead.
+func (*ScreenshotRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ScreenshotRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+func (x *ScreenshotRequest) GetTimeMs() int64 {
+	if x != nil {
+		return x.TimeMs
+	}
+	return 0
+}
+
+type ScreenshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ImageData     []byte                 `protobuf:"bytes,1,opt,name=image_data,json=imageData,proto3" json:"image_data,omitempty"` // Raw compressed image buffer (e.g., JPEG or PNG)
+	MimeType      string                 `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`    // "image/jpeg" or "image/png" matching encoder
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScreenshotResponse) Reset() {
+	*x = ScreenshotResponse{}
+	mi := &file_proto_stream_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScreenshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScreenshotResponse) ProtoMessage() {}
+
+func (x *ScreenshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScreenshotResponse.ProtoReflect.Descriptor instead.
+func (*ScreenshotResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ScreenshotResponse) GetImageData() []byte {
+	if x != nil {
+		return x.ImageData
+	}
+	return nil
+}
+
+func (x *ScreenshotResponse) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
 var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
@@ -1053,7 +1157,14 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\vsample_rate\x18\x1e \x01(\x05R\n" +
 	"sampleRate\x12%\n" +
 	"\x0echannel_layout\x18\x1f \x01(\tR\rchannelLayout\x12$\n" +
-	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate2\xab\x03\n" +
+	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate\"I\n" +
+	"\x11ScreenshotRequest\x12\x1b\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x12\x17\n" +
+	"\atime_ms\x18\x02 \x01(\x03R\x06timeMs\"P\n" +
+	"\x12ScreenshotResponse\x12\x1d\n" +
+	"\n" +
+	"image_data\x18\x01 \x01(\fR\timageData\x12\x1b\n" +
+	"\tmime_type\x18\x02 \x01(\tR\bmimeType2\xf8\x03\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
@@ -1061,7 +1172,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\rAdjustLatency\x12\x16.ffmpeg.LatencyRequest\x1a\x17.ffmpeg.LatencyResponse\x12@\n" +
 	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponse\x12B\n" +
 	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponse\x12G\n" +
-	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
+	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponse\x12K\n" +
+	"\x12GetVideoScreenshot\x12\x19.ffmpeg.ScreenshotRequest\x1a\x1a.ffmpeg.ScreenshotResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
@@ -1076,7 +1188,7 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_proto_stream_proto_goTypes = []any{
 	(ControlRequest_Action)(0),    // 0: ffmpeg.ControlRequest.Action
 	(*StreamRequest)(nil),         // 1: ffmpeg.StreamRequest
@@ -1092,6 +1204,8 @@ var file_proto_stream_proto_goTypes = []any{
 	(*DevicesResponse)(nil),       // 11: ffmpeg.DevicesResponse
 	(*MetadataRequest)(nil),       // 12: ffmpeg.MetadataRequest
 	(*MetadataResponse)(nil),      // 13: ffmpeg.MetadataResponse
+	(*ScreenshotRequest)(nil),     // 14: ffmpeg.ScreenshotRequest
+	(*ScreenshotResponse)(nil),    // 15: ffmpeg.ScreenshotResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
 	0,  // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
@@ -1102,14 +1216,16 @@ var file_proto_stream_proto_depIdxs = []int32{
 	7,  // 5: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
 	9,  // 6: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
 	12, // 7: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
-	2,  // 8: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	4,  // 9: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	6,  // 10: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	8,  // 11: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	11, // 12: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	13, // 13: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
-	8,  // [8:14] is the sub-list for method output_type
-	2,  // [2:8] is the sub-list for method input_type
+	14, // 8: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
+	2,  // 9: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	4,  // 10: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	6,  // 11: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	8,  // 12: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	11, // 13: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	13, // 14: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	15, // 15: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -1126,7 +1242,7 @@ func file_proto_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

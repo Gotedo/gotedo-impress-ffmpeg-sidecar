@@ -266,3 +266,51 @@ func TestIntegration_MediaPropertiesProbing(t *testing.T) {
 	bytes, _ := protojson.MarshalOptions{Multiline: true}.Marshal(resp)
 	t.Logf("[PROBE REPORT] Full Properties Payload:\n%s", string(bytes))
 }
+
+// -------------------------------------------------------------------------
+// Integration Test 4: Frame Seek, Extraction, and Disk Inspection (JPEG)
+// -------------------------------------------------------------------------
+func TestIntegration_VideoScreenshotExtractionAndDiskWrite(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateRealTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Request a screenshot 2.5 seconds (2500ms) into the video timeline
+	const targetTimeMs = 2500
+	t.Logf("[SCREENSHOT TEST] Requesting frame capture at %d ms for asset: %s", targetTimeMs, mediaPath)
+
+	resp, err := client.GetVideoScreenshot(ctx, &proto.ScreenshotRequest{
+		FilePath: mediaPath,
+		TimeMs:   targetTimeMs,
+	})
+	if err != nil {
+		t.Fatalf("Static video frame extraction failed over gRPC: %v", err)
+	}
+
+	// 2. Validate structural response markers
+	if len(resp.GetImageData()) == 0 {
+		t.Fatal("Extraction failed: sidecar returned an empty image byte buffer")
+	}
+	if resp.GetMimeType() != "image/jpeg" {
+		t.Errorf("Unexpected format payload type returned: expected 'image/jpeg', got '%s'", resp.GetMimeType())
+	}
+
+	t.Logf("[SCREENSHOT REPORT] Successfully extracted image from C layer. Size: %d bytes | Mime: %s",
+		len(resp.GetImageData()), resp.GetMimeType(),
+	)
+
+	// 3. Write image payload out to the disk filesystem for manual structural verification
+	outputPath := filepath.Join(os.TempDir(), fmt.Sprintf("extracted_frame_%d.jpg", time.Now().Unix()))
+
+	err = os.WriteFile(outputPath, resp.GetImageData(), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write extracted thumbnail buffer down to disk: %v", err)
+	}
+
+	t.Logf("[SCREENSHOT SUCCESS] Thumbnail saved for visual inspection! Find it here:\n👉 %s", outputPath)
+}

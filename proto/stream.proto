@@ -23,6 +23,9 @@ service FFmpegService {
 
     // Probe metadata properties directly via static analysis
     rpc GetMediaProperties(MetadataRequest) returns (MetadataResponse);
+
+    // Extract a standalone compressed frame at a specific offset
+    rpc GetVideoScreenshot(ScreenshotRequest) returns (ScreenshotResponse);
 }
 
 message StreamRequest {
@@ -127,4 +130,14 @@ message MetadataResponse {
     int32 sample_rate = 30;       // Audio sampling clock rate (Hz, e.g., 48000)
     string channel_layout = 31;   // e.g., "stereo", "5.1(side)", "mono"
     int64 audio_bit_rate = 32;    // Audio track individual operational bitrate
+}
+
+message ScreenshotRequest {
+    string file_path = 1;
+    int64 time_ms = 2; // Configurable video timeline point in milliseconds
+}
+
+message ScreenshotResponse {
+    bytes image_data = 1;  // Raw compressed image buffer (e.g., JPEG or PNG)
+    string mime_type = 2;  // "image/jpeg" or "image/png" matching encoder
 }
