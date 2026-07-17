@@ -20,6 +20,9 @@ service FFmpegService {
 
     // GetAudioDevices returns available audio devices to the client
     rpc GetAudioDevices(DevicesRequest) returns (DevicesResponse);
+
+    // Probe metadata properties directly via static analysis
+    rpc GetMediaProperties(MetadataRequest) returns (MetadataResponse);
 }
 
 message StreamRequest {
@@ -78,4 +81,50 @@ message AudioDevice {
 
 message DevicesResponse {
     repeated AudioDevice devices = 1;
+}
+
+message MetadataRequest {
+    string file_path = 1;
+}
+
+message MetadataResponse {
+    // Container Format Information
+    string format_name = 1;       // e.g., "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm"
+    string format_long_name = 2;  // e.g., "QuickTime / MOV"
+    int64 duration_ms = 3;        // Total duration mapped to milliseconds
+    int64 file_size_bytes = 4;    // Direct file size on disk
+    int64 bit_rate = 5;           // Total stream tracking bitrate (bps)
+    
+    // Core Extracted Tag Metadata
+    string title = 6;
+    string author = 7;            // Maps to "artist" / "author"
+    string album = 8;
+    string track = 9;
+    string genre = 10;
+    string creation_time = 11;    // ISO timestamp or raw tag string
+    string last_modified = 12;
+
+    // Primary Video Stream Parameters
+    bool has_video = 13;
+    string video_codec = 14;      // e.g., "h264", "hevc", "vp9"
+    string video_codec_long_name = 15;
+    string video_profile = 16;    // e.g., "Main", "High", "Main 10"
+    int32 width = 17;
+    int32 height = 18;
+    double framerate = 19;        // Computed float value (fps)
+    string aspect_ratio = 20;     // Display Aspect Ratio string (e.g., "16:9")
+    string pixel_format = 21;     // e.g., "yuv420p", "yuv420p10le"
+    string color_space = 22;      // e.g., "bt709", "bt2020nc"
+    string color_transfer = 23;   // e.g., "arib-std-b67", "smpte2084"
+    string color_primaries = 24;  // e.g., "bt2020"
+
+    // Primary Audio Stream Parameters
+    bool has_audio = 25;
+    string audio_codec = 26;      // e.g., "aac", "opus", "mp3"
+    string audio_codec_long_name = 27;
+    string audio_profile = 28;    // e.g., "LC", "HE"
+    int32 audio_channels = 29;    // Total audio channels detected
+    int32 sample_rate = 30;       // Audio sampling clock rate (Hz, e.g., 48000)
+    string channel_layout = 31;   // e.g., "stereo", "5.1(side)", "mono"
+    int64 audio_bit_rate = 32;    // Audio track individual operational bitrate
 }

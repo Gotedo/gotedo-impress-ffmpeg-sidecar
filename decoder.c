@@ -822,3 +822,130 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
   ma_context_uninit(&context);
   return count;
 }
+
+int probe_media_properties(const char *file_path, CMediaProperties *props)
+{
+  if (!file_path || !props)
+    return -1;
+
+  // Zero out the target struct space safely
+  memset(props, 0, sizeof(CMediaProperties));
+
+  AVFormatContext *fmt_ctx = NULL;
+  int ret = avformat_open_input(&fmt_ctx, file_path, NULL, NULL);
+  if (ret < 0)
+    return ret;
+
+  ret = avformat_find_stream_info(fmt_ctx, NULL);
+  if (ret < 0)
+  {
+    avformat_close_input(&fmt_ctx);
+    return ret;
+  }
+
+  // 1. Populate Container Metadata
+  if (fmt_ctx->iformat)
+  {
+    snprintf(props->format_name, sizeof(props->format_name), "%s", fmt_ctx->iformat->name ? fmt_ctx->iformat->name : "");
+    snprintf(props->format_long_name, sizeof(props->format_long_name), "%s", fmt_ctx->iformat->long_name ? fmt_ctx->iformat->long_name : "");
+  }
+  if (fmt_ctx->duration != AV_NOPTS_VALUE)
+  {
+    props->duration_ms = (int64_t)(fmt_ctx->duration * 1000 / AV_TIME_BASE);
+  }
+  props->file_size_bytes = fmt_ctx->pb ? avio_size(fmt_ctx->pb) : 0;
+  props->bit_rate = fmt_ctx->bit_rate;
+
+  // 2. Extract Global Dict Tags Safely
+  AVDictionaryEntry *tag = NULL;
+  if ((tag = av_dict_get(fmt_ctx->metadata, "title", NULL, 0)))
+    snprintf(props->title, sizeof(props->title), "%s", tag->value);
+  if ((tag = av_dict_get(fmt_ctx->metadata, "artist", NULL, 0)))
+    snprintf(props->author, sizeof(props->author), "%s", tag->value);
+  else if ((tag = av_dict_get(fmt_ctx->metadata, "author", NULL, 0)))
+    snprintf(props->author, sizeof(props->author), "%s", tag->value);
+  if ((tag = av_dict_get(fmt_ctx->metadata, "album", NULL, 0)))
+    snprintf(props->album, sizeof(props->album), "%s", tag->value);
+  if ((tag = av_dict_get(fmt_ctx->metadata, "track", NULL, 0)))
+    snprintf(props->track, sizeof(props->track), "%s", tag->value);
+  if ((tag = av_dict_get(fmt_ctx->metadata, "genre", NULL, 0)))
+    snprintf(props->genre, sizeof(props->genre), "%s", tag->value);
+  if ((tag = av_dict_get(fmt_ctx->metadata, "creation_time", NULL, 0)))
+    snprintf(props->creation_time, sizeof(props->creation_time), "%s", tag->value);
+
+  // 3. Scan Across Stream Layout Arrays
+  for (unsigned int i = 0; i < fmt_ctx->nb_streams; i++)
+  {
+    AVStream *stream = fmt_ctx->streams[i];
+    AVCodecParameters *codec_par = stream->codecpar;
+
+    // Handle Video Track
+    if (codec_par->codec_type == AVMEDIA_TYPE_VIDEO && !props->has_video)
+    {
+      props->has_video = 1;
+      props->width = codec_par->width;
+      props->height = codec_par->height;
+
+      const AVCodec *codec = avcodec_find_decoder(codec_par->codec_id);
+      if (codec)
+      {
+        snprintf(props->video_codec, sizeof(props->video_codec), "%s", codec->name ? codec->name : "");
+        snprintf(props->video_codec_long_name, sizeof(props->video_codec_long_name), "%s", codec->long_name ? codec->long_name : "");
+      }
+
+      // Framework Video Profile
+      char profile_buf[64];
+      avcodec_profile_name(codec_par->codec_id, codec_par->profile);
+      snprintf(props->video_profile, sizeof(props->video_profile), "%s", avcodec_profile_name(codec_par->codec_id, codec_par->profile) ? avcodec_profile_name(codec_par->codec_id, codec_par->profile) : "Unknown");
+
+      // Frame rate parsing
+      AVRational frame_rate = av_guess_frame_rate(fmt_ctx, stream, NULL);
+      if (frame_rate.den > 0)
+      {
+        props->framerate = av_q2d(frame_rate);
+      }
+
+      // Aspect Ratio tracking
+      AVRational dar;
+      av_reduce(&dar.num, &dar.den, codec_par->width * stream->sample_aspect_ratio.num, codec_par->height * stream->sample_aspect_ratio.den, 1024 * 1024);
+      if (dar.num > 0 && dar.den > 0)
+      {
+        snprintf(props->aspect_ratio, sizeof(props->aspect_ratio), "%d:%d", dar.num, dar.den);
+      }
+
+      // Pixel specs and Color Spaces
+      const char *pix_fmt_name = av_get_pix_fmt_name(codec_par->format);
+      snprintf(props->pixel_format, sizeof(props->pixel_format), "%s", pix_fmt_name ? pix_fmt_name : "");
+      snprintf(props->color_space, sizeof(props->color_space), "%s", av_color_space_name(codec_par->color_space) ? av_color_space_name(codec_par->color_space) : "");
+      snprintf(props->color_transfer, sizeof(props->color_transfer), "%s", av_color_transfer_name(codec_par->color_trc) ? av_color_transfer_name(codec_par->color_trc) : "");
+      snprintf(props->color_primaries, sizeof(props->color_primaries), "%s", av_color_primaries_name(codec_par->color_primaries) ? av_color_primaries_name(codec_par->color_primaries) : "");
+    }
+
+    // Handle Audio Track
+    else if (codec_par->codec_type == AVMEDIA_TYPE_AUDIO && !props->has_audio)
+    {
+      props->has_audio = 1;
+      props->audio_channels = codec_par->ch_layout.nb_channels;
+      props->sample_rate = codec_par->sample_rate;
+      props->audio_bit_rate = codec_par->bit_rate;
+
+      const AVCodec *codec = avcodec_find_decoder(codec_par->codec_id);
+      if (codec)
+      {
+        snprintf(props->audio_codec, sizeof(props->audio_codec), "%s", codec->name ? codec->name : "");
+        snprintf(props->audio_codec_long_name, sizeof(props->audio_codec_long_name), "%s", codec->long_name ? codec->long_name : "");
+      }
+
+      snprintf(props->audio_profile, sizeof(props->audio_profile), "%s", avcodec_profile_name(codec_par->codec_id, codec_par->profile) ? avcodec_profile_name(codec_par->codec_id, codec_par->profile) : "Unknown");
+
+      // Unpack Channel layout descriptive labels natively
+      char layout_buf[64];
+      av_channel_layout_describe(&codec_par->ch_layout, layout_buf, sizeof(layout_buf));
+      snprintf(props->channel_layout, sizeof(props->channel_layout), "%s", layout_buf);
+    }
+  }
+
+  // Context demolition cleanup
+  avformat_close_input(&fmt_ctx);
+  return 0;
+}

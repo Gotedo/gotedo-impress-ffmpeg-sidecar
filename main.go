@@ -343,3 +343,68 @@ func set_session_pts(userToken C.uintptr_t, pts C.double) {
 	session.CurrentPTS = float64(pts)
 	session.Mu.Unlock()
 }
+
+// GetMediaProperties probes a media file using native FFmpeg extraction loops.
+func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.MetadataRequest) (*proto.MetadataResponse, error) {
+	log.Printf("[SIDECAR] Received comprehensive GetMediaProperties request for file: %s", req.GetFilePath())
+
+	// 1. Verify existence profile natively before dropping into the C heap
+	fileInfo, err := os.Stat(req.GetFilePath())
+	if os.IsNotExist(err) {
+		return nil, status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
+	}
+
+	cPath := C.CString(req.GetFilePath())
+	defer C.free(unsafe.Pointer(cPath))
+
+	// 2. Allocate the properties struct cleanly on the C stack area
+	var cProps C.CMediaProperties
+
+	// 3. Invoke the C-Prober compilation engine
+	ret := C.probe_media_properties(cPath, &cProps)
+	if ret < 0 {
+		return nil, status.Errorf(codes.Internal, "FFmpeg native prober failed with code: %d", int(ret))
+	}
+
+	// 4. Read last modified metadata directly from filesystem fallback to bolster static tags
+	lastModifiedStr := fileInfo.ModTime().Format(time.RFC3339)
+
+	// 5. Unpack and map all parsed C fields directly into your gRPC Response layout
+	return &proto.MetadataResponse{
+		FormatName:     C.GoString(&cProps.format_name[0]),
+		FormatLongName: C.GoString(&cProps.format_long_name[0]),
+		DurationMs:     int64(cProps.duration_ms),
+		FileSizeMbytes: int64(cProps.file_size_bytes), // Maps to protocol layout
+		BitRate:        int64(cProps.bit_rate),
+
+		Title:        C.GoString(&cProps.title[0]),
+		Author:       C.GoString(&cProps.author[0]),
+		Album:        C.GoString(&cProps.album[0]),
+		Track:        C.GoString(&cProps.track[0]),
+		Genre:        C.GoString(&cProps.genre[0]),
+		CreationTime: C.GoString(&cProps.creation_time[0]),
+		LastModified: lastModifiedStr,
+
+		HasVideo:           bool(cProps.has_video != 0),
+		VideoCodec:         C.GoString(&cProps.video_codec[0]),
+		VideoCodecLongName: C.GoString(&cProps.video_codec_long_name[0]),
+		VideoProfile:       C.GoString(&cProps.video_profile[0]),
+		Width:              int32(cProps.width),
+		Height:             int32(cProps.height),
+		Framerate:          float64(cProps.framerate),
+		AspectRatio:        C.GoString(&cProps.aspect_ratio[0]),
+		PixelFormat:        C.GoString(&cProps.pixel_format[0]),
+		ColorSpace:         C.GoString(&cProps.color_space[0]),
+		ColorTransfer:      C.GoString(&cProps.color_transfer[0]),
+		ColorPrimaries:     C.GoString(&cProps.color_primaries[0]),
+
+		HasAudio:           bool(cProps.has_audio != 0),
+		AudioCodec:         C.GoString(&cProps.audio_codec[0]),
+		AudioCodecLongName: C.GoString(&cProps.audio_codec_long_name[0]),
+		AudioProfile:       C.GoString(&cProps.audio_profile[0]),
+		AudioChannels:      int32(cProps.audio_channels),
+		SampleRate:         int32(cProps.sample_rate),
+		ChannelLayout:      C.GoString(&cProps.channel_layout[0]),
+		AudioBitRate:       int64(cProps.audio_bit_rate),
+	}, nil
+}

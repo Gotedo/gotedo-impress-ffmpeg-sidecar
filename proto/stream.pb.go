@@ -629,6 +629,346 @@ func (x *DevicesResponse) GetDevices() []*AudioDevice {
 	return nil
 }
 
+type MetadataRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetadataRequest) Reset() {
+	*x = MetadataRequest{}
+	mi := &file_proto_stream_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetadataRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetadataRequest) ProtoMessage() {}
+
+func (x *MetadataRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetadataRequest.ProtoReflect.Descriptor instead.
+func (*MetadataRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *MetadataRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+type MetadataResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Container Format Information
+	FormatName     string `protobuf:"bytes,1,opt,name=format_name,json=formatName,proto3" json:"format_name,omitempty"`               // e.g., "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm"
+	FormatLongName string `protobuf:"bytes,2,opt,name=format_long_name,json=formatLongName,proto3" json:"format_long_name,omitempty"` // e.g., "QuickTime / MOV"
+	DurationMs     int64  `protobuf:"varint,3,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`              // Total duration mapped to milliseconds
+	FileSizeBytes  int64  `protobuf:"varint,4,opt,name=file_size_bytes,json=fileSizeBytes,proto3" json:"file_size_bytes,omitempty"`   // Direct file size on disk
+	BitRate        int64  `protobuf:"varint,5,opt,name=bit_rate,json=bitRate,proto3" json:"bit_rate,omitempty"`                       // Total stream tracking bitrate (bps)
+	// Core Extracted Tag Metadata
+	Title        string `protobuf:"bytes,6,opt,name=title,proto3" json:"title,omitempty"`
+	Author       string `protobuf:"bytes,7,opt,name=author,proto3" json:"author,omitempty"` // Maps to "artist" / "author"
+	Album        string `protobuf:"bytes,8,opt,name=album,proto3" json:"album,omitempty"`
+	Track        string `protobuf:"bytes,9,opt,name=track,proto3" json:"track,omitempty"`
+	Genre        string `protobuf:"bytes,10,opt,name=genre,proto3" json:"genre,omitempty"`
+	CreationTime string `protobuf:"bytes,11,opt,name=creation_time,json=creationTime,proto3" json:"creation_time,omitempty"` // ISO timestamp or raw tag string
+	LastModified string `protobuf:"bytes,12,opt,name=last_modified,json=lastModified,proto3" json:"last_modified,omitempty"`
+	// Primary Video Stream Parameters
+	HasVideo           bool    `protobuf:"varint,13,opt,name=has_video,json=hasVideo,proto3" json:"has_video,omitempty"`
+	VideoCodec         string  `protobuf:"bytes,14,opt,name=video_codec,json=videoCodec,proto3" json:"video_codec,omitempty"` // e.g., "h264", "hevc", "vp9"
+	VideoCodecLongName string  `protobuf:"bytes,15,opt,name=video_codec_long_name,json=videoCodecLongName,proto3" json:"video_codec_long_name,omitempty"`
+	VideoProfile       string  `protobuf:"bytes,16,opt,name=video_profile,json=videoProfile,proto3" json:"video_profile,omitempty"` // e.g., "Main", "High", "Main 10"
+	Width              int32   `protobuf:"varint,17,opt,name=width,proto3" json:"width,omitempty"`
+	Height             int32   `protobuf:"varint,18,opt,name=height,proto3" json:"height,omitempty"`
+	Framerate          float64 `protobuf:"fixed64,19,opt,name=framerate,proto3" json:"framerate,omitempty"`                               // Computed float value (fps)
+	AspectRatio        string  `protobuf:"bytes,20,opt,name=aspect_ratio,json=aspectRatio,proto3" json:"aspect_ratio,omitempty"`          // Display Aspect Ratio string (e.g., "16:9")
+	PixelFormat        string  `protobuf:"bytes,21,opt,name=pixel_format,json=pixelFormat,proto3" json:"pixel_format,omitempty"`          // e.g., "yuv420p", "yuv420p10le"
+	ColorSpace         string  `protobuf:"bytes,22,opt,name=color_space,json=colorSpace,proto3" json:"color_space,omitempty"`             // e.g., "bt709", "bt2020nc"
+	ColorTransfer      string  `protobuf:"bytes,23,opt,name=color_transfer,json=colorTransfer,proto3" json:"color_transfer,omitempty"`    // e.g., "arib-std-b67", "smpte2084"
+	ColorPrimaries     string  `protobuf:"bytes,24,opt,name=color_primaries,json=colorPrimaries,proto3" json:"color_primaries,omitempty"` // e.g., "bt2020"
+	// Primary Audio Stream Parameters
+	HasAudio           bool   `protobuf:"varint,25,opt,name=has_audio,json=hasAudio,proto3" json:"has_audio,omitempty"`
+	AudioCodec         string `protobuf:"bytes,26,opt,name=audio_codec,json=audioCodec,proto3" json:"audio_codec,omitempty"` // e.g., "aac", "opus", "mp3"
+	AudioCodecLongName string `protobuf:"bytes,27,opt,name=audio_codec_long_name,json=audioCodecLongName,proto3" json:"audio_codec_long_name,omitempty"`
+	AudioProfile       string `protobuf:"bytes,28,opt,name=audio_profile,json=audioProfile,proto3" json:"audio_profile,omitempty"`     // e.g., "LC", "HE"
+	AudioChannels      int32  `protobuf:"varint,29,opt,name=audio_channels,json=audioChannels,proto3" json:"audio_channels,omitempty"` // Total audio channels detected
+	SampleRate         int32  `protobuf:"varint,30,opt,name=sample_rate,json=sampleRate,proto3" json:"sample_rate,omitempty"`          // Audio sampling clock rate (Hz, e.g., 48000)
+	ChannelLayout      string `protobuf:"bytes,31,opt,name=channel_layout,json=channelLayout,proto3" json:"channel_layout,omitempty"`  // e.g., "stereo", "5.1(side)", "mono"
+	AudioBitRate       int64  `protobuf:"varint,32,opt,name=audio_bit_rate,json=audioBitRate,proto3" json:"audio_bit_rate,omitempty"`  // Audio track individual operational bitrate
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *MetadataResponse) Reset() {
+	*x = MetadataResponse{}
+	mi := &file_proto_stream_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetadataResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetadataResponse) ProtoMessage() {}
+
+func (x *MetadataResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetadataResponse.ProtoReflect.Descriptor instead.
+func (*MetadataResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *MetadataResponse) GetFormatName() string {
+	if x != nil {
+		return x.FormatName
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetFormatLongName() string {
+	if x != nil {
+		return x.FormatLongName
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetFileSizeBytes() int64 {
+	if x != nil {
+		return x.FileSizeBytes
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetBitRate() int64 {
+	if x != nil {
+		return x.BitRate
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAlbum() string {
+	if x != nil {
+		return x.Album
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetTrack() string {
+	if x != nil {
+		return x.Track
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetGenre() string {
+	if x != nil {
+		return x.Genre
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetCreationTime() string {
+	if x != nil {
+		return x.CreationTime
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetLastModified() string {
+	if x != nil {
+		return x.LastModified
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetHasVideo() bool {
+	if x != nil {
+		return x.HasVideo
+	}
+	return false
+}
+
+func (x *MetadataResponse) GetVideoCodec() string {
+	if x != nil {
+		return x.VideoCodec
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetVideoCodecLongName() string {
+	if x != nil {
+		return x.VideoCodecLongName
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetVideoProfile() string {
+	if x != nil {
+		return x.VideoProfile
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetWidth() int32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetHeight() int32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetFramerate() float64 {
+	if x != nil {
+		return x.Framerate
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetAspectRatio() string {
+	if x != nil {
+		return x.AspectRatio
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetPixelFormat() string {
+	if x != nil {
+		return x.PixelFormat
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetColorSpace() string {
+	if x != nil {
+		return x.ColorSpace
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetColorTransfer() string {
+	if x != nil {
+		return x.ColorTransfer
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetColorPrimaries() string {
+	if x != nil {
+		return x.ColorPrimaries
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetHasAudio() bool {
+	if x != nil {
+		return x.HasAudio
+	}
+	return false
+}
+
+func (x *MetadataResponse) GetAudioCodec() string {
+	if x != nil {
+		return x.AudioCodec
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAudioCodecLongName() string {
+	if x != nil {
+		return x.AudioCodecLongName
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAudioProfile() string {
+	if x != nil {
+		return x.AudioProfile
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAudioChannels() int32 {
+	if x != nil {
+		return x.AudioChannels
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetSampleRate() int32 {
+	if x != nil {
+		return x.SampleRate
+	}
+	return 0
+}
+
+func (x *MetadataResponse) GetChannelLayout() string {
+	if x != nil {
+		return x.ChannelLayout
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetAudioBitRate() int64 {
+	if x != nil {
+		return x.AudioBitRate
+	}
+	return 0
+}
+
 var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
@@ -671,14 +1011,57 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
 	"is_default\x18\x03 \x01(\bR\tisDefault\"@\n" +
 	"\x0fDevicesResponse\x12-\n" +
-	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices2\xe2\x02\n" +
+	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices\".\n" +
+	"\x0fMetadataRequest\x12\x1b\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\xbf\b\n" +
+	"\x10MetadataResponse\x12\x1f\n" +
+	"\vformat_name\x18\x01 \x01(\tR\n" +
+	"formatName\x12(\n" +
+	"\x10format_long_name\x18\x02 \x01(\tR\x0eformatLongName\x12\x1f\n" +
+	"\vduration_ms\x18\x03 \x01(\x03R\n" +
+	"durationMs\x12&\n" +
+	"\x0ffile_size_bytes\x18\x04 \x01(\x03R\rfileSizeBytes\x12\x19\n" +
+	"\bbit_rate\x18\x05 \x01(\x03R\abitRate\x12\x14\n" +
+	"\x05title\x18\x06 \x01(\tR\x05title\x12\x16\n" +
+	"\x06author\x18\a \x01(\tR\x06author\x12\x14\n" +
+	"\x05album\x18\b \x01(\tR\x05album\x12\x14\n" +
+	"\x05track\x18\t \x01(\tR\x05track\x12\x14\n" +
+	"\x05genre\x18\n" +
+	" \x01(\tR\x05genre\x12#\n" +
+	"\rcreation_time\x18\v \x01(\tR\fcreationTime\x12#\n" +
+	"\rlast_modified\x18\f \x01(\tR\flastModified\x12\x1b\n" +
+	"\thas_video\x18\r \x01(\bR\bhasVideo\x12\x1f\n" +
+	"\vvideo_codec\x18\x0e \x01(\tR\n" +
+	"videoCodec\x121\n" +
+	"\x15video_codec_long_name\x18\x0f \x01(\tR\x12videoCodecLongName\x12#\n" +
+	"\rvideo_profile\x18\x10 \x01(\tR\fvideoProfile\x12\x14\n" +
+	"\x05width\x18\x11 \x01(\x05R\x05width\x12\x16\n" +
+	"\x06height\x18\x12 \x01(\x05R\x06height\x12\x1c\n" +
+	"\tframerate\x18\x13 \x01(\x01R\tframerate\x12!\n" +
+	"\faspect_ratio\x18\x14 \x01(\tR\vaspectRatio\x12!\n" +
+	"\fpixel_format\x18\x15 \x01(\tR\vpixelFormat\x12\x1f\n" +
+	"\vcolor_space\x18\x16 \x01(\tR\n" +
+	"colorSpace\x12%\n" +
+	"\x0ecolor_transfer\x18\x17 \x01(\tR\rcolorTransfer\x12'\n" +
+	"\x0fcolor_primaries\x18\x18 \x01(\tR\x0ecolorPrimaries\x12\x1b\n" +
+	"\thas_audio\x18\x19 \x01(\bR\bhasAudio\x12\x1f\n" +
+	"\vaudio_codec\x18\x1a \x01(\tR\n" +
+	"audioCodec\x121\n" +
+	"\x15audio_codec_long_name\x18\x1b \x01(\tR\x12audioCodecLongName\x12#\n" +
+	"\raudio_profile\x18\x1c \x01(\tR\faudioProfile\x12%\n" +
+	"\x0eaudio_channels\x18\x1d \x01(\x05R\raudioChannels\x12\x1f\n" +
+	"\vsample_rate\x18\x1e \x01(\x05R\n" +
+	"sampleRate\x12%\n" +
+	"\x0echannel_layout\x18\x1f \x01(\tR\rchannelLayout\x12$\n" +
+	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate2\xab\x03\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
 	"StopStream\x12\x1c.ffmpeg.StreamControlRequest\x1a\x1d.ffmpeg.StreamControlResponse\x12@\n" +
 	"\rAdjustLatency\x12\x16.ffmpeg.LatencyRequest\x1a\x17.ffmpeg.LatencyResponse\x12@\n" +
 	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponse\x12B\n" +
-	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
+	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponse\x12G\n" +
+	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
@@ -693,7 +1076,7 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_proto_stream_proto_goTypes = []any{
 	(ControlRequest_Action)(0),    // 0: ffmpeg.ControlRequest.Action
 	(*StreamRequest)(nil),         // 1: ffmpeg.StreamRequest
@@ -707,6 +1090,8 @@ var file_proto_stream_proto_goTypes = []any{
 	(*DevicesRequest)(nil),        // 9: ffmpeg.DevicesRequest
 	(*AudioDevice)(nil),           // 10: ffmpeg.AudioDevice
 	(*DevicesResponse)(nil),       // 11: ffmpeg.DevicesResponse
+	(*MetadataRequest)(nil),       // 12: ffmpeg.MetadataRequest
+	(*MetadataResponse)(nil),      // 13: ffmpeg.MetadataResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
 	0,  // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
@@ -716,13 +1101,15 @@ var file_proto_stream_proto_depIdxs = []int32{
 	5,  // 4: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
 	7,  // 5: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
 	9,  // 6: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
-	2,  // 7: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	4,  // 8: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	6,  // 9: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	8,  // 10: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	11, // 11: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	7,  // [7:12] is the sub-list for method output_type
-	2,  // [2:7] is the sub-list for method input_type
+	12, // 7: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
+	2,  // 8: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	4,  // 9: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	6,  // 10: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	8,  // 11: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	11, // 12: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	13, // 13: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	8,  // [8:14] is the sub-list for method output_type
+	2,  // [2:8] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -739,7 +1126,7 @@ func file_proto_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

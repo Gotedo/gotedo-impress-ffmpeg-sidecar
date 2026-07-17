@@ -4,6 +4,8 @@
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>
+#include <libavutil/dict.h>
+#include <libavutil/pixdesc.h>
 #include <miniaudio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -59,6 +61,46 @@ typedef struct
   bool is_default;
 } NativeAudioDevice;
 
+// Media properties schema
+typedef struct
+{
+  char format_name[64];
+  char format_long_name[128];
+  int64_t duration_ms;
+  int64_t file_size_bytes;
+  int64_t bit_rate;
+
+  char title[128];
+  char author[128];
+  char album[128];
+  char track[16];
+  char genre[64];
+  char creation_time[64];
+  char last_modified[64];
+
+  int32_t has_video;
+  char video_codec[32];
+  char video_codec_long_name[128];
+  char video_profile[64];
+  int32_t width;
+  int32_t height;
+  double framerate;
+  char aspect_ratio[16];
+  char pixel_format[32];
+  char color_space[32];
+  char color_transfer[32];
+  char color_primaries[32];
+
+  int32_t has_audio;
+  char audio_codec[32];
+  char audio_codec_long_name[128];
+  char audio_profile[64];
+  int32_t audio_channels;
+  int32_t sample_rate;
+  char channel_layout[64];
+  int64_t audio_bit_rate;
+} CMediaProperties;
+
 // Function prototypes
 int init_audio_resampler(DemuxDecContext *ctx);
 int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path);
@@ -80,5 +122,8 @@ int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_c
 // Queries miniaudio context and populates devices buffer up to max_devices.
 // Returns total number of devices found, or a negative error code.
 int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
+
+// Probes a file and fills out the CMediaProperties memory layout
+int probe_media_properties(const char *file_path, CMediaProperties *props);
 
 #endif // DECODER_H
