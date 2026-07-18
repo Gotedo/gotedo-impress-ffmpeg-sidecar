@@ -130,4 +130,9 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
 int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
 
+// Control functions for runtime playback control
+void pause_playback(AudioPlaybackContext *play_ctx);
+void resume_playback(AudioPlaybackContext *play_ctx);
+int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms);
+
 #endif // DECODER_H

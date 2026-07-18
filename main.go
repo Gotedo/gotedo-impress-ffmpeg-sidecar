@@ -60,6 +60,10 @@ var (
 // registerPlayback stores (or replaces) a playback session for a target.
 // Safe to call even if a session already exists for that target.
 func registerPlayback(targetID string, sess *PlaybackSession) {
+	if _, exists := getPlayback(targetID); exists {
+		log.Printf("[SIDECAR] Overwriting existing playback for target: %s", targetID)
+	}
+
 	unregisterPlayback(targetID) // ensure clean state first (idempotent)
 
 	playbacksMu.Lock()
@@ -302,6 +306,22 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
+	}
+
+	// PRE: Handle case where target already has an active playback
+	if oldSess, exists := getPlayback(targetID); exists && oldSess != nil {
+		log.Printf("[SIDECAR] Target %s already has active playback — replacing it", targetID)
+
+		// Cancel the old streaming context so its handler exits cleanly
+		if oldSess.Cancel != nil {
+			oldSess.Cancel()
+		}
+
+		// Fully unregister (stops audio, frees C memory, deletes handle)
+		unregisterPlayback(targetID)
+
+		// Give the old goroutine a moment to exit its select loop
+		time.Sleep(30 * time.Millisecond)
 	}
 
 	// 1. Create isolated Go session context + cgo handle
@@ -574,8 +594,8 @@ func (s *ffmpegServer) Shutdown(ctx context.Context, req *proto.ShutdownRequest)
 func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequest) (*proto.ControlResponse, error) {
 	targetID := req.GetTargetId()
 	action := req.GetAction()
-
 	sess, ok := getPlayback(targetID)
+
 	if !ok || sess == nil {
 		return &proto.ControlResponse{
 			Success: false,
@@ -587,28 +607,44 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 	case proto.ControlRequest_STOP:
 		unregisterPlayback(targetID)
 		log.Printf("[SIDECAR] STOP command executed for target: %s", targetID)
+
 		return &proto.ControlResponse{
 			Success: true,
 			Message: "playback stopped",
 		}, nil
 
 	case proto.ControlRequest_PLAY:
-		log.Printf("[SIDECAR] PLAY command received for target: %s (runtime resume not yet implemented in pipeline)", targetID)
+		if sess.PlayCtx != nil {
+			C.resume_playback(sess.PlayCtx)
+		}
+		log.Printf("[SIDECAR] RESUMED target: %s", targetID)
+
 		return &proto.ControlResponse{
 			Success: true,
 			Message: "play acknowledged (limited support)",
 		}, nil
 
 	case proto.ControlRequest_PAUSE:
-		log.Printf("[SIDECAR] PAUSE command received for target: %s (runtime pause not yet implemented in pipeline)", targetID)
+		if sess.PlayCtx != nil {
+			C.pause_playback(sess.PlayCtx)
+		}
+		log.Printf("[SIDECAR] PAUSED target: %s", targetID)
+
 		return &proto.ControlResponse{
 			Success: true,
 			Message: "pause acknowledged (limited support)",
 		}, nil
 
 	case proto.ControlRequest_SEEK:
-		log.Printf("[SIDECAR] SEEK command received for target: %s (seekSeconds=%d) — runtime seek not yet implemented in pipeline",
-			targetID, req.GetSeekSeconds())
+		seekMs := int64(req.GetSeekSeconds()) * 1000
+		if sess.DecCtx != nil {
+			ret := C.seek_playback(sess.DecCtx, C.int64_t(seekMs))
+			if ret < 0 {
+				return &proto.ControlResponse{Success: false, Message: "seek failed"}, nil
+			}
+		}
+		log.Printf("[SIDECAR] SEEK to %d ms on target: %s", seekMs, targetID)
+
 		return &proto.ControlResponse{
 			Success: true,
 			Message: "seek acknowledged (limited support)",

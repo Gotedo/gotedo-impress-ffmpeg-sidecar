@@ -1248,3 +1248,65 @@ cleanup:
 
   return ret;
 }
+
+/**
+ * Pauses audio playback by stopping the miniaudio device.
+ * Video packets will continue to be processed but audio output is silenced.
+ */
+void pause_playback(AudioPlaybackContext *play_ctx)
+{
+  if (play_ctx && play_ctx->is_active)
+  {
+    ma_device_stop(&play_ctx->device);
+    play_ctx->is_active = 0;
+  }
+}
+
+/**
+ * Resumes audio playback.
+ */
+void resume_playback(AudioPlaybackContext *play_ctx)
+{
+  if (play_ctx && !play_ctx->is_active)
+  {
+    ma_device_start(&play_ctx->device);
+    play_ctx->is_active = 1;
+  }
+}
+
+/**
+ * Seeks to a specific time in milliseconds.
+ * Flushes decoders and seeks the format context.
+ * Note: This is a basic implementation. Full seamless seeking while streaming
+ * fMP4 to MSE requires additional frontend handling.
+ */
+int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms)
+{
+  if (!dec_ctx || !dec_ctx->fmt_ctx)
+  {
+    return -1;
+  }
+
+  int64_t seek_target = (int64_t)(seek_time_ms * (int64_t)AV_TIME_BASE / 1000);
+
+  // Seek on video stream if available, otherwise on default
+  int stream_index = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
+
+  int ret = av_seek_frame(dec_ctx->fmt_ctx, stream_index, seek_target, AVSEEK_FLAG_BACKWARD);
+  if (ret < 0)
+  {
+    return ret;
+  }
+
+  // Flush decoders
+  if (dec_ctx->video_dec_ctx)
+  {
+    avcodec_flush_buffers(dec_ctx->video_dec_ctx);
+  }
+  if (dec_ctx->audio_dec_ctx)
+  {
+    avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
+  }
+
+  return 0;
+}
