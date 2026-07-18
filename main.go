@@ -113,13 +113,31 @@ func unregisterPlayback(targetID string) {
 	delete(activePlaybacks, targetID)
 	playbacksMu.Unlock()
 
+	// 1. CRITICAL FIX: Signal the C streaming loop to terminate cleanly
+	if sess.DecCtx != nil {
+		C.request_stop_on_dec_ctx(sess.DecCtx)
+	}
+
 	// Perform actual resource cleanup outside the lock
 	if sess.Cancel != nil {
 		sess.Cancel()
 	}
 
-	// Full cleanup of C resources (audio + decoders)
-	stopPlayback(targetID)
+	// Give the old C pipeline goroutine a moment to exit
+	// (prevents use-after-free on the cgo.Handle and internal contexts)
+	time.Sleep(250 * time.Millisecond)
+
+	// 2. CRITICAL FIX: Inline the cleanup of C resources here because
+	// stopPlayback would fail to find the session in the map.
+	if sess.PlayCtx != nil {
+		C.stop_audio_playback(sess.PlayCtx)
+		sess.PlayCtx = nil
+	}
+
+	if sess.DecCtx != nil {
+		C.free_demux_dec_context(sess.DecCtx)
+		sess.DecCtx = nil
+	}
 
 	if sess.Handle != 0 {
 		sess.Handle.Delete()
@@ -146,6 +164,11 @@ func stopPlayback(targetID string) {
 	}
 	playbacksMu.Unlock()
 
+	// Ensure the loop stops pushing data before we free underneath it
+	if sess.DecCtx != nil {
+		C.request_stop_on_dec_ctx(sess.DecCtx)
+	}
+
 	// Stop audio first
 	if sess.PlayCtx != nil {
 		C.stop_audio_playback(sess.PlayCtx)
@@ -161,6 +184,12 @@ func stopPlayback(targetID string) {
 
 //export goTestWriteCallback
 func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goTestWriteCallback: %v", r)
+		}
+	}()
+
 	// Reconstruct the Handle directly from the integer token
 	handle := cgo.Handle(userToken)
 
@@ -176,10 +205,12 @@ func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 
 	// Push data cleanly into this monitor's private channel array
 	// Stream the chunk alongside the current active time context
+	// Allow the channel to block the C thread to establish backpressure.
+	// Use a 1-second timeout as a safety release valve if the client disconnects unexpectedly.
 	select {
 	case session.StreamChan <- ChunkPayload{Data: data, PTS: pts}:
-	default:
-		// Drop frame if buffer backs up heavily to prevent core thread locks
+	case <-time.After(1 * time.Second):
+		log.Println("[SIDECAR] Warning: Dropping fMP4 chunk to prevent core thread deadlock")
 	}
 }
 
@@ -346,7 +377,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		}
 
 		// Give the old goroutine a moment to exit its select loop
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 
 		// Fully unregister (stops audio, frees C memory, deletes handle)
 		unregisterPlayback(targetID)
@@ -377,7 +408,8 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	}
 
 	// 4. Init audio playback (note: audio_device_id support will be added later)
-	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(600)); ret < 0 {
+	// In StartStream(), change the 600 seconds buffer to 3 seconds
+	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(3)); ret < 0 {
 		C.free_demux_dec_context(decCtx)
 		C.free(unsafe.Pointer(playCtx))
 		handle.Delete()
@@ -493,6 +525,12 @@ func (s *ffmpegServer) AdjustLatency(ctx context.Context, req *proto.LatencyRequ
 
 //export set_session_pts
 func set_session_pts(userToken C.uintptr_t, pts C.double) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in set_session_pts: %v", r)
+		}
+	}()
+
 	handle := cgo.Handle(userToken)
 	session := handle.Value().(*SessionContext)
 
