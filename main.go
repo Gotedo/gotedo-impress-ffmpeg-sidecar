@@ -404,7 +404,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	// 6. Start the C pipeline goroutine
 	pipelineErrChan := make(chan int, 1)
 	go func() {
-		ret := C.run_production_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
+		ret := C.run_streaming_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
 		pipelineErrChan <- int(ret)
 	}()
 
@@ -653,19 +653,9 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 		}, nil
 
 	case proto.ControlRequest_PLAY:
-		if sess.PlayCtx != nil {
-			resumePTS := int64(sess.lastPausePTS * 1000)
-			C.resume_playback(sess.PlayCtx, C.int64_t(resumePTS))
-
-			// Seek to pause point if we have a valid timestamp
-			if resumePTS > 0 && sess.DecCtx != nil {
-				ret := C.seek_playback(sess.DecCtx, C.int64_t(resumePTS))
-				if ret < 0 {
-					return &proto.ControlResponse{Success: false, Message: "Playback resumption failed"}, nil
-				}
-			}
+		if sess.DecCtx != nil {
+			C.set_dec_ctx_paused(sess.DecCtx, C.int(0))
 		}
-		sess.isPaused = false
 		log.Printf("[SIDECAR] RESUMED target: %s", targetID)
 
 		return &proto.ControlResponse{
@@ -680,7 +670,14 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 			C.pause_playback(sess.PlayCtx)
 		}
 
+		// Signal the streaming loop to stop processing new packets (video + audio).
+		// This is the key to "audio stops exactly when video is paused".
+		if sess.DecCtx != nil {
+			C.set_dec_ctx_paused(sess.DecCtx, C.int(1))
+		}
+		sess.isPaused = true
 		log.Printf("[SIDECAR] PAUSED target=%s at %.2fs", targetID, capturedPTS)
+
 		return &proto.ControlResponse{
 			Success: true,
 			Message: fmt.Sprintf("Playback paused at %.2fs: File: %s", capturedPTS, sess.FilePath),
@@ -689,10 +686,9 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 	case proto.ControlRequest_SEEK:
 		seekMs := int64(req.GetSeekSeconds()) * 1000
 		if sess.DecCtx != nil {
-			ret := C.seek_playback(sess.DecCtx, C.int64_t(seekMs))
-			if ret < 0 {
-				return &proto.ControlResponse{Success: false, Message: "seek failed"}, nil
-			}
+			// Use the flag-based request so the streaming loop performs the seek
+			// cleanly without racing with av_read_frame.
+			C.request_seek_on_dec_ctx(sess.DecCtx, C.int64_t(seekMs))
 		}
 		log.Printf("[SIDECAR] SEEK to %d ms on target: %s", seekMs, targetID)
 

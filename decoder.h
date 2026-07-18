@@ -6,6 +6,7 @@
 #include <libswresample/swresample.h>
 #include <libavutil/dict.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/time.h>
 #include <miniaudio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -29,6 +30,17 @@ typedef struct DemuxDecContext
   int target_sample_rate;
   AVChannelLayout target_ch_layout;
   enum AVSampleFormat target_sample_fmt;
+
+  // Robust Streaming Control States
+  // These fields allow the background demux/remux goroutine to react to
+  // pause, seek, and stop commands from the Go side in a thread-safe manner
+  // without races on av_read_frame / av_seek_frame.
+  // Decision: Use volatile + atomic operations for simple flags.
+  // For seek_target we accept a small race window because seeking is infrequent.
+  volatile int paused;             // 1 = pipeline should stop pushing new data
+  volatile int64_t seek_target_ms; // Target time when seek_requested is set
+  volatile int seek_requested;     // Set to 1 by Go to request a seek
+  volatile int stop_requested;     // Clean exit signal from Go
 } DemuxDecContext;
 
 typedef struct TranscodeContext
@@ -55,6 +67,8 @@ typedef struct AudioPlaybackContext
   // Pause/Resume control
   volatile int paused;
   volatile int64_t pause_pts_ms; // PTS (in ms) at the time pause was requested
+
+  int ring_buffer_size_frames; // Total size of the ring buffer (stored at init)
 } AudioPlaybackContext;
 
 // Struct mapping exactly to our proto/Go expectations
@@ -138,5 +152,46 @@ int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *
 void pause_playback(AudioPlaybackContext *play_ctx);
 void resume_playback(AudioPlaybackContext *play_ctx, int64_t resume_pts_ms);
 int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms);
+
+/**
+ * ROBUST INCREMENTAL STREAMING PIPELINE
+ *
+ * This function implements a proper streaming model combining the best aspects
+ * of paced remuxing, just-in-time audio, and controllable background processing.
+ *
+ * Key Design Decisions & Rationale:
+ * - Uses PTS read-ahead window (Option 1) so we only remux video ~8-12 seconds
+ *   ahead of what the browser is currently rendering. This prevents wasting
+ *   CPU/disk on unwatched parts of long videos.
+ * - Audio is decoded just-in-time (Option 2): before decoding an audio packet
+ *   we check ring buffer free space. If low, we sleep. This naturally throttles
+ *   the entire pipeline to roughly real-time speed.
+ * - Control flags in DemuxDecContext (Option 3 style) allow clean pause/seek/stop
+ *   while the loop is running. The loop checks these flags frequently.
+ * - The goroutine stays alive until explicit stop or client disconnect.
+ *   It does NOT exit on EOF while the client is still connected.
+ * - Audio processing is stopped exactly when paused == 1. This guarantees
+ *   A/V sync on resume (no audio "running ahead" while video is frozen).
+ *
+ * Merits:
+ *   + Excellent CPU efficiency for long videos (only processes what is needed).
+ *   + True incremental streaming behavior.
+ *   + Pause exactly freezes both video delivery and audio decoding.
+ *   + Seek works cleanly even while pipeline is active.
+ *   + Backpressure via channel size + PTS window.
+ *
+ * Demerits / Trade-offs:
+ *   - Slightly more complex than the original burst version.
+ *   - Requires the frontend to regularly report current PTS via set_session_pts
+ *     (already happening).
+ *   - On very high bitrate video with tiny GOP, the read-ahead may still send
+ *     a few MB quickly, but far less than the entire file.
+ */
+int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
+
+// Control flag setters (called from Go to signal the streaming loop)
+void set_dec_ctx_paused(DemuxDecContext *ctx, int paused);
+void request_seek_on_dec_ctx(DemuxDecContext *ctx, int64_t seek_ms);
+void request_stop_on_dec_ctx(DemuxDecContext *ctx);
 
 #endif // DECODER_H

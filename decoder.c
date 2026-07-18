@@ -509,6 +509,8 @@ int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int cha
     return -1;
   }
 
+  play_ctx->ring_buffer_size_frames = buffer_size_frames;
+
   // 2. Setup the low-level device configuration
   ma_device_config config = ma_device_config_init(ma_device_type_playback);
   config.playback.format = ma_format_f32;
@@ -1127,143 +1129,6 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 }
 
 /**
- * Production version of the mux + play pipeline.
- * Processes the entire media file without artificial frame limits.
- * Used by the gRPC StartStream handler for real playback.
- */
-int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
-{
-  int ret;
-  TranscodeContext tx_ctx;
-  AVFormatContext *out_fmt_ctx = NULL;
-  AVPacket *pkt = NULL;
-  AVFrame *frame = NULL;
-  float *resample_buf = NULL;
-
-  // Set up the Go callback wrapper context
-  tx_ctx.go_user_token = go_token;
-  tx_ctx.go_callback = goTestWriteCallback;
-
-  // Initialize in-memory fMP4 muxer
-  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
-  if (ret < 0)
-  {
-    return ret;
-  }
-
-  // Add video stream to output muxer (if present)
-  if (dec_ctx->video_stream_idx >= 0)
-  {
-    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
-    if (!out_stream)
-    {
-      free_fmp4_muxer(out_fmt_ctx);
-      return AVERROR(ENOMEM);
-    }
-
-    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
-    if (ret < 0)
-    {
-      free_fmp4_muxer(out_fmt_ctx);
-      return ret;
-    }
-    out_stream->codecpar->codec_tag = 0;
-  }
-
-  // Write fMP4 header
-  ret = write_fmp4_header(out_fmt_ctx);
-  if (ret < 0)
-  {
-    free_fmp4_muxer(out_fmt_ctx);
-    return ret;
-  }
-
-  pkt = av_packet_alloc();
-  frame = av_frame_alloc();
-  resample_buf = (float *)malloc(48000 * 2 * sizeof(float));
-  if (!pkt || !frame || !resample_buf)
-  {
-    ret = AVERROR(ENOMEM);
-    goto cleanup;
-  }
-
-  // PRODUCTION LOOP - run until real EOF or error
-  while (true)
-  {
-    ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
-    if (ret == AVERROR_EOF)
-    {
-      ret = 0; // Normal end of file
-      break;
-    }
-    if (ret < 0)
-    {
-      break; // Real error
-    }
-
-    if (pkt->stream_index == dec_ctx->video_stream_idx)
-    {
-      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-      AVStream *out_stream = out_fmt_ctx->streams[0];
-
-      // Calculate and update PTS for latency tracking
-      double calculated_pts = 0.0;
-      if (pkt->pts != AV_NOPTS_VALUE)
-      {
-        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
-      }
-
-      extern void set_session_pts(uintptr_t token, double pts);
-      set_session_pts(tx_ctx.go_user_token, calculated_pts);
-
-      av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
-      pkt->stream_index = 0;
-
-      av_interleaved_write_frame(out_fmt_ctx, pkt);
-    }
-    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
-    {
-      ret = avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt);
-      if (ret >= 0)
-      {
-        while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
-        {
-          int out_samples = swr_convert(
-              dec_ctx->swr_ctx,
-              (uint8_t **)&resample_buf,
-              48000,
-              (const uint8_t **)frame->data,
-              frame->nb_samples);
-
-          if (out_samples > 0)
-          {
-            write_pcm_to_ring_buffer(play_ctx, resample_buf, out_samples);
-          }
-        }
-      }
-    }
-
-    av_packet_unref(pkt);
-  }
-
-  // Flush muxer
-  av_write_trailer(out_fmt_ctx);
-
-cleanup:
-  if (resample_buf)
-    free(resample_buf);
-  if (frame)
-    av_frame_free(&frame);
-  if (pkt)
-    av_packet_free(&pkt);
-  if (out_fmt_ctx)
-    free_fmp4_muxer(out_fmt_ctx);
-
-  return ret;
-}
-
-/**
  * Pauses video playback.
  */
 void pause_playback(AudioPlaybackContext *play_ctx)
@@ -1337,4 +1202,288 @@ int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms)
   }
 
   return 0;
+}
+
+int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
+{
+  int ret;
+  TranscodeContext tx_ctx;
+  AVFormatContext *out_fmt_ctx = NULL;
+  AVPacket *pkt = NULL;
+  AVFrame *frame = NULL;
+  float *resample_buf = NULL;
+
+  // --- Setup identical to production path ---
+  tx_ctx.go_user_token = go_token;
+  tx_ctx.go_callback = goTestWriteCallback;
+
+  // Initialize in-memory fMP4 muxer
+  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+  if (ret < 0)
+  {
+    return ret;
+  }
+
+  // Add video stream to output muxer (if present)
+  if (dec_ctx->video_stream_idx >= 0)
+  {
+    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+    if (!out_stream)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+    if (ret < 0)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return ret;
+    }
+    out_stream->codecpar->codec_tag = 0;
+  }
+
+  // Write fMP4 header
+  ret = write_fmp4_header(out_fmt_ctx);
+  if (ret < 0)
+  {
+    free_fmp4_muxer(out_fmt_ctx);
+    return ret;
+  }
+
+  pkt = av_packet_alloc();
+  frame = av_frame_alloc();
+  resample_buf = (float *)malloc(48000 * 2 * sizeof(float));
+  if (!pkt || !frame || !resample_buf)
+  {
+    ret = AVERROR(ENOMEM);
+    goto cleanup;
+  }
+
+  // Streaming Control Variables
+  double last_reported_pts = 0.0;
+  // READ_AHEAD_SECONDS: How far ahead of the browser's current playback position
+  // we are allowed to remux video.
+  //
+  // Decision: 10 seconds was chosen as a practical balance.
+  // Merit: Prevents the sidecar from remuxing large portions of unwatched video
+  //        (e.g. user only watches first 2 minutes of a 30-minute video).
+  // Demerit: If the browser/MSE is very slow to append and render, we may
+  //          temporarily under-buffer. This value can be tuned (8–15s range).
+  const double READ_AHEAD_SECONDS = 10.0;
+
+  // AUDIO_JIT_THRESHOLD_MS: Only decode more audio if the ring buffer has
+  // less than this amount buffered. This implements "Just-In-Time" audio
+  // decoding (Option 2).
+  //
+  // When the buffer is healthy (> 2.5s), we sleep instead of decoding more.
+  // This naturally throttles the entire demux/remux loop to roughly real-time.
+  // It also ensures that when paused == 1, we stop decoding audio immediately.
+  const int AUDIO_JIT_THRESHOLD_MS = 2500; // 2.5 seconds
+
+  // Main streaming loop — designed to stay alive and react to control signals.
+  // Unlike the old production version, this loop does NOT blindly run to EOF
+  // at full CPU speed. It is now paced and controllable.
+  while (true)
+  {
+    // 1. Check control flags from Go side (Option 3 style)
+    // We use atomic loads for thread-safety. The Go control thread (ControlStream)
+    // can set these flags at any time without locking the entire pipeline.
+    if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE))
+    {
+      break; // Clean shutdown requested
+    }
+
+    if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+    {
+      int64_t target_ms = __atomic_load_n(&dec_ctx->seek_target_ms, __ATOMIC_ACQUIRE);
+      // Perform seek on the format context + flush decoders.
+      // This is safe because we do it from inside the read loop thread,
+      // avoiding race conditions with av_read_frame.
+      int64_t seek_target = (int64_t)(target_ms * (int64_t)AV_TIME_BASE / 1000);
+      int stream_idx = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
+
+      if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
+      {
+        if (dec_ctx->video_dec_ctx)
+          avcodec_flush_buffers(dec_ctx->video_dec_ctx);
+        if (dec_ctx->audio_dec_ctx)
+          avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
+      }
+      __atomic_store_n(&dec_ctx->seek_requested, 0, __ATOMIC_RELEASE);
+      last_reported_pts = target_ms / 1000.0;
+      av_packet_unref(pkt);
+      continue;
+    }
+
+    if (__atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+    {
+      // CRITICAL: Exact Pause Behavior
+      // When paused we MUST NOT decode or push new audio.
+      // This guarantees audio does not advance while video is frozen.
+      // This is one of the most important requirements.
+      // We sleep to avoid busy-spinning the CPU.
+      av_usleep(20000); // 20ms
+      av_packet_unref(pkt);
+      continue;
+    }
+
+    // 2. Read next packet from container
+    ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
+    if (ret == AVERROR_EOF)
+    {
+      // For a streaming model we treat EOF as "no more data for now".
+      // We break so the trailer can be written and Go side can finish cleanly.
+      // The client will receive the final chunks and then the stream ends naturally.
+      ret = 0;
+      break;
+    }
+    if (ret < 0)
+    {
+      break;
+    }
+
+    // 3. VIDEO PATH — PTS Read-Ahead + Backpressure (Option 1)
+    if (pkt->stream_index == dec_ctx->video_stream_idx)
+    {
+      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+      AVStream *out_stream = out_fmt_ctx->streams[0];
+
+      double calculated_pts = 0.0;
+      if (pkt->pts != AV_NOPTS_VALUE)
+      {
+        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
+      }
+
+      // Read-ahead throttle (Core of incremental streaming)
+      // Only push video if it is within READ_AHEAD_SECONDS of what the browser
+      // has reported via set_session_pts.
+      //
+      // This is the primary mechanism that stops the sidecar from remuxing
+      // the entire file when the user only watches a small portion.
+      if (last_reported_pts > 0.5 && calculated_pts > last_reported_pts + READ_AHEAD_SECONDS)
+      {
+        // We are too far ahead of the actual playback position.
+        // Sleep briefly and re-evaluate next iteration.
+        // This prevents CPU waste on unwatched content.
+        av_usleep(3000);
+        av_packet_unref(pkt);
+        continue;
+      }
+
+      // Update PTS tracking (frontend uses this for latency compensation)
+      extern void set_session_pts(uintptr_t token, double pts);
+      set_session_pts(tx_ctx.go_user_token, calculated_pts);
+      last_reported_pts = calculated_pts;
+
+      av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+      pkt->stream_index = 0;
+
+      av_interleaved_write_frame(out_fmt_ctx, pkt);
+    }
+
+    // 4. AUDIO PATH — Just-In-Time Decoding (Option 2)
+    // We only decode audio when there is meaningful room in the ring buffer.
+    // This naturally couples audio production rate to consumption rate and
+    // prevents the pipeline from racing ahead of real-time playback.
+    //
+    // Combined with the paused flag check above, this ensures audio
+    // completely stops when the user pauses the video.
+    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
+    {
+      // Query current ring buffer state
+      // ma_pcm_rb_available_read() takes only one argument and returns
+      // the number of available frames directly.
+      ma_uint32 available_frames = ma_pcm_rb_available_read(&play_ctx->ring_buffer);
+
+      ma_uint32 total_frames = play_ctx->ring_buffer_size_frames; // stored during init_audio_playback()
+      int buffered_ms = 0;
+      if (total_frames > 0)
+      {
+        buffered_ms = (int)((available_frames * 1000ULL) / (ma_uint64)play_ctx->sample_rate);
+      }
+
+      int free_ms = (play_ctx->sample_rate > 0)
+                        ? ((int)((total_frames - available_frames) * 1000ULL) / play_ctx->sample_rate)
+                        : 0;
+
+      // Only decode more audio if we have less than the JIT threshold buffered
+      // AND we are not paused.
+      if (free_ms > AUDIO_JIT_THRESHOLD_MS || __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+      {
+        // Buffer is healthy or we are paused → do not decode more audio now.
+        // Sleep to throttle the whole demux loop.
+        av_usleep(4000);
+        av_packet_unref(pkt);
+        continue;
+      }
+
+      // Buffer has room — safe to decode and push
+      ret = avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt);
+      if (ret >= 0)
+      {
+        while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
+        {
+          int out_samples = swr_convert(
+              dec_ctx->swr_ctx,
+              (uint8_t **)&resample_buf,
+              48000,
+              (const uint8_t **)frame->data,
+              frame->nb_samples);
+
+          if (out_samples > 0)
+          {
+            write_pcm_to_ring_buffer(play_ctx, resample_buf, out_samples);
+          }
+        }
+      }
+    }
+
+    av_packet_unref(pkt);
+  }
+
+  // Write trailer to finalize the last fMP4 fragment
+  if (out_fmt_ctx)
+  {
+    av_write_trailer(out_fmt_ctx);
+  }
+
+cleanup:
+  if (resample_buf)
+    free(resample_buf);
+  if (frame)
+    av_frame_free(&frame);
+  if (pkt)
+    av_packet_free(&pkt);
+  if (out_fmt_ctx)
+    free_fmp4_muxer(out_fmt_ctx);
+
+  return ret;
+}
+
+// Small helpers to set control flags from Go in a clean way
+void set_dec_ctx_paused(DemuxDecContext *ctx, int paused)
+{
+  if (ctx)
+  {
+    __atomic_store_n(&ctx->paused, paused, __ATOMIC_RELEASE);
+  }
+}
+
+void request_seek_on_dec_ctx(DemuxDecContext *ctx, int64_t seek_ms)
+{
+  if (ctx)
+  {
+    __atomic_store_n(&ctx->seek_target_ms, seek_ms, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->seek_requested, 1, __ATOMIC_RELEASE);
+  }
+}
+
+void request_stop_on_dec_ctx(DemuxDecContext *ctx)
+{
+  if (ctx)
+  {
+    __atomic_store_n(&ctx->stop_requested, 1, __ATOMIC_RELEASE);
+  }
 }
