@@ -674,10 +674,6 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 		}, nil
 
 	case proto.ControlRequest_PAUSE:
-		if sess == nil {
-			return &proto.ControlResponse{Success: false, Message: "Playback session not available for pause"}, nil
-		}
-
 		capturedPTS := sess.captureCurrentPTSForPause()
 
 		if sess.PlayCtx != nil {
