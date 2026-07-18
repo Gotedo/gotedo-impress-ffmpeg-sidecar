@@ -1111,3 +1111,140 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
   return encode_success ? 0 : -9;
 }
+
+/**
+ * Production version of the mux + play pipeline.
+ * Processes the entire media file without artificial frame limits.
+ * Used by the gRPC StartStream handler for real playback.
+ */
+int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
+{
+  int ret;
+  TranscodeContext tx_ctx;
+  AVFormatContext *out_fmt_ctx = NULL;
+  AVPacket *pkt = NULL;
+  AVFrame *frame = NULL;
+  float *resample_buf = NULL;
+
+  // Set up the Go callback wrapper context
+  tx_ctx.go_user_token = go_token;
+  tx_ctx.go_callback = goTestWriteCallback;
+
+  // Initialize in-memory fMP4 muxer
+  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+  if (ret < 0)
+  {
+    return ret;
+  }
+
+  // Add video stream to output muxer (if present)
+  if (dec_ctx->video_stream_idx >= 0)
+  {
+    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+    if (!out_stream)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+    if (ret < 0)
+    {
+      free_fmp4_muxer(out_fmt_ctx);
+      return ret;
+    }
+    out_stream->codecpar->codec_tag = 0;
+  }
+
+  // Write fMP4 header
+  ret = write_fmp4_header(out_fmt_ctx);
+  if (ret < 0)
+  {
+    free_fmp4_muxer(out_fmt_ctx);
+    return ret;
+  }
+
+  pkt = av_packet_alloc();
+  frame = av_frame_alloc();
+  resample_buf = (float *)malloc(48000 * 2 * sizeof(float));
+  if (!pkt || !frame || !resample_buf)
+  {
+    ret = AVERROR(ENOMEM);
+    goto cleanup;
+  }
+
+  // PRODUCTION LOOP: Run until EOF or error
+  while (1)
+  {
+    ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
+    if (ret < 0)
+    {
+      // EOF or error — normal exit for production
+      if (ret == AVERROR_EOF)
+      {
+        ret = 0;
+      }
+      break;
+    }
+
+    if (pkt->stream_index == dec_ctx->video_stream_idx)
+    {
+      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+      AVStream *out_stream = out_fmt_ctx->streams[0];
+
+      // Calculate and update PTS for latency tracking
+      double calculated_pts = 0.0;
+      if (pkt->pts != AV_NOPTS_VALUE)
+      {
+        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
+      }
+
+      extern void set_session_pts(uintptr_t token, double pts);
+      set_session_pts(tx_ctx.go_user_token, calculated_pts);
+
+      av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+      pkt->stream_index = 0;
+
+      av_interleaved_write_frame(out_fmt_ctx, pkt);
+    }
+    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
+    {
+      ret = avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt);
+      if (ret >= 0)
+      {
+        while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
+        {
+          int out_samples = swr_convert(
+              dec_ctx->swr_ctx,
+              (uint8_t **)&resample_buf,
+              48000,
+              (const uint8_t **)frame->data,
+              frame->nb_samples);
+
+          if (out_samples > 0)
+          {
+            write_pcm_to_ring_buffer(play_ctx, resample_buf, out_samples);
+          }
+        }
+      }
+    }
+
+    av_packet_unref(pkt);
+  }
+
+  // Flush muxer
+  av_write_trailer(out_fmt_ctx);
+
+cleanup:
+  if (resample_buf)
+    free(resample_buf);
+  if (frame)
+    av_frame_free(&frame);
+  if (pkt)
+    av_packet_free(&pkt);
+  if (out_fmt_ctx)
+    free_fmp4_muxer(out_fmt_ctx);
+
+  return ret;
+}

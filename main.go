@@ -351,7 +351,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	// 6. Start the C pipeline goroutine
 	pipelineErrChan := make(chan int, 1)
 	go func() {
-		ret := C.run_test_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
+		ret := C.run_production_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
 		pipelineErrChan <- int(ret)
 	}()
 
@@ -567,29 +567,58 @@ func (s *ffmpegServer) Shutdown(ctx context.Context, req *proto.ShutdownRequest)
 	return &proto.ShutdownResponse{Accepted: true}, nil
 }
 
-// ControlStream handles PLAY/PAUSE/SEEK/STOP for a specific target
+// ControlStream handles PLAY/PAUSE/SEEK/STOP for a specific target.
+// STOP is fully supported. PLAY/PAUSE/SEEK currently return success
+// (so the frontend doesn't break) but require future enhancements
+// in the C demux/mux loop for true runtime control.
 func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequest) (*proto.ControlResponse, error) {
 	targetID := req.GetTargetId()
 	action := req.GetAction()
 
-	_, ok := getPlayback(targetID)
-	if !ok {
-		return &proto.ControlResponse{Success: false, Message: "no active playback for target"}, nil
+	sess, ok := getPlayback(targetID)
+	if !ok || sess == nil {
+		return &proto.ControlResponse{
+			Success: false,
+			Message: "no active playback for target",
+		}, nil
 	}
 
 	switch action {
 	case proto.ControlRequest_STOP:
 		unregisterPlayback(targetID)
-		return &proto.ControlResponse{Success: true, Message: "stopped"}, nil
+		log.Printf("[SIDECAR] STOP command executed for target: %s", targetID)
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "playback stopped",
+		}, nil
 
-	case proto.ControlRequest_PLAY, proto.ControlRequest_PAUSE, proto.ControlRequest_SEEK:
-		// NOTE: Full runtime pause/seek requires changes to run_test_mux_and_play loop.
-		// For now we acknowledge so the frontend does not break.
-		log.Printf("[SIDECAR] Control action %v received for %s (pipeline support pending)", action, targetID)
-		return &proto.ControlResponse{Success: true, Message: "acknowledged (limited support)"}, nil
+	case proto.ControlRequest_PLAY:
+		log.Printf("[SIDECAR] PLAY command received for target: %s (runtime resume not yet implemented in pipeline)", targetID)
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "play acknowledged (limited support)",
+		}, nil
+
+	case proto.ControlRequest_PAUSE:
+		log.Printf("[SIDECAR] PAUSE command received for target: %s (runtime pause not yet implemented in pipeline)", targetID)
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "pause acknowledged (limited support)",
+		}, nil
+
+	case proto.ControlRequest_SEEK:
+		log.Printf("[SIDECAR] SEEK command received for target: %s (seekSeconds=%d) — runtime seek not yet implemented in pipeline",
+			targetID, req.GetSeekSeconds())
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "seek acknowledged (limited support)",
+		}, nil
 
 	default:
-		return &proto.ControlResponse{Success: false, Message: "unknown action"}, nil
+		return &proto.ControlResponse{
+			Success: false,
+			Message: "unknown action",
+		}, nil
 	}
 }
 

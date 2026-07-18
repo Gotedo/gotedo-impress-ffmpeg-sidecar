@@ -116,7 +116,6 @@ void stop_audio_playback(AudioPlaybackContext *play_ctx);
 
 void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
 
-// Test Pipeline Declaration
 int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
 
 // Queries miniaudio context and populates devices buffer up to max_devices.
@@ -128,5 +127,7 @@ int probe_media_properties(const char *file_path, CMediaProperties *props);
 
 // Extract a compressed image frame into a dynamically allocated buffer
 int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **out_buf, int *out_size);
+
+int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
 
 #endif // DECODER_H
