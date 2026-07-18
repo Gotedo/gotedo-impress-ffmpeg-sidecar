@@ -51,6 +51,10 @@ typedef struct AudioPlaybackContext
   // Thread-Safe Latency Management Variables
   volatile int target_delay_ms;       // Desired delay targeted by Go feedback loop
   volatile int current_delay_samples; // Cumulative live sample offset balance
+
+  // Pause/Resume control
+  volatile int paused;
+  volatile int64_t pause_pts_ms; // PTS (in ms) at the time pause was requested
 } AudioPlaybackContext;
 
 // Struct mapping exactly to our proto/Go expectations
@@ -132,7 +136,7 @@ int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *
 
 // Control functions for runtime playback control
 void pause_playback(AudioPlaybackContext *play_ctx);
-void resume_playback(AudioPlaybackContext *play_ctx);
+void resume_playback(AudioPlaybackContext *play_ctx, int64_t resume_pts_ms);
 int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms);
 
 #endif // DECODER_H

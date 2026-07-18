@@ -37,9 +37,10 @@ type ChunkPayload struct {
 
 // SessionContext tracks the state isolated to a single active playback monitor
 type SessionContext struct {
-	StreamChan chan ChunkPayload
-	CurrentPTS float64
-	Mu         sync.Mutex
+	StreamChan      chan ChunkPayload
+	CurrentPTS      float64
+	Mu              sync.Mutex
+	playbackSession *PlaybackSession
 }
 
 // Per-target playback session registry (enables safe concurrent playbacks)
@@ -50,12 +51,39 @@ type PlaybackSession struct {
 	SessionCtx *SessionContext
 	Handle     cgo.Handle
 	Cancel     context.CancelFunc
+	// Track pause state for proper resume
+	lastPausePTS float64
+	isPaused     bool
+	lastKnownPTS float64 // continuously updated from set_session_pts
+	FilePath     string
+	Mu           sync.Mutex
 }
 
 var (
 	activePlaybacks = make(map[string]*PlaybackSession)
 	playbacksMu     sync.RWMutex
 )
+
+// updateLastKnownPTS is called from set_session_pts / telemetry
+func (s *PlaybackSession) updateLastKnownPTS(pts float64) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.lastKnownPTS = pts
+}
+
+// captureCurrentPTSForPause snapshots the most recent PTS pushed by
+// the C pipeline via set_session_pts. This is the reliable way to
+// know exactly where we are when the user presses pause.
+func (s *PlaybackSession) captureCurrentPTSForPause() float64 {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.lastPausePTS = s.lastKnownPTS
+	if s.lastPausePTS == 0 && s.SessionCtx != nil {
+		s.lastPausePTS = s.SessionCtx.CurrentPTS
+	}
+	s.isPaused = true
+	return s.lastPausePTS
+}
 
 // registerPlayback stores (or replaces) a playback session for a target.
 // Safe to call even if a session already exists for that target.
@@ -365,7 +393,12 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		SessionCtx: sessionCtx,
 		Handle:     handle,
 		Cancel:     cancel,
+		FilePath:   req.GetFilePath(),
 	}
+	// Update the session context
+	sessionCtx.Mu.Lock()
+	sessionCtx.playbackSession = sess
+	sessionCtx.Mu.Unlock()
 	registerPlayback(targetID, sess)
 
 	// 6. Start the C pipeline goroutine
@@ -466,6 +499,12 @@ func set_session_pts(userToken C.uintptr_t, pts C.double) {
 	session.Mu.Lock()
 	session.CurrentPTS = float64(pts)
 	session.Mu.Unlock()
+
+	if session.playbackSession != nil {
+		session.playbackSession.Mu.Lock()
+		session.playbackSession.lastKnownPTS = float64(pts)
+		session.playbackSession.Mu.Unlock()
+	}
 }
 
 // GetMediaProperties probes a media file using native FFmpeg extraction loops.
@@ -615,24 +654,40 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 
 	case proto.ControlRequest_PLAY:
 		if sess.PlayCtx != nil {
-			C.resume_playback(sess.PlayCtx)
+			resumePTS := int64(sess.lastPausePTS * 1000)
+			C.resume_playback(sess.PlayCtx, C.int64_t(resumePTS))
+
+			// Seek to pause point if we have a valid timestamp
+			if resumePTS > 0 && sess.DecCtx != nil {
+				ret := C.seek_playback(sess.DecCtx, C.int64_t(resumePTS))
+				if ret < 0 {
+					return &proto.ControlResponse{Success: false, Message: "Playback resumption failed"}, nil
+				}
+			}
 		}
+		sess.isPaused = false
 		log.Printf("[SIDECAR] RESUMED target: %s", targetID)
 
 		return &proto.ControlResponse{
 			Success: true,
-			Message: "play acknowledged (limited support)",
+			Message: fmt.Sprintf("Playback resumed. File: %s", sess.FilePath),
 		}, nil
 
 	case proto.ControlRequest_PAUSE:
+		if sess == nil {
+			return &proto.ControlResponse{Success: false, Message: "Playback session not available for pause"}, nil
+		}
+
+		capturedPTS := sess.captureCurrentPTSForPause()
+
 		if sess.PlayCtx != nil {
 			C.pause_playback(sess.PlayCtx)
 		}
-		log.Printf("[SIDECAR] PAUSED target: %s", targetID)
 
+		log.Printf("[SIDECAR] PAUSED target=%s at %.2fs", targetID, capturedPTS)
 		return &proto.ControlResponse{
 			Success: true,
-			Message: "pause acknowledged (limited support)",
+			Message: fmt.Sprintf("Playback paused at %.2fs: File: %s", capturedPTS, sess.FilePath),
 		}, nil
 
 	case proto.ControlRequest_SEEK:
@@ -647,7 +702,7 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 
 		return &proto.ControlResponse{
 			Success: true,
-			Message: "seek acknowledged (limited support)",
+			Message: fmt.Sprintf("Seek performed at %d: File: %s", seekMs, sess.FilePath),
 		}, nil
 
 	default:

@@ -485,6 +485,8 @@ int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int cha
   play_ctx->sample_rate = sample_rate;
   play_ctx->channels = channels;
   play_ctx->is_active = 0;
+  play_ctx->paused = 0;
+  play_ctx->pause_pts_ms = 0;
 
   // 1. Initialize the thread-safe PCM ring buffer.
   // We size the buffer to hold 1.5 seconds of audio frames to absorb pipeline jitter comfortably.
@@ -1188,6 +1190,16 @@ int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *
       break;
     }
 
+    // Respect pause flag
+    if (play_ctx->paused)
+    {
+      // When paused, we don't output video or audio.
+      // We still keep the demux context alive.
+      av_packet_unref(pkt);
+      usleep(8000); // ~8ms sleep to reduce CPU usage while paused
+      continue;
+    }
+
     if (pkt->stream_index == dec_ctx->video_stream_idx)
     {
       AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
@@ -1250,12 +1262,15 @@ cleanup:
 }
 
 /**
- * Pauses audio playback by stopping the miniaudio device.
- * Video packets will continue to be processed but audio output is silenced.
+ * Pauses video playback.
  */
 void pause_playback(AudioPlaybackContext *play_ctx)
 {
-  if (play_ctx && play_ctx->is_active)
+  if (!play_ctx)
+    return;
+
+  play_ctx->paused = 1;
+  if (play_ctx->is_active)
   {
     ma_device_stop(&play_ctx->device);
     play_ctx->is_active = 0;
@@ -1263,11 +1278,22 @@ void pause_playback(AudioPlaybackContext *play_ctx)
 }
 
 /**
- * Resumes audio playback.
+ * Resumes video playback.
  */
-void resume_playback(AudioPlaybackContext *play_ctx)
+void resume_playback(AudioPlaybackContext *play_ctx, int64_t resume_pts_ms)
 {
-  if (play_ctx && !play_ctx->is_active)
+  if (!play_ctx)
+    return;
+
+  play_ctx->paused = 0;
+
+  // If a resume PTS is provided, seek to it
+  if (resume_pts_ms > 0)
+  {
+    // Note: seek_playback is called from Go side for safety
+  }
+
+  if (!play_ctx->is_active)
   {
     ma_device_start(&play_ctx->device);
     play_ctx->is_active = 1;
