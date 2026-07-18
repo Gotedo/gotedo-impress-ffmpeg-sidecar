@@ -26,6 +26,9 @@ service FFmpegService {
 
     // Extract a standalone compressed frame at a specific offset
     rpc GetVideoScreenshot(ScreenshotRequest) returns (ScreenshotResponse);
+
+    // Graceful shutdown RPC for the persistent sidecar
+    rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message StreamRequest {
@@ -140,4 +143,10 @@ message ScreenshotRequest {
 message ScreenshotResponse {
     bytes image_data = 1;  // Raw compressed image buffer (e.g., JPEG or PNG)
     string mime_type = 2;  // "image/jpeg" or "image/png" matching encoder
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {
+    bool accepted = 1;
 }

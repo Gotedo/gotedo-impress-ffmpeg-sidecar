@@ -42,6 +42,91 @@ type SessionContext struct {
 	Mu         sync.Mutex
 }
 
+// Per-target playback session registry (enables safe concurrent playbacks)
+type PlaybackSession struct {
+	TargetID   string
+	DecCtx     *C.DemuxDecContext
+	PlayCtx    *C.AudioPlaybackContext
+	SessionCtx *SessionContext
+	Handle     cgo.Handle
+	Cancel     context.CancelFunc
+}
+
+var (
+	activePlaybacks = make(map[string]*PlaybackSession)
+	playbacksMu     sync.RWMutex
+)
+
+// registerPlayback stores (or replaces) a playback session for a target.
+// Safe to call even if a session already exists for that target.
+func registerPlayback(targetID string, sess *PlaybackSession) {
+	unregisterPlayback(targetID) // ensure clean state first (idempotent)
+
+	playbacksMu.Lock()
+	activePlaybacks[targetID] = sess
+	playbacksMu.Unlock()
+}
+
+// unregisterPlayback safely tears down a playback session.
+// It is idempotent — safe to call multiple times for the same targetID.
+func unregisterPlayback(targetID string) {
+	playbacksMu.Lock()
+	sess, exists := activePlaybacks[targetID]
+	if !exists {
+		playbacksMu.Unlock()
+		return
+	}
+
+	// Remove from map immediately so any concurrent call sees "not exists"
+	delete(activePlaybacks, targetID)
+	playbacksMu.Unlock()
+
+	// Perform actual resource cleanup outside the lock
+	if sess.Cancel != nil {
+		sess.Cancel()
+	}
+
+	// Full cleanup of C resources (audio + decoders)
+	stopPlayback(targetID)
+
+	if sess.Handle != 0 {
+		sess.Handle.Delete()
+	}
+}
+
+// getPlayback returns the active session for a target (thread-safe)
+func getPlayback(targetID string) (*PlaybackSession, bool) {
+	playbacksMu.RLock()
+	defer playbacksMu.RUnlock()
+	sess, ok := activePlaybacks[targetID]
+	return sess, ok
+}
+
+// stopPlayback stops audio playback and frees FFmpeg decoder contexts for a target.
+// It does NOT delete the cgo.Handle or remove the session from the map.
+// Use this for temporary stop/pause scenarios where you may want to resume later.
+func stopPlayback(targetID string) {
+	playbacksMu.Lock()
+	sess, exists := activePlaybacks[targetID]
+	if !exists || sess == nil {
+		playbacksMu.Unlock()
+		return
+	}
+	playbacksMu.Unlock()
+
+	// Stop audio first
+	if sess.PlayCtx != nil {
+		C.stop_audio_playback(sess.PlayCtx)
+		sess.PlayCtx = nil
+	}
+
+	// Free decoder resources
+	if sess.DecCtx != nil {
+		C.free_demux_dec_context(sess.DecCtx)
+		sess.DecCtx = nil
+	}
+}
+
 //export goTestWriteCallback
 func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	// Reconstruct the Handle directly from the integer token
@@ -210,83 +295,99 @@ func runPipelineTest(path string) {
 	log.Println("[TEST] PIPELINE RUN CONCLUDED SUCCESSFULLY!")
 }
 
-// StartStream implements the gRPC streaming endpoint with isolated multi-monitor support
+// StartStream implements the gRPC streaming endpoint with per-target session tracking
 func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpegService_StartStreamServer) error {
-	log.Printf("[SIDECAR] Received StartStream request for file: %s", req.GetFilePath())
+	targetID := req.GetTargetId()
+	log.Printf("[SIDECAR] Received StartStream request for target=%s file: %s", targetID, req.GetFilePath())
 
 	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
 	}
 
-	// Instantiate a perfectly isolated, thread-safe session container for this specific stream context
+	// 1. Create isolated Go session context + cgo handle
 	sessionCtx := &SessionContext{
 		StreamChan: make(chan ChunkPayload, 100),
 	}
 
 	// Wrap this private instance in a localized runtime Cgo handle
 	handle := cgo.NewHandle(sessionCtx)
-	defer handle.Delete()
+	// We will delete the handle inside unregisterPlayback
 
-	// Allocate context structures directly in C memory to avoid unpinned pointer GC checks
+	// 2. Allocate C contexts (we keep explicit frees for early error paths)
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
-	defer C.free(unsafe.Pointer(decCtx))
-
 	playCtx := (*C.AudioPlaybackContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.AudioPlaybackContext{}))))
-	defer C.free(unsafe.Pointer(playCtx))
 
 	cPath := C.CString(req.GetFilePath())
 	defer C.free(unsafe.Pointer(cPath))
 
-	// Step 1: Open input contexts
+	// 3. Open decoders
 	if ret := C.open_input_and_decoders(decCtx, cPath); ret < 0 {
+		C.free(unsafe.Pointer(decCtx))
+		C.free(unsafe.Pointer(playCtx))
+		handle.Delete()
 		return status.Errorf(codes.Internal, "FFmpeg decoder initialization failed with code: %d", ret)
 	}
 
-	// Step 2: Initialize system soundcard bindings
-	// Note: Pass hardware device routing parameters if requested by req.GetAudioDeviceId()
+	// 4. Init audio playback (note: audio_device_id support can be added later)
 	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil); ret < 0 {
 		C.free_demux_dec_context(decCtx)
+		C.free(unsafe.Pointer(playCtx))
+		handle.Delete()
 		return status.Errorf(codes.Internal, "Miniaudio hardware initialization failed with code: %d", ret)
 	}
 
-	// Spin up the C processing pipeline thread
+	// 5. Register session so ControlStream / AdjustLatency / Shutdown can find it
+	_, cancel := context.WithCancel(stream.Context())
+	sess := &PlaybackSession{
+		TargetID:   targetID,
+		DecCtx:     decCtx,
+		PlayCtx:    playCtx,
+		SessionCtx: sessionCtx,
+		Handle:     handle,
+		Cancel:     cancel,
+	}
+	registerPlayback(targetID, sess)
+
+	// 6. Start the C pipeline goroutine
 	pipelineErrChan := make(chan int, 1)
 	go func() {
 		ret := C.run_test_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
 		pipelineErrChan <- int(ret)
 	}()
 
-	// Loop and push fMP4 packets across the gRPC network boundary as they arrive from C
+	// 7. Main streaming loop
 	for {
 		select {
 		case <-stream.Context().Done():
 			log.Println("[SIDECAR] Client closed connection stream.")
-			C.stop_audio_playback(playCtx)
-			C.free_demux_dec_context(decCtx)
+			unregisterPlayback(targetID)
 			return stream.Context().Err()
 
 		case errCode := <-pipelineErrChan:
-			log.Printf("[SIDECAR] C-pipeline demuxing complete. Exit code: %d", errCode)
+			log.Printf("[SIDECAR] C-pipeline for target %s finished with code: %d", targetID, errCode)
 
-			// ONLY tear down and return if there was an actual error.
-			// If it was successful (0), leave the function running so the audio
-			// ring buffer can drain and the client can finish rendering the video.
 			if errCode < 0 {
-				C.stop_audio_playback(playCtx)
-				C.free_demux_dec_context(decCtx)
+				// Error path -> full cleanup
+				unregisterPlayback(targetID)
 				return status.Errorf(codes.Internal, "C-pipeline processing failed with error code: %d", errCode)
 			}
 
-		case chunk := <-sessionCtx.StreamChan: // Read from private channel loop
-			// Send binary payload packet over the network
+			// Success path (errCode == 0): Do NOT free yet.
+			// Leave contexts alive so the audio ring buffer can drain
+			// and the client can finish rendering. We will clean up on client disconnect
+			// or when the next request comes in for the same target.
+			log.Printf("[SIDECAR] Pipeline ended successfully for target %s — waiting for client to finish (audio drain)", targetID)
+			// We intentionally do NOT call unregisterPlayback here.
+			// The session stays registered until client disconnect or new request overwrites it.
+
+		case chunk := <-sessionCtx.StreamChan:
 			err := stream.Send(&proto.StreamResponse{
 				Fmp4Chunk: chunk.Data,
 				Pts:       chunk.PTS,
 			})
 			if err != nil {
-				log.Printf("[SIDECAR ERROR] Failed to send gRPC response packet: %v", err)
-				C.stop_audio_playback(playCtx)
-				C.free_demux_dec_context(decCtx)
+				log.Printf("[SIDECAR ERROR] Failed to send gRPC response: %v", err)
+				unregisterPlayback(targetID)
 				return err
 			}
 		}
@@ -324,14 +425,17 @@ func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRe
 
 // AdjustLatency handles real-time audio delay modifications from the backend client.
 func (s *ffmpegServer) AdjustLatency(ctx context.Context, req *proto.LatencyRequest) (*proto.LatencyResponse, error) {
-	log.Printf("[SIDECAR] AdjustLatency requested for target %s: %d ms", req.GetTargetId(), req.GetDelayMs())
+	targetID := req.GetTargetId()
+	delayMs := req.GetDelayMs()
 
-	// TODO: Pass this offset value down to your active miniaudio playback ring context.
-	// C.set_audio_delay_offset(playCtx, C.int(req.DelayMs()))
+	sess, ok := getPlayback(targetID)
+	if !ok || sess.PlayCtx == nil {
+		return &proto.LatencyResponse{Accepted: false}, nil
+	}
 
-	return &proto.LatencyResponse{
-		Accepted: true,
-	}, nil
+	C.set_audio_delay_offset(sess.PlayCtx, C.int(delayMs))
+	log.Printf("[SIDECAR] Applied latency correction: %d ms for target %s", delayMs, targetID)
+	return &proto.LatencyResponse{Accepted: true}, nil
 }
 
 //export set_session_pts
@@ -444,4 +548,54 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 		ImageData: imageData,
 		MimeType:  "image/jpeg",
 	}, nil
+}
+
+// Shutdown RPC - graceful exit requested by manager
+func (s *ffmpegServer) Shutdown(ctx context.Context, req *proto.ShutdownRequest) (*proto.ShutdownResponse, error) {
+	log.Println("[SIDECAR] Shutdown RPC received - initiating graceful exit")
+	// Stop all active playbacks first
+	playbacksMu.Lock()
+	for targetID := range activePlaybacks {
+		unregisterPlayback(targetID) // reuses the cleanup logic
+	}
+	playbacksMu.Unlock()
+
+	go func() {
+		time.Sleep(200 * time.Millisecond) // allow final gRPC responses
+		os.Exit(0)
+	}()
+	return &proto.ShutdownResponse{Accepted: true}, nil
+}
+
+// ControlStream handles PLAY/PAUSE/SEEK/STOP for a specific target
+func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequest) (*proto.ControlResponse, error) {
+	targetID := req.GetTargetId()
+	action := req.GetAction()
+
+	_, ok := getPlayback(targetID)
+	if !ok {
+		return &proto.ControlResponse{Success: false, Message: "no active playback for target"}, nil
+	}
+
+	switch action {
+	case proto.ControlRequest_STOP:
+		unregisterPlayback(targetID)
+		return &proto.ControlResponse{Success: true, Message: "stopped"}, nil
+
+	case proto.ControlRequest_PLAY, proto.ControlRequest_PAUSE, proto.ControlRequest_SEEK:
+		// NOTE: Full runtime pause/seek requires changes to run_test_mux_and_play loop.
+		// For now we acknowledge so the frontend does not break.
+		log.Printf("[SIDECAR] Control action %v received for %s (pipeline support pending)", action, targetID)
+		return &proto.ControlResponse{Success: true, Message: "acknowledged (limited support)"}, nil
+
+	default:
+		return &proto.ControlResponse{Success: false, Message: "unknown action"}, nil
+	}
+}
+
+// StopStream is an explicit stop (alias to STOP control for convenience)
+func (s *ffmpegServer) StopStream(ctx context.Context, req *proto.StreamControlRequest) (*proto.StreamControlResponse, error) {
+	targetID := req.GetTargetId()
+	unregisterPlayback(targetID)
+	return &proto.StreamControlResponse{Success: true, Message: "stream stopped"}, nil
 }

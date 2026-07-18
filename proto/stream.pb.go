@@ -1073,6 +1073,86 @@ func (x *ScreenshotResponse) GetMimeType() string {
 	return ""
 }
 
+type ShutdownRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShutdownRequest) Reset() {
+	*x = ShutdownRequest{}
+	mi := &file_proto_stream_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShutdownRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShutdownRequest) ProtoMessage() {}
+
+func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
+func (*ShutdownRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{15}
+}
+
+type ShutdownResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShutdownResponse) Reset() {
+	*x = ShutdownResponse{}
+	mi := &file_proto_stream_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShutdownResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShutdownResponse) ProtoMessage() {}
+
+func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
+func (*ShutdownResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ShutdownResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
 var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
@@ -1164,7 +1244,10 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x12ScreenshotResponse\x12\x1d\n" +
 	"\n" +
 	"image_data\x18\x01 \x01(\fR\timageData\x12\x1b\n" +
-	"\tmime_type\x18\x02 \x01(\tR\bmimeType2\xf8\x03\n" +
+	"\tmime_type\x18\x02 \x01(\tR\bmimeType\"\x11\n" +
+	"\x0fShutdownRequest\".\n" +
+	"\x10ShutdownResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted2\xb7\x04\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
@@ -1173,7 +1256,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponse\x12B\n" +
 	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponse\x12G\n" +
 	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponse\x12K\n" +
-	"\x12GetVideoScreenshot\x12\x19.ffmpeg.ScreenshotRequest\x1a\x1a.ffmpeg.ScreenshotResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
+	"\x12GetVideoScreenshot\x12\x19.ffmpeg.ScreenshotRequest\x1a\x1a.ffmpeg.ScreenshotResponse\x12=\n" +
+	"\bShutdown\x12\x17.ffmpeg.ShutdownRequest\x1a\x18.ffmpeg.ShutdownResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
@@ -1188,7 +1272,7 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_proto_stream_proto_goTypes = []any{
 	(ControlRequest_Action)(0),    // 0: ffmpeg.ControlRequest.Action
 	(*StreamRequest)(nil),         // 1: ffmpeg.StreamRequest
@@ -1206,6 +1290,8 @@ var file_proto_stream_proto_goTypes = []any{
 	(*MetadataResponse)(nil),      // 13: ffmpeg.MetadataResponse
 	(*ScreenshotRequest)(nil),     // 14: ffmpeg.ScreenshotRequest
 	(*ScreenshotResponse)(nil),    // 15: ffmpeg.ScreenshotResponse
+	(*ShutdownRequest)(nil),       // 16: ffmpeg.ShutdownRequest
+	(*ShutdownResponse)(nil),      // 17: ffmpeg.ShutdownResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
 	0,  // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
@@ -1217,15 +1303,17 @@ var file_proto_stream_proto_depIdxs = []int32{
 	9,  // 6: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
 	12, // 7: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
 	14, // 8: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
-	2,  // 9: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	4,  // 10: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	6,  // 11: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	8,  // 12: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	11, // 13: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	13, // 14: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
-	15, // 15: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
-	9,  // [9:16] is the sub-list for method output_type
-	2,  // [2:9] is the sub-list for method input_type
+	16, // 9: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
+	2,  // 10: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	4,  // 11: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	6,  // 12: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	8,  // 13: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	11, // 14: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	13, // 15: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	15, // 16: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
+	17, // 17: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
+	10, // [10:18] is the sub-list for method output_type
+	2,  // [2:10] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -1242,7 +1330,7 @@ func file_proto_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

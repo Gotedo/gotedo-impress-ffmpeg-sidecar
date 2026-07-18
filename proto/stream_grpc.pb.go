@@ -26,6 +26,7 @@ const (
 	FFmpegService_GetAudioDevices_FullMethodName    = "/ffmpeg.FFmpegService/GetAudioDevices"
 	FFmpegService_GetMediaProperties_FullMethodName = "/ffmpeg.FFmpegService/GetMediaProperties"
 	FFmpegService_GetVideoScreenshot_FullMethodName = "/ffmpeg.FFmpegService/GetVideoScreenshot"
+	FFmpegService_Shutdown_FullMethodName           = "/ffmpeg.FFmpegService/Shutdown"
 )
 
 // FFmpegServiceClient is the client API for FFmpegService service.
@@ -48,6 +49,8 @@ type FFmpegServiceClient interface {
 	GetMediaProperties(ctx context.Context, in *MetadataRequest, opts ...grpc.CallOption) (*MetadataResponse, error)
 	// Extract a standalone compressed frame at a specific offset
 	GetVideoScreenshot(ctx context.Context, in *ScreenshotRequest, opts ...grpc.CallOption) (*ScreenshotResponse, error)
+	// Graceful shutdown RPC for the persistent sidecar
+	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
 }
 
 type fFmpegServiceClient struct {
@@ -137,6 +140,16 @@ func (c *fFmpegServiceClient) GetVideoScreenshot(ctx context.Context, in *Screen
 	return out, nil
 }
 
+func (c *fFmpegServiceClient) Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShutdownResponse)
+	err := c.cc.Invoke(ctx, FFmpegService_Shutdown_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FFmpegServiceServer is the server API for FFmpegService service.
 // All implementations must embed UnimplementedFFmpegServiceServer
 // for forward compatibility.
@@ -157,6 +170,8 @@ type FFmpegServiceServer interface {
 	GetMediaProperties(context.Context, *MetadataRequest) (*MetadataResponse, error)
 	// Extract a standalone compressed frame at a specific offset
 	GetVideoScreenshot(context.Context, *ScreenshotRequest) (*ScreenshotResponse, error)
+	// Graceful shutdown RPC for the persistent sidecar
+	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
 	mustEmbedUnimplementedFFmpegServiceServer()
 }
 
@@ -187,6 +202,9 @@ func (UnimplementedFFmpegServiceServer) GetMediaProperties(context.Context, *Met
 }
 func (UnimplementedFFmpegServiceServer) GetVideoScreenshot(context.Context, *ScreenshotRequest) (*ScreenshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVideoScreenshot not implemented")
+}
+func (UnimplementedFFmpegServiceServer) Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Shutdown not implemented")
 }
 func (UnimplementedFFmpegServiceServer) mustEmbedUnimplementedFFmpegServiceServer() {}
 func (UnimplementedFFmpegServiceServer) testEmbeddedByValue()                       {}
@@ -328,6 +346,24 @@ func _FFmpegService_GetVideoScreenshot_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FFmpegService_Shutdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShutdownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FFmpegServiceServer).Shutdown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FFmpegService_Shutdown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FFmpegServiceServer).Shutdown(ctx, req.(*ShutdownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FFmpegService_ServiceDesc is the grpc.ServiceDesc for FFmpegService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -358,6 +394,10 @@ var FFmpegService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetVideoScreenshot",
 			Handler:    _FFmpegService_GetVideoScreenshot_Handler,
+		},
+		{
+			MethodName: "Shutdown",
+			Handler:    _FFmpegService_Shutdown_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
