@@ -490,7 +490,7 @@ int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int cha
 
   // 1. Initialize the thread-safe PCM ring buffer.
   // We size the buffer to hold 1.5 seconds of audio frames to absorb pipeline jitter comfortably.
-  ma_uint32 buffer_size_frames = sample_rate * 1.5;
+  ma_uint32 buffer_size_frames = sample_rate * 10; // 10 seconds buffer
   result = ma_pcm_rb_init(ma_format_f32, channels, buffer_size_frames, NULL, NULL, &play_ctx->ring_buffer);
   if (result != MA_SUCCESS)
   {
@@ -1176,28 +1176,18 @@ int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *
     goto cleanup;
   }
 
-  // PRODUCTION LOOP: Run until EOF or error
-  while (1)
+  // PRODUCTION LOOP - run until real EOF or error
+  while (true)
   {
     ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
-    if (ret < 0)
+    if (ret == AVERROR_EOF)
     {
-      // EOF or error — normal exit for production
-      if (ret == AVERROR_EOF)
-      {
-        ret = 0;
-      }
+      ret = 0; // Normal end of file
       break;
     }
-
-    // Respect pause flag
-    if (play_ctx->paused)
+    if (ret < 0)
     {
-      // When paused, we don't output video or audio.
-      // We still keep the demux context alive.
-      av_packet_unref(pkt);
-      usleep(8000); // ~8ms sleep to reduce CPU usage while paused
-      continue;
+      break; // Real error
     }
 
     if (pkt->stream_index == dec_ctx->video_stream_idx)
