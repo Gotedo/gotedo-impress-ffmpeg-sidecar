@@ -114,7 +114,7 @@ int init_fmp4_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_ctx);
 int write_fmp4_header(AVFormatContext *out_fmt_ctx);
 void free_fmp4_muxer(AVFormatContext *out_fmt_ctx);
 
-int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id);
+int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id, int buffer_seconds);
 int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_data, int frame_count);
 void stop_audio_playback(AudioPlaybackContext *play_ctx);
 

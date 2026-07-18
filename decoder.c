@@ -471,14 +471,15 @@ static void audio_device_callback(ma_device *pDevice, void *pOutput, const void 
  * Operating-system-specific hardware routes are selected by translating the backend `device_id` string
  * parameter into a direct physical device reference before starting the background audio thread.
  *
- * @param play_ctx     Pointer to the AudioPlaybackContext instance to manage.
- * @param sample_rate  Audio sampling rate (e.g., 48000 Hz).
- * @param channels     Number of outputs (Stereo = 2 channels).
- * @param device_id    Target hardware device ID string (NULL defaults to OS system default output).
+ * @param play_ctx        Pointer to the AudioPlaybackContext instance to manage.
+ * @param sample_rate     Audio sampling rate (e.g., 48000 Hz).
+ * @param channels        Number of outputs (Stereo = 2 channels).
+ * @param device_id       Target hardware device ID string (NULL defaults to OS system default output).
+ * @param buffer_seconds  How long to store the remuxed media packets in memory.
  *
  * @return 0 on success, or a negative integer on allocation or hardware initialization failures.
  */
-int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id)
+int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id, int buffer_seconds)
 {
   ma_result result;
 
@@ -489,8 +490,19 @@ int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int cha
   play_ctx->pause_pts_ms = 0;
 
   // 1. Initialize the thread-safe PCM ring buffer.
-  // We size the buffer to hold 1.5 seconds of audio frames to absorb pipeline jitter comfortably.
-  ma_uint32 buffer_size_frames = sample_rate * 10; // 10 seconds buffer
+  // For file playback we pre-decode audio into a large ring buffer so the entire
+  // track can play without underruns even though the demux loop completes quickly.
+  // Default to 10 minutes (600s) which comfortably supports most presentation videos.
+  if (buffer_seconds <= 0)
+  {
+    buffer_seconds = 600;
+  }
+  // Cap at 1 hour to avoid excessive RAM on very long files (adjust if needed)
+  if (buffer_seconds > 3600)
+  {
+    buffer_seconds = 3600;
+  }
+  ma_uint32 buffer_size_frames = (ma_uint32)sample_rate * buffer_seconds;
   result = ma_pcm_rb_init(ma_format_f32, channels, buffer_size_frames, NULL, NULL, &play_ctx->ring_buffer);
   if (result != MA_SUCCESS)
   {

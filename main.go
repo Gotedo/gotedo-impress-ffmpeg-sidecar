@@ -264,7 +264,7 @@ func runPipelineTest(path string) {
 
 	// Step 2: Initialize Audio Playback (using system default speaker)
 	log.Println("[TEST] Initializing Miniaudio hardware device...")
-	ret = C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil)
+	ret = C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(30))
 	if ret < 0 {
 		C.free_demux_dec_context(decCtx)
 		log.Fatalf("[TEST ERROR] Failed to initialize Audio hardware. Code: %d", ret)
@@ -273,7 +273,7 @@ func runPipelineTest(path string) {
 
 	// Instantiate a perfectly isolated, thread-safe session container for this test
 	sessionCtx := &SessionContext{
-		StreamChan: make(chan ChunkPayload, 100),
+		StreamChan: make(chan ChunkPayload, 1024),
 	}
 
 	// CREATE A SAFE CGO HANDLE FOR THE CHANNEL
@@ -376,8 +376,8 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		return status.Errorf(codes.Internal, "FFmpeg decoder initialization failed with code: %d", ret)
 	}
 
-	// 4. Init audio playback (note: audio_device_id support can be added later)
-	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil); ret < 0 {
+	// 4. Init audio playback (note: audio_device_id support will be added later)
+	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(600)); ret < 0 {
 		C.free_demux_dec_context(decCtx)
 		C.free(unsafe.Pointer(playCtx))
 		handle.Delete()
