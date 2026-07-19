@@ -9,7 +9,11 @@
 #include <libavutil/time.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/error.h>
+#include <libavutil/opt.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
 #include <miniaudio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
 
