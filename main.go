@@ -133,6 +133,8 @@ func unregisterPlayback(targetID string) {
 	if sess.Handle != 0 {
 		sess.Handle.Delete()
 	}
+
+	log.Printf("[SIDECAR -> unregisterPlayback] Unregistered playback for target: %s", targetID)
 }
 
 // getPlayback returns the active session for a target (thread-safe)
@@ -249,11 +251,11 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			oldSess.Cancel()
 		}
 
-		// Give the old goroutine a moment to exit its select loop
-		time.Sleep(300 * time.Millisecond)
-
 		// Fully unregister (stops audio, frees C memory, deletes handle)
 		unregisterPlayback(targetID)
+
+		// Give C pipeline time to exit cleanly
+		time.Sleep(400 * time.Millisecond)
 	}
 
 	// 1. Create isolated Go session context + cgo handle
