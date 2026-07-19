@@ -7,6 +7,7 @@
 #include <libavutil/dict.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
+#include <libavutil/audio_fifo.h>
 #include <miniaudio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -50,26 +51,6 @@ typedef struct TranscodeContext
   double current_pts;
   void (*go_callback)(uint8_t *buf, int buf_size, uintptr_t user_token);
 } TranscodeContext;
-
-// Native Playback Context
-typedef struct AudioPlaybackContext
-{
-  ma_pcm_rb ring_buffer;
-  ma_device device;
-  int sample_rate;
-  int channels;
-  volatile int is_active;
-
-  // Thread-Safe Latency Management Variables
-  volatile int target_delay_ms;       // Desired delay targeted by Go feedback loop
-  volatile int current_delay_samples; // Cumulative live sample offset balance
-
-  // Pause/Resume control
-  volatile int paused;
-  volatile int64_t pause_pts_ms; // PTS (in ms) at the time pause was requested
-
-  int ring_buffer_size_frames; // Total size of the ring buffer (stored at init)
-} AudioPlaybackContext;
 
 // Struct mapping exactly to our proto/Go expectations
 typedef struct
@@ -128,14 +109,6 @@ int init_fmp4_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_ctx);
 int write_fmp4_header(AVFormatContext *out_fmt_ctx);
 void free_fmp4_muxer(AVFormatContext *out_fmt_ctx);
 
-int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id, int buffer_seconds);
-int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_data, int frame_count);
-void stop_audio_playback(AudioPlaybackContext *play_ctx);
-
-void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms);
-
-int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
-
 // Queries miniaudio context and populates devices buffer up to max_devices.
 // Returns total number of devices found, or a negative error code.
 int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
@@ -146,11 +119,9 @@ int probe_media_properties(const char *file_path, CMediaProperties *props);
 // Extract a compressed image frame into a dynamically allocated buffer
 int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **out_buf, int *out_size);
 
-int run_production_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
+int run_production_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token);
 
 // Control functions for runtime playback control
-void pause_playback(AudioPlaybackContext *play_ctx);
-void resume_playback(AudioPlaybackContext *play_ctx, int64_t resume_pts_ms);
 int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms);
 
 /**
@@ -187,7 +158,7 @@ int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms);
  *   - On very high bitrate video with tiny GOP, the read-ahead may still send
  *     a few MB quickly, but far less than the entire file.
  */
-int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token);
+int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token);
 
 // Control flag setters (called from Go to signal the streaming loop)
 void set_dec_ctx_paused(DemuxDecContext *ctx, int paused);

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -121,7 +123,7 @@ func TestIntegration_RealAudioDeviceProbing(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
-// Integration Test 2: Pipeline Initialization, Latency adjustments, and Teardown
+// Integration Test 2: Pipeline Initialization, API compatibility, and Teardown
 // -------------------------------------------------------------------------
 func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T) {
 	client, _, cleanup := setupRealHardwareTestServer(t)
@@ -145,6 +147,21 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 	// 2. Spawn a concurrent monitor to observe frame data or process codes
 	errChan := make(chan error, 1)
 	go func() {
+		// CRITICAL FIX: Create an output file to dump the gRPC stream into a playable MP4
+		outFile, err := os.Create("test_output_integration.mp4")
+		if err != nil {
+			t.Errorf("Failed to create test output file: %v", err)
+			return
+		}
+		defer outFile.Close()
+
+		var logPathOnce sync.Once
+		absPath, err := filepath.Abs(outFile.Name())
+		if err != nil {
+			fmt.Println("Error resolving absolute path:", err)
+			return
+		}
+
 		for {
 			resp, err := stream.Recv()
 			if err == io.EOF {
@@ -156,9 +173,22 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 				return
 			}
 
-			// If miniaudio / FFmpeg successfully parses out fragments, process chunks here
+			// If FFmpeg successfully parses out fragments, process chunks here
 			if len(resp.GetFmp4Chunk()) > 0 {
+
+				// Register the deferred log exactly once on the first chunk payload encounter
+				logPathOnce.Do(func() {
+					defer func(path string) {
+						log.Printf("👉 [TEST LOG] Execution tracking will be written to path: %s", path)
+					}(absPath) // Captures the context variable safely
+				})
+
 				t.Logf("[HARDWARE CAPTURE] Received real fMP4 packet from engine loop: %d bytes", len(resp.GetFmp4Chunk()))
+
+				// Write the chunk to our test file
+				if _, err := outFile.Write(resp.GetFmp4Chunk()); err != nil {
+					t.Errorf("Failed to write to test file: %v", err)
+				}
 			}
 		}
 	}()
@@ -168,9 +198,13 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 
 	// 3. Fire a real-time AdjustLatency request down to the active stream map
 	t.Log("[HARDWARE TESTING] Sending active runtime audio latency adjustment payload...")
+
+	// CRITICAL FIX: Under the new unified fMP4 architecture, latency is natively
+	// managed by the browser's MSE. We fire this request to ensure backwards API compatibility
+	// doesn't break and is safely acknowledged by the modified endpoint.
 	latencyResp, err := client.AdjustLatency(context.Background(), &proto.LatencyRequest{
 		TargetId: "hardware-integration-target",
-		DelayMs:  120, // Shift audio 120ms to align lip sync
+		DelayMs:  120, // Shift audio 120ms (Now mocked for backwards API compatibility)
 	})
 
 	if err != nil {
@@ -180,10 +214,6 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 	} else if !latencyResp.GetAccepted() {
 		t.Error("Hardware context rejected live latency shift configuration.")
 	}
-
-	// Added to manually listen to the playback buffer draining
-	t.Log("Waiting 5 seconds to allow audio buffer to reach speakers...")
-	time.Sleep(5 * time.Second)
 
 	// 4. Gracefully break the context pipeline to assert that C sub-threads shut down instantly
 	t.Log("[HARDWARE CLEANUP] Triggering streaming channel cancellation signal...")

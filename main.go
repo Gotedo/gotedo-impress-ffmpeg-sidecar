@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/cgo"
 	"sync"
 	"syscall"
@@ -47,7 +46,6 @@ type SessionContext struct {
 type PlaybackSession struct {
 	TargetID   string
 	DecCtx     *C.DemuxDecContext
-	PlayCtx    *C.AudioPlaybackContext
 	SessionCtx *SessionContext
 	Handle     cgo.Handle
 	Cancel     context.CancelFunc
@@ -127,13 +125,6 @@ func unregisterPlayback(targetID string) {
 	// (prevents use-after-free on the cgo.Handle and internal contexts)
 	time.Sleep(250 * time.Millisecond)
 
-	// 2. CRITICAL FIX: Inline the cleanup of C resources here because
-	// stopPlayback would fail to find the session in the map.
-	if sess.PlayCtx != nil {
-		C.stop_audio_playback(sess.PlayCtx)
-		sess.PlayCtx = nil
-	}
-
 	if sess.DecCtx != nil {
 		C.free_demux_dec_context(sess.DecCtx)
 		sess.DecCtx = nil
@@ -169,12 +160,6 @@ func stopPlayback(targetID string) {
 		C.request_stop_on_dec_ctx(sess.DecCtx)
 	}
 
-	// Stop audio first
-	if sess.PlayCtx != nil {
-		C.stop_audio_playback(sess.PlayCtx)
-		sess.PlayCtx = nil
-	}
-
 	// Free decoder resources
 	if sess.DecCtx != nil {
 		C.free_demux_dec_context(sess.DecCtx)
@@ -206,24 +191,11 @@ func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	// Push data cleanly into this monitor's private channel array
 	// Stream the chunk alongside the current active time context
 	// Allow the channel to block the C thread to establish backpressure.
-	// Use a 1-second timeout as a safety release valve if the client disconnects unexpectedly.
-	select {
-	case session.StreamChan <- ChunkPayload{Data: data, PTS: pts}:
-	case <-time.After(1 * time.Second):
-		log.Println("[SIDECAR] Warning: Dropping fMP4 chunk to prevent core thread deadlock")
-	}
+	session.StreamChan <- ChunkPayload{Data: data, PTS: pts}
 }
 
 func main() {
 	socketPath := flag.String("socket", "", "Path to the Unix Domain Socket for IPC")
-	testMode := flag.Bool("test", false, "Run application in pipeline verification test mode")
-	videoPath := flag.String("video", "", "Absolute path to the video file")
-	flag.Parse()
-
-	if *testMode {
-		runPipelineTest(*videoPath)
-		return
-	}
 
 	if *socketPath == "" {
 		log.Fatal("Error: Sidecar must be started with a valid -socket path.")
@@ -255,107 +227,6 @@ func main() {
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("gRPC server run failure: %v", err)
 	}
-}
-
-func runPipelineTest(path string) {
-	log.Println("[TEST] Starting FFmpeg & Miniaudio Integrated Pipeline Test...")
-
-	// Verify absolute path requirements
-	if path == "" {
-		log.Fatalf("[TEST ERROR] Must specify a video file path using the -video flag")
-	}
-
-	if !filepath.IsAbs(path) {
-		log.Fatalf("[TEST ERROR] Path must be absolute. Received: %s", path)
-	}
-
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		log.Fatalf("[TEST ERROR] Video file does not exist at path: %s", path)
-	}
-	log.Printf("[TEST] Absolute video path verified: %s", path)
-
-	// Allocate the massive structs in C memory directly.
-	// C.calloc zero-initializes the memory just like Go's 'var' does.
-	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
-	defer C.free(unsafe.Pointer(decCtx))
-
-	playCtx := (*C.AudioPlaybackContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.AudioPlaybackContext{}))))
-	defer C.free(unsafe.Pointer(playCtx))
-
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-
-	// Step 1: Open file and decoders (pass pointer directly)
-	log.Println("[TEST] Opening media file and initializing decoders...")
-	ret := C.open_input_and_decoders(decCtx, cPath)
-	if ret < 0 {
-		log.Fatalf("[TEST ERROR] Failed opening input decoders. FFmpeg Code: %d", ret)
-	}
-	log.Println("[TEST] SUCCESS: FFmpeg Decoders and SWResampler successfully initialized!")
-
-	// Step 2: Initialize Audio Playback (using system default speaker)
-	log.Println("[TEST] Initializing Miniaudio hardware device...")
-	ret = C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(30))
-	if ret < 0 {
-		C.free_demux_dec_context(decCtx)
-		log.Fatalf("[TEST ERROR] Failed to initialize Audio hardware. Code: %d", ret)
-	}
-	log.Println("[TEST] SUCCESS: Miniaudio successfully opened system hardware soundcard!")
-
-	// Instantiate a perfectly isolated, thread-safe session container for this test
-	sessionCtx := &SessionContext{
-		StreamChan: make(chan ChunkPayload, 1024),
-	}
-
-	// CREATE A SAFE CGO HANDLE FOR THE CHANNEL
-	handle := cgo.NewHandle(sessionCtx)
-	defer handle.Delete() // Ensure we release the handle when the test finishes to avoid leaks
-
-	// Step 3: Spin up the C-processing pipeline loop on a concurrent Go thread
-	log.Println("[TEST] Spawning parallel demuxer & play threads...")
-
-	// Create an error channel to capture C-side failures
-	errChan := make(chan int, 1)
-
-	go func() {
-		// Capture the return status from the C function
-		result := C.run_test_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
-		errChan <- int(result)
-	}()
-
-	// Monitor for errors in a non-blocking way or as part of your logic flow
-	go func() {
-		if err := <-errChan; err != 0 {
-			log.Printf("[TEST ERROR] C-side pipeline exited with error code: %d", err)
-		} else {
-			log.Println("[TEST] C-side pipeline execution completed successfully.")
-		}
-	}()
-
-	// Step 4: Stream consumer
-	go func() {
-		for chunk := range sessionCtx.StreamChan {
-			fmt.Printf("[TEST STREAM] Captured %d bytes of browser-ready fMP4 in Go memory!\n", len(chunk.Data))
-		}
-	}()
-
-	// Step 5: Simulate live feedback from webview
-	time.Sleep(2 * time.Second)
-	log.Println("[TEST LATENCY] Simulated webview reports rendering lag. Increasing audio delay to 150ms...")
-	C.set_audio_delay_offset(playCtx, C.int(150))
-
-	time.Sleep(2 * time.Second)
-	log.Println("[TEST LATENCY] Simulated webview caught up. Restoring audio delay to 50ms...")
-	C.set_audio_delay_offset(playCtx, C.int(50))
-
-	time.Sleep(3 * time.Second)
-
-	// Clean up Contexts
-	log.Println("[TEST] Tearing down playback engine and freeing C memory...")
-	C.stop_audio_playback(playCtx)
-	C.free_demux_dec_context(decCtx)
-	log.Println("[TEST] SUCCESS: All context structures freed cleanly. No leaks found!")
-	log.Println("[TEST] PIPELINE RUN CONCLUDED SUCCESSFULLY!")
 }
 
 // StartStream implements the gRPC streaming endpoint with per-target session tracking
@@ -394,7 +265,6 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 	// 2. Allocate C contexts (we keep explicit frees for early error paths)
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
-	playCtx := (*C.AudioPlaybackContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.AudioPlaybackContext{}))))
 
 	cPath := C.CString(req.GetFilePath())
 	defer C.free(unsafe.Pointer(cPath))
@@ -402,26 +272,15 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	// 3. Open decoders
 	if ret := C.open_input_and_decoders(decCtx, cPath); ret < 0 {
 		C.free(unsafe.Pointer(decCtx))
-		C.free(unsafe.Pointer(playCtx))
 		handle.Delete()
 		return status.Errorf(codes.Internal, "FFmpeg decoder initialization failed with code: %d", ret)
 	}
 
-	// 4. Init audio playback (note: audio_device_id support will be added later)
-	// In StartStream(), change the 600 seconds buffer to 3 seconds
-	if ret := C.init_audio_playback(playCtx, C.int(48000), C.int(2), nil, C.int(3)); ret < 0 {
-		C.free_demux_dec_context(decCtx)
-		C.free(unsafe.Pointer(playCtx))
-		handle.Delete()
-		return status.Errorf(codes.Internal, "Miniaudio hardware initialization failed with code: %d", ret)
-	}
-
-	// 5. Register session so ControlStream / AdjustLatency / Shutdown can find it
+	// 4. Register session so ControlStream / AdjustLatency / Shutdown can find it
 	_, cancel := context.WithCancel(stream.Context())
 	sess := &PlaybackSession{
 		TargetID:   targetID,
 		DecCtx:     decCtx,
-		PlayCtx:    playCtx,
 		SessionCtx: sessionCtx,
 		Handle:     handle,
 		Cancel:     cancel,
@@ -433,14 +292,14 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	sessionCtx.Mu.Unlock()
 	registerPlayback(targetID, sess)
 
-	// 6. Start the C pipeline goroutine
+	// 5. Start the C pipeline goroutine
 	pipelineErrChan := make(chan int, 1)
 	go func() {
-		ret := C.run_streaming_mux_and_play(decCtx, playCtx, C.uintptr_t(handle))
+		ret := C.run_streaming_mux_and_play(decCtx, C.uintptr_t(handle))
 		pipelineErrChan <- int(ret)
 	}()
 
-	// 7. Main streaming loop
+	// 6. Main streaming loop
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -510,16 +369,6 @@ func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRe
 
 // AdjustLatency handles real-time audio delay modifications from the backend client.
 func (s *ffmpegServer) AdjustLatency(ctx context.Context, req *proto.LatencyRequest) (*proto.LatencyResponse, error) {
-	targetID := req.GetTargetId()
-	delayMs := req.GetDelayMs()
-
-	sess, ok := getPlayback(targetID)
-	if !ok || sess.PlayCtx == nil {
-		return &proto.LatencyResponse{Accepted: false}, nil
-	}
-
-	C.set_audio_delay_offset(sess.PlayCtx, C.int(delayMs))
-	log.Printf("[SIDECAR] Applied latency correction: %d ms for target %s", delayMs, targetID)
 	return &proto.LatencyResponse{Accepted: true}, nil
 }
 
@@ -703,10 +552,6 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 
 	case proto.ControlRequest_PAUSE:
 		capturedPTS := sess.captureCurrentPTSForPause()
-
-		if sess.PlayCtx != nil {
-			C.pause_playback(sess.PlayCtx)
-		}
 
 		// Signal the streaming loop to stop processing new packets (video + audio).
 		// This is the key to "audio stops exactly when video is paused".

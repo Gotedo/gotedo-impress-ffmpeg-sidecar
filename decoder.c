@@ -31,7 +31,8 @@ int init_audio_resampler(DemuxDecContext *ctx)
   // Set normalized audio properties
   ctx->target_sample_rate = 48000;
   av_channel_layout_default(&ctx->target_ch_layout, 2); // Force standard Stereo (L/R)
-  ctx->target_sample_fmt = AV_SAMPLE_FMT_FLT;           // Force 32-bit float format
+  // CRITICAL FIX: AAC native encoder requires AV_SAMPLE_FMT_FLTP (Planar)
+  ctx->target_sample_fmt = AV_SAMPLE_FMT_FLTP; // Force 32-bit float format
 
   // Allocate and configure the SwrContext using the modern channel layout API.
   // This calculates transition coefficients between the source and target formats.
@@ -345,460 +346,6 @@ void free_fmp4_muxer(AVFormatContext *out_fmt_ctx)
   }
 
   avformat_free_context(out_fmt_ctx);
-}
-
-/**
- * Miniaudio internal playback callback with dynamic A/V drift correction.
- *
- * This callback serves as the high-priority hardware interface, executing
- * asynchronously to stream audio data from the lock-free ring buffer to the
- * sound card.
- *
- * Logic flow:
- * 1. Monitors the 'target_delay_ms' against 'current_delay_samples' to detect
- *    drift introduced by the network/rendering pipeline.
- * 2. Dynamically adjusts the reading rate (speeding up or slowing down)
- *    using sub-millisecond micro-adjustments (max 1.5%) to maintain sync.
- * 3. Applies linear volume ramps during padding insertion to eliminate
- *    audible clicking/popping artifacts during sync corrections.
- * 4. Fallback: Automatically writes silence in the event of ring-buffer
- *    underruns to prevent hardware noise.
- *
- * @param pDevice           Pointer to the active miniaudio device instance.
- * @param pOutput           Target output hardware buffer to fill with PCM frames.
- * @param pInput            Input capture buffer (NULL for our playback-only configuration).
- * @param frameCount        Number of PCM audio frames requested by the sound card.
- */
-static void audio_device_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frameCount)
-{
-  AudioPlaybackContext *play_ctx = (AudioPlaybackContext *)pDevice->pUserData;
-  if (!play_ctx || !play_ctx->is_active)
-  {
-    return;
-  }
-
-  int bytes_per_frame = ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels);
-
-  // Read the volatile target offset atomically using compiler builtins
-  int target_ms = __atomic_load_n(&play_ctx->target_delay_ms, __ATOMIC_ACQUIRE);
-  int target_frames = (target_ms * play_ctx->sample_rate) / 1000;
-  int current_balance = __atomic_load_n(&play_ctx->current_delay_samples, __ATOMIC_ACQUIRE);
-
-  ma_uint32 frames_to_read = frameCount;
-  int adjustment = 0; // Negative = skip samples (speed up); Positive = insert padding (slow down)
-
-  // Calculate latency gap and determine direction
-  if (current_balance < target_frames)
-  {
-    // We need to slow down to increase latency. Inject up to 1.5% of buffer size as padding
-    adjustment = (target_frames - current_balance);
-    ma_uint32 max_adjust = frameCount * 0.015;
-    if (adjustment > max_adjust)
-      adjustment = max_adjust;
-
-    frames_to_read = frameCount - adjustment;
-  }
-  else if (current_balance > target_frames)
-  {
-    // We are lagging; we need to speed up. Skip up to 1.5% of buffer size
-    adjustment = (current_balance - target_frames);
-    ma_uint32 max_adjust = frameCount * 0.015;
-    if (adjustment > max_adjust)
-      adjustment = max_adjust;
-
-    frames_to_read = frameCount + adjustment;
-  }
-
-  ma_uint32 actual_read = frames_to_read;
-  void *pReadBuffer;
-
-  // Retrieve requested frames from the thread-safe circular ring buffer
-  ma_result result = ma_pcm_rb_acquire_read(&play_ctx->ring_buffer, &actual_read, &pReadBuffer);
-  if (result == MA_SUCCESS && actual_read > 0)
-  {
-
-    if (frames_to_read < frameCount)
-    {
-      // SLOW DOWN PATH: Fill the hardware buffer first, then pad the remaining space with silence
-      memcpy(pOutput, pReadBuffer, actual_read * bytes_per_frame);
-
-      // Generate a subtle linear ramp-down on the boundary to prevent sudden clicks
-      float *out_float = (float *)pOutput;
-      int fade_frames = actual_read < 32 ? actual_read : 32;
-      for (int i = 0; i < fade_frames; i++)
-      {
-        float volume = 1.0f - ((float)i / fade_frames);
-        for (int c = 0; c < play_ctx->channels; c++)
-        {
-          out_float[(actual_read - fade_frames + i) * play_ctx->channels + c] *= volume;
-        }
-      }
-
-      // Zero out (silence) the adjustment padding region
-      char *padding_start = (char *)pOutput + (actual_read * bytes_per_frame);
-      memset(padding_start, 0, (frameCount - actual_read) * bytes_per_frame);
-
-      // Adjust local delay cursor tracking forward
-      __atomic_fetch_add(&play_ctx->current_delay_samples, (frameCount - actual_read), __ATOMIC_RELEASE);
-    }
-    else if (frames_to_read > frameCount)
-    {
-      // SPEED UP PATH: We read MORE frames than we write to the hardware device, effectively skipping
-      // We copy only the standard frameCount block to output, discarding the extra resampled frames
-      memcpy(pOutput, pReadBuffer, frameCount * bytes_per_frame);
-
-      // Adjust local delay cursor tracking backward
-      __atomic_fetch_sub(&play_ctx->current_delay_samples, (actual_read - frameCount), __ATOMIC_RELEASE);
-    }
-    else
-    {
-      // NORMAL PATH: Perfect synchronization, execute standard copy
-      memcpy(pOutput, pReadBuffer, actual_read * bytes_per_frame);
-    }
-
-    ma_pcm_rb_commit_read(&play_ctx->ring_buffer, actual_read);
-  }
-  else
-  {
-    // Fallback: If ring-buffer is completely starved, immediately write silence
-    memset(pOutput, 0, frameCount * bytes_per_frame);
-  }
-}
-
-/**
- * Initializes the lock-free circular ring-buffer and boots up the miniaudio playback engine.
- *
- * Operating-system-specific hardware routes are selected by translating the backend `device_id` string
- * parameter into a direct physical device reference before starting the background audio thread.
- *
- * @param play_ctx        Pointer to the AudioPlaybackContext instance to manage.
- * @param sample_rate     Audio sampling rate (e.g., 48000 Hz).
- * @param channels        Number of outputs (Stereo = 2 channels).
- * @param device_id       Target hardware device ID string (NULL defaults to OS system default output).
- * @param buffer_seconds  How long to store the remuxed media packets in memory.
- *
- * @return 0 on success, or a negative integer on allocation or hardware initialization failures.
- */
-int init_audio_playback(AudioPlaybackContext *play_ctx, int sample_rate, int channels, const char *device_id, int buffer_seconds)
-{
-  ma_result result;
-
-  play_ctx->sample_rate = sample_rate;
-  play_ctx->channels = channels;
-  play_ctx->is_active = 0;
-  play_ctx->paused = 0;
-  play_ctx->pause_pts_ms = 0;
-
-  // 1. Initialize the thread-safe PCM ring buffer.
-  // For file playback we pre-decode audio into a large ring buffer so the entire
-  // track can play without underruns even though the demux loop completes quickly.
-  // Default to 10 minutes (600s) which comfortably supports most presentation videos.
-  if (buffer_seconds <= 0)
-  {
-    buffer_seconds = 600;
-  }
-  // Cap at 1 hour to avoid excessive RAM on very long files (adjust if needed)
-  if (buffer_seconds > 3600)
-  {
-    buffer_seconds = 3600;
-  }
-  ma_uint32 buffer_size_frames = (ma_uint32)sample_rate * buffer_seconds;
-  result = ma_pcm_rb_init(ma_format_f32, channels, buffer_size_frames, NULL, NULL, &play_ctx->ring_buffer);
-  if (result != MA_SUCCESS)
-  {
-    return -1;
-  }
-
-  play_ctx->ring_buffer_size_frames = buffer_size_frames;
-
-  // 2. Setup the low-level device configuration
-  ma_device_config config = ma_device_config_init(ma_device_type_playback);
-  config.playback.format = ma_format_f32;
-  config.playback.channels = channels;
-  config.sampleRate = sample_rate;
-  config.dataCallback = audio_device_callback;
-  config.pUserData = play_ctx;
-
-  // To prevent popping, ensure miniaudio uses high-performance hardware buffers
-  config.periodSizeInFrames = 480; // ~10ms at 48kHz is standard for stable low-latency routing
-
-  // Parse the device identifier string if specified, otherwise fall back to system default (NULL)
-  if (device_id != NULL && strlen(device_id) > 0)
-  {
-    // On systems utilizing standard character ids, translate or pass direct mapping safely
-    // For now, config.playback.pDeviceID supports passing structural addresses
-    // Note: The conversion of string -> ma_device_id structure is resolved on the Go layer before calling.
-    config.playback.pDeviceID = (ma_device_id *)device_id;
-  }
-  else
-  {
-    config.playback.pDeviceID = NULL;
-  }
-
-  // 3. Initialize the hardware context link
-  result = ma_device_init(NULL, &config, &play_ctx->device);
-  if (result != MA_SUCCESS)
-  {
-    ma_pcm_rb_uninit(&play_ctx->ring_buffer);
-    return -2;
-  }
-
-  // 4. Start playback thread
-  result = ma_device_start(&play_ctx->device);
-  if (result != MA_SUCCESS)
-  {
-    ma_device_uninit(&play_ctx->device);
-    ma_pcm_rb_uninit(&play_ctx->ring_buffer);
-    return -3;
-  }
-
-  play_ctx->is_active = 1;
-  return 0;
-}
-
-/**
- * Pushes raw, uncompressed PCM floating-point data into the lock-free circular buffer.
- *
- * Called inside the core decoding loop whenever a decoded and resampled audio chunk is finalized.
- *
- * @param play_ctx     Pointer to the active AudioPlaybackContext.
- * @param pcm_data     The resampled input float array.
- * @param frame_count  Number of multi-channel frames contained within the chunk.
- *
- * @return 0 on success, or a negative value if writing to the circular buffer is blocked or overflows.
- */
-int write_pcm_to_ring_buffer(AudioPlaybackContext *play_ctx, const float *pcm_data, int frame_count)
-{
-  if (!play_ctx || !play_ctx->is_active)
-  {
-    return -1;
-  }
-
-  ma_uint32 frames_to_write = frame_count;
-  void *pWriteBuffer;
-
-  // Safely acquire writing sector in the circular map
-  ma_result result = ma_pcm_rb_acquire_write(&play_ctx->ring_buffer, &frames_to_write, &pWriteBuffer);
-  if (result == MA_SUCCESS && frames_to_write > 0)
-  {
-    int bytes_per_frame = ma_get_bytes_per_frame(ma_format_f32, play_ctx->channels);
-
-    // Copy processed frames into acquired memory
-    memcpy(pWriteBuffer, pcm_data, frames_to_write * bytes_per_frame);
-
-    // Finalize transaction to notify the playback reader
-    ma_pcm_rb_commit_write(&play_ctx->ring_buffer, frames_to_write);
-    return 0;
-  }
-
-  return -2; // Buffer overflow/write failed
-}
-
-/**
- * Halts the miniaudio hardware playback engine and safely tears down allocated circular buffers.
- *
- * Safe to invoke repeatedly; guarantees complete deallocation of thread structures.
- *
- * @param play_ctx  Pointer to the AudioPlaybackContext to tear down.
- */
-void stop_audio_playback(AudioPlaybackContext *play_ctx)
-{
-  if (!play_ctx)
-  {
-    return;
-  }
-
-  play_ctx->is_active = 0;
-
-  // Uninitialize device - stops background thread natively
-  ma_device_uninit(&play_ctx->device);
-
-  // Deallocate local circular structures
-  ma_pcm_rb_uninit(&play_ctx->ring_buffer);
-}
-
-/**
- * Thread-safely sets the target playback delay offset in milliseconds.
- *
- * This function is called directly from the Go runtime when processing
- * frame latency adjustments received from the webview.
- *
- * @param play_ctx  Pointer to the active AudioPlaybackContext.
- * @param delay_ms  Target delay in milliseconds.
- */
-void set_audio_delay_offset(AudioPlaybackContext *play_ctx, int delay_ms)
-{
-  if (play_ctx)
-  {
-    __atomic_store_n(&play_ctx->target_delay_ms, delay_ms, __ATOMIC_RELEASE);
-  }
-}
-
-/**
- * Runs a simulated transcoding loop for testing purposes.
- *
- * This function reads packets linearly from the demuxer context.
- *   - Video packets are written directly into the custom memory-based fMP4 muxer.
- *   - Audio packets are sent to the audio decoder, resampled to Float32 48kHz Stereo,
- *     and instantly committed to the thread-safe miniaudio ring-buffer.
- *
- * To ensure safe execution, the function initializes a temporary muxing pipeline,
- * performs memory allocations, runs the loop for a safe duration (150 video frames),
- * and executes a perfect cleanup of all local buffers upon completion.
- *
- * @param dec_ctx      Pointer to the active and opened DemuxDecContext.
- * @param play_ctx     Pointer to the running AudioPlaybackContext.
- * @param go_token     Integer token wrapping the Go-level channel to route bytes.
- *
- * @return 0 on success, or a negative integer error code on mapping failure.
- */
-int run_test_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
-{
-  int ret;
-  TranscodeContext tx_ctx;
-  AVFormatContext *out_fmt_ctx = NULL;
-  AVPacket *pkt = NULL;
-  AVFrame *frame = NULL;
-  float *resample_buf = NULL;
-  int frame_count = 0;
-
-  // Set up the Go callback wrapper context using the integer token
-  tx_ctx.go_user_token = go_token;
-  tx_ctx.go_callback = goTestWriteCallback;
-
-  // Initialize in-memory custom fMP4 muxer
-  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
-  if (ret < 0)
-  {
-    return ret;
-  }
-
-  // ADD THE VIDEO STREAM TO THE OUTPUT MUXER
-  if (dec_ctx->video_stream_idx >= 0)
-  {
-    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
-    if (!out_stream)
-    {
-      free_fmp4_muxer(out_fmt_ctx);
-      return AVERROR(ENOMEM);
-    }
-
-    // Copy the exact codec parameters (H.264/H.265, resolution, etc.) to the new stream
-    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
-    if (ret < 0)
-    {
-      free_fmp4_muxer(out_fmt_ctx);
-      return ret;
-    }
-    out_stream->codecpar->codec_tag = 0; // Clear the codec tag so the MP4 muxer assigns a compliant one
-  }
-
-  // Write initial fMP4 segments to spark the browser initialization sequence
-  ret = write_fmp4_header(out_fmt_ctx);
-  if (ret < 0)
-  {
-    free_fmp4_muxer(out_fmt_ctx);
-    return ret;
-  }
-
-  // Allocate frame structures for dynamic decoding operations
-  pkt = av_packet_alloc();
-  frame = av_frame_alloc();
-  resample_buf = (float *)malloc(48000 * 2 * sizeof(float)); // Up to 1-second dynamic buffer block
-  if (!pkt || !frame || !resample_buf)
-  {
-    ret = AVERROR(ENOMEM);
-    goto cleanup;
-  }
-
-  // Main extraction loop
-  while (frame_count < 150)
-  {
-    ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
-    if (ret < 0)
-    {
-      break; // Stream read finished natively
-    }
-
-    if (pkt->stream_index == dec_ctx->video_stream_idx)
-    {
-      // RESCALE TIMESTAMPS AND MAP STREAM INDEX
-      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-      AVStream *out_stream = out_fmt_ctx->streams[0]; // We only mapped 1 stream (video)
-
-      // Convert the raw packet timestamp into seconds before updating Go state
-      double calculated_pts = 0.0;
-      if (pkt->pts != AV_NOPTS_VALUE)
-      {
-        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
-      }
-
-      // Update the session context BEFORE the write callback triggers
-      extern void set_session_pts(uintptr_t token, double pts);
-      set_session_pts(tx_ctx.go_user_token, calculated_pts);
-
-      // Rescale presentation/decompression timestamps to the new fMP4 time base
-      av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
-
-      // Assign the packet to the 0th index (our single output video stream)
-      pkt->stream_index = 0;
-
-      // Write frame to fMP4 output context. This fires write_to_memory_cb internally
-      av_interleaved_write_frame(out_fmt_ctx, pkt);
-      frame_count++;
-    }
-    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
-    {
-      // Send raw packet to our audio decoder thread
-      ret = avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt);
-      if (ret >= 0)
-      {
-        while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
-        {
-          // Convert raw source format into native Float32 Stereo 48kHz
-          int out_samples = swr_convert(
-              dec_ctx->swr_ctx,
-              (uint8_t **)&resample_buf,
-              48000,
-              (const uint8_t **)frame->data,
-              frame->nb_samples);
-
-          if (out_samples > 0)
-          {
-            // Push samples directly into the lock-free circular audio system
-            write_pcm_to_ring_buffer(play_ctx, resample_buf, out_samples);
-          }
-        }
-      }
-    }
-    av_packet_unref(pkt);
-  }
-
-  // Force flush the muxer to finalize any pending fragments in the queue
-  av_write_trailer(out_fmt_ctx);
-
-cleanup:
-  // Safely deallocate all temporary testing allocations
-  if (resample_buf)
-  {
-    free(resample_buf);
-  }
-  if (frame)
-  {
-    av_frame_free(&frame);
-  }
-  if (pkt)
-  {
-    av_packet_free(&pkt);
-  }
-
-  // Finalize stream and write trailers
-  if (out_fmt_ctx)
-  {
-    free_fmp4_muxer(out_fmt_ctx);
-  }
-  return ret;
 }
 
 int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
@@ -1129,45 +676,6 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 }
 
 /**
- * Pauses video playback.
- */
-void pause_playback(AudioPlaybackContext *play_ctx)
-{
-  if (!play_ctx)
-    return;
-
-  play_ctx->paused = 1;
-  if (play_ctx->is_active)
-  {
-    ma_device_stop(&play_ctx->device);
-    play_ctx->is_active = 0;
-  }
-}
-
-/**
- * Resumes video playback.
- */
-void resume_playback(AudioPlaybackContext *play_ctx, int64_t resume_pts_ms)
-{
-  if (!play_ctx)
-    return;
-
-  play_ctx->paused = 0;
-
-  // If a resume PTS is provided, seek to it
-  if (resume_pts_ms > 0)
-  {
-    // Note: seek_playback is called from Go side for safety
-  }
-
-  if (!play_ctx->is_active)
-  {
-    ma_device_start(&play_ctx->device);
-    play_ctx->is_active = 1;
-  }
-}
-
-/**
  * Seeks to a specific time in milliseconds.
  * Flushes decoders and seeks the format context.
  * Note: This is a basic implementation. Full seamless seeking while streaming
@@ -1204,27 +712,24 @@ int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms)
   return 0;
 }
 
-int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *play_ctx, uintptr_t go_token)
+int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 {
   int ret;
   TranscodeContext tx_ctx;
   AVFormatContext *out_fmt_ctx = NULL;
   AVPacket *pkt = NULL;
   AVFrame *frame = NULL;
-  float *resample_buf = NULL;
 
-  // --- Setup identical to production path ---
   tx_ctx.go_user_token = go_token;
   tx_ctx.go_callback = goTestWriteCallback;
 
   // Initialize in-memory fMP4 muxer
   ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
   if (ret < 0)
-  {
     return ret;
-  }
 
-  // Add video stream to output muxer (if present)
+  // 1. Mux Video Stream
+  int out_video_idx = -1;
   if (dec_ctx->video_stream_idx >= 0)
   {
     AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
@@ -1234,7 +739,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *p
       free_fmp4_muxer(out_fmt_ctx);
       return AVERROR(ENOMEM);
     }
-
     ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
     if (ret < 0)
     {
@@ -1242,9 +746,51 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *p
       return ret;
     }
     out_stream->codecpar->codec_tag = 0;
+    out_video_idx = out_stream->index;
   }
 
-  // Write fMP4 header
+  // 2. Setup AAC Audio Transcoder & Mux Stream
+  int out_audio_idx = -1;
+  AVCodecContext *aac_enc_ctx = NULL;
+  AVAudioFifo *fifo = NULL;
+  AVFrame *enc_frame = NULL;
+  AVPacket *enc_pkt = NULL;
+  uint8_t *resample_buf[2] = {NULL, NULL};
+  int64_t audio_pts_counter = 0;
+
+  if (dec_ctx->audio_stream_idx >= 0)
+  {
+    const AVCodec *aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (aac_codec)
+    {
+      aac_enc_ctx = avcodec_alloc_context3(aac_codec);
+      aac_enc_ctx->sample_rate = 48000;
+      av_channel_layout_default(&aac_enc_ctx->ch_layout, 2);
+      aac_enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+      aac_enc_ctx->bit_rate = 192000;
+      aac_enc_ctx->time_base = (AVRational){1, 48000}; // Required for smooth MSE sync
+
+      if (avcodec_open2(aac_enc_ctx, aac_codec, NULL) >= 0)
+      {
+        AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+        out_audio_idx = out_stream->index;
+        avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx);
+
+        // FFmpeg AAC strict frame size enforcement (1024 frames)
+        fifo = av_audio_fifo_alloc(aac_enc_ctx->sample_fmt, 2, 8192);
+        enc_frame = av_frame_alloc();
+        enc_frame->nb_samples = aac_enc_ctx->frame_size;
+        enc_frame->format = aac_enc_ctx->sample_fmt;
+        av_channel_layout_copy(&enc_frame->ch_layout, &aac_enc_ctx->ch_layout);
+        av_frame_get_buffer(enc_frame, 0);
+        enc_pkt = av_packet_alloc();
+
+        // Static buffer for intermediate SWR conversions (up to 8192 samples per read)
+        av_samples_alloc(resample_buf, NULL, 2, 8192, AV_SAMPLE_FMT_FLTP, 0);
+      }
+    }
+  }
+
   ret = write_fmp4_header(out_fmt_ctx);
   if (ret < 0)
   {
@@ -1254,46 +800,20 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *p
 
   pkt = av_packet_alloc();
   frame = av_frame_alloc();
-  resample_buf = (float *)malloc(48000 * 2 * sizeof(float));
-  if (!pkt || !frame || !resample_buf)
+  if (!pkt || !frame)
   {
     ret = AVERROR(ENOMEM);
     goto cleanup;
   }
 
-  // Streaming Control Variables
-  double last_reported_pts = 0.0;
-  // READ_AHEAD_SECONDS: How far ahead of the browser's current playback position
-  // we are allowed to remux video.
-  //
-  // Decision: 10 seconds was chosen as a practical balance.
-  // Merit: Prevents the sidecar from remuxing large portions of unwatched video
-  //        (e.g. user only watches first 2 minutes of a 30-minute video).
-  // Demerit: If the browser/MSE is very slow to append and render, we may
-  //          temporarily under-buffer. This value can be tuned (8–15s range).
-  const double READ_AHEAD_SECONDS = 25.0;
-
-  // AUDIO_JIT_THRESHOLD_MS: Only decode more audio if the ring buffer has
-  // less than this amount buffered. This implements "Just-In-Time" audio
-  // decoding (Option 2).
-  //
-  // When the buffer is healthy (> 2.5s), we sleep instead of decoding more.
-  // This naturally throttles the entire demux/remux loop to roughly real-time.
-  // It also ensures that when paused == 1, we stop decoding audio immediately.
-  const int AUDIO_JIT_THRESHOLD_MS = 8000; // 2.5 seconds
-
   // Main streaming loop — designed to stay alive and react to control signals.
-  // Unlike the old production version, this loop does NOT blindly run to EOF
-  // at full CPU speed. It is now paced and controllable natively by the audio hardware.
   while (true)
   {
-    // 1. Check control flags from Go side (Option 3 style)
+    // Check control flags from Go side (Option 3 style)
     // We use atomic loads for thread-safety. The Go control thread (ControlStream)
     // can set these flags at any time without locking the entire pipeline.
     if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE))
-    {
-      break; // Clean shutdown requested
-    }
+      break;
 
     if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
     {
@@ -1310,10 +830,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *p
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
         if (dec_ctx->audio_dec_ctx)
           avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
+        if (aac_enc_ctx)
+          avcodec_flush_buffers(aac_enc_ctx);
+        if (fifo)
+          av_audio_fifo_reset(fifo);
+        audio_pts_counter = 0; // Sync reset
       }
-
-      // CRITICAL FIX: We removed the assignment of last_reported_pts here because the
-      // broken READ_AHEAD_SECONDS video throttle logic has been completely removed.
       __atomic_store_n(&dec_ctx->seek_requested, 0, __ATOMIC_RELEASE);
       av_packet_unref(pkt);
       continue;
@@ -1321,129 +843,88 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, AudioPlaybackContext *p
 
     if (__atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
     {
-      // CRITICAL: Exact Pause Behavior
-      // When paused we MUST NOT decode or push new audio.
-      // This guarantees audio does not advance while video is frozen.
-      // This is one of the most important requirements.
-      // We sleep to avoid busy-spinning the CPU.
-      av_usleep(20000); // 20ms
-      // CRITICAL FIX: Removed av_packet_unref(pkt) here, as pkt hasn't been populated
-      // via av_read_frame yet in this phase of the loop.
+      av_usleep(20000);
       continue;
     }
 
-    // 2. Read next packet from container
     ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
     if (ret == AVERROR_EOF || ret < 0)
-    {
-      // For a streaming model we treat EOF as "no more data for now".
-      // We break so the trailer can be written and Go side can finish cleanly.
-      // The client will receive the final chunks and then the stream ends naturally.
       break;
-    }
 
-    // 3. VIDEO PATH — Paced Naturally by Audio Output
-    if (pkt->stream_index == dec_ctx->video_stream_idx)
+    // VIDEO PATH
+    if (pkt->stream_index == dec_ctx->video_stream_idx && out_video_idx >= 0)
     {
       AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-      AVStream *out_stream = out_fmt_ctx->streams[0];
+      AVStream *out_stream = out_fmt_ctx->streams[out_video_idx];
 
-      double calculated_pts = 0.0;
-      if (pkt->pts != AV_NOPTS_VALUE)
-      {
-        calculated_pts = pkt->pts * av_q2d(in_stream->time_base);
-      }
-
-      // CRITICAL FIX: Removed the `READ_AHEAD_SECONDS` throttling block.
-      // Tossing video packets with `continue` led to the "single frame" freeze.
-      // Video is now naturally paced by the blocking audio hardware loop below.
-
-      // Update PTS tracking (frontend uses this for latency compensation)
+      double calculated_pts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts * av_q2d(in_stream->time_base) : 0.0;
       extern void set_session_pts(uintptr_t token, double pts);
       set_session_pts(tx_ctx.go_user_token, calculated_pts);
 
       av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
-      pkt->stream_index = 0;
-
+      pkt->stream_index = out_video_idx;
       av_interleaved_write_frame(out_fmt_ctx, pkt);
     }
 
-    // 4. AUDIO PATH — Just-In-Time Decoding Blocking Loop
-    // We only decode audio when there is meaningful room in the ring buffer.
-    // This naturally couples audio production rate to consumption rate and
-    // prevents the pipeline from racing ahead of real-time playback.
-    //
-    // Combined with the paused flag check above, this ensures audio
-    // completely stops when the user pauses the video.
-    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
+    // AUDIO PATH
+    else if (pkt->stream_index == dec_ctx->audio_stream_idx && aac_enc_ctx && fifo)
     {
-      // CRITICAL FIX: JIT Block Loop.
-      // Do NOT throw away the audio packet with `continue`! This caused the missing audio.
-      // Instead, we sleep and block the entire demux thread until the soundcard
-      // consumes enough audio to free up space in the ring buffer.
-      while (true)
+      if (avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt) >= 0)
       {
-        if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
-            __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+        while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
         {
-          break;
-        }
-
-        ma_uint32 available_frames = ma_pcm_rb_available_read(&play_ctx->ring_buffer);
-        ma_uint32 total_frames = play_ctx->ring_buffer_size_frames; // stored during init_audio_playback()
-        int free_ms = (play_ctx->sample_rate > 0)
-                          ? ((int)((total_frames - available_frames) * 1000ULL) / play_ctx->sample_rate)
-                          : 0;
-
-        if (free_ms < 800)
-        {
-          av_usleep(10000); // Sleep for 10ms and check again
-          continue;
-        }
-        break; // Buffer has room, proceed to decode!
-      }
-
-      if (!__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) &&
-          !__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
-      {
-        // Buffer has room — safe to decode and push
-        ret = avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt);
-        if (ret >= 0)
-        {
-          while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
+          // Convert to FLTP 48kHz Stereo
+          int out_samples = swr_convert(dec_ctx->swr_ctx, resample_buf, 8192, (const uint8_t **)frame->data, frame->nb_samples);
+          if (out_samples > 0)
           {
-            int out_samples = swr_convert(
-                dec_ctx->swr_ctx,
-                (uint8_t **)&resample_buf,
-                48000,
-                (const uint8_t **)frame->data,
-                frame->nb_samples);
+            av_audio_fifo_write(fifo, (void **)resample_buf, out_samples);
+          }
 
-            if (out_samples > 0)
+          // Consume from FIFO to feed AAC Encoder (needs exactly frame_size per packet)
+          while (av_audio_fifo_size(fifo) >= aac_enc_ctx->frame_size)
+          {
+            av_audio_fifo_read(fifo, (void **)enc_frame->data, aac_enc_ctx->frame_size);
+            enc_frame->pts = audio_pts_counter;
+            audio_pts_counter += aac_enc_ctx->frame_size;
+
+            if (avcodec_send_frame(aac_enc_ctx, enc_frame) >= 0)
             {
-              write_pcm_to_ring_buffer(play_ctx, resample_buf, out_samples);
+              while (avcodec_receive_packet(aac_enc_ctx, enc_pkt) >= 0)
+              {
+                av_packet_rescale_ts(enc_pkt, aac_enc_ctx->time_base, out_fmt_ctx->streams[out_audio_idx]->time_base);
+                enc_pkt->stream_index = out_audio_idx;
+
+                // Native FFmpeg function safely interleaves the binary audio and video data
+                av_interleaved_write_frame(out_fmt_ctx, enc_pkt);
+                av_packet_unref(enc_pkt);
+              }
             }
           }
         }
       }
     }
-
     av_packet_unref(pkt);
   }
 
   // Write trailer to finalize the last fMP4 fragment
   if (out_fmt_ctx)
-  {
     av_write_trailer(out_fmt_ctx);
-  }
 
 cleanup:
-  if (resample_buf)
-    free(resample_buf);
   if (frame)
     av_frame_free(&frame);
   if (pkt)
     av_packet_free(&pkt);
+  if (enc_frame)
+    av_frame_free(&enc_frame);
+  if (enc_pkt)
+    av_packet_free(&enc_pkt);
+  if (fifo)
+    av_audio_fifo_free(fifo);
+  if (resample_buf[0])
+    av_freep(&resample_buf[0]); // Frees the contiguous memory block
+  if (aac_enc_ctx)
+    avcodec_free_context(&aac_enc_ctx);
   if (out_fmt_ctx)
     free_fmp4_muxer(out_fmt_ctx);
 
