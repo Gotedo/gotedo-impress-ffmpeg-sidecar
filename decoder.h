@@ -8,9 +8,43 @@
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
 #include <libavutil/audio_fifo.h>
+#include <libavutil/error.h>
 #include <miniaudio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+
+// Evaluates complex macros inside C space and assigns them to tokens CGO can read
+enum
+{
+  // Native FFmpeg Error Codes
+  GO_AVERROR_EOF = AVERROR_EOF,                   // End of file / stream
+  GO_AVERROR_EAGAIN = AVERROR(EAGAIN),            // Resource temporarily unavailable (try again)
+  GO_AVERROR_INVALIDDATA = AVERROR_INVALIDDATA,   // Invalid data found when processing input
+  GO_AVERROR_BUG = AVERROR_BUG,                   // Internal bug detected
+  GO_AVERROR_UNKNOWN = AVERROR_UNKNOWN,           // Unknown error (typically from external libraries)
+  GO_AVERROR_EXIT = AVERROR_EXIT,                 // Immediate exit was requested by the application
+  GO_AVERROR_PATCHWELCOME = AVERROR_PATCHWELCOME, // Feature not implemented yet, patches welcome
+
+  // Component Discovery Errors
+  GO_AVERROR_DECODER_NOT_FOUND = AVERROR_DECODER_NOT_FOUND,   // Decoder not found for the requested stream
+  GO_AVERROR_ENCODER_NOT_FOUND = AVERROR_ENCODER_NOT_FOUND,   // Encoder not found for the requested codec
+  GO_AVERROR_DEMUXER_NOT_FOUND = AVERROR_DEMUXER_NOT_FOUND,   // Demuxer not found for the input format
+  GO_AVERROR_MUXER_NOT_FOUND = AVERROR_MUXER_NOT_FOUND,       // Muxer not found for the output format
+  GO_AVERROR_PROTOCOL_NOT_FOUND = AVERROR_PROTOCOL_NOT_FOUND, // Protocol driver not found (e.g., rtsp, http)
+  GO_AVERROR_FILTER_NOT_FOUND = AVERROR_FILTER_NOT_FOUND,     // Audio/Video filter not found
+  GO_AVERROR_BSF_NOT_FOUND = AVERROR_BSF_NOT_FOUND,           // Bitstream filter not found
+
+  // Buffer and Configuration Errors
+  GO_AVERROR_BUFFER_TOO_SMALL = AVERROR_BUFFER_TOO_SMALL, // Provided data buffer size is too small
+  GO_AVERROR_OPTION_NOT_FOUND = AVERROR_OPTION_NOT_FOUND, // Specified AVOption field was not found
+
+  // Common POSIX-Wrapped I/O Errors
+  GO_AVERROR_EIO = AVERROR(EIO),            // Generic Input/Output error
+  GO_AVERROR_ENOMEM = AVERROR(ENOMEM),      // Cannot allocate memory / Out of memory
+  GO_AVERROR_EINVAL = AVERROR(EINVAL),      // Invalid argument passed to function
+  GO_AVERROR_ENOENT = AVERROR(ENOENT),      // No such file or directory found
+  GO_AVERROR_ETIMEDOUT = AVERROR(ETIMEDOUT) // Connection or I/O operation timed out
+};
 
 typedef struct DemuxDecContext
 {

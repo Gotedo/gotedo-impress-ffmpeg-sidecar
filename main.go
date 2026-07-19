@@ -312,19 +312,19 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		case errCode := <-pipelineErrChan:
 			log.Printf("[SIDECAR] C-pipeline for target %s finished with code: %d", targetID, errCode)
 
-			if errCode < 0 {
-				// Error path -> full cleanup
+			// CRITICAL: Reaching the end of the file is a successful processing conclusion, not a failure.
+			// We skip the error handling block if the code indicates EOF.
+			if errCode < 0 && errCode != int(C.GO_AVERROR_EOF) {
+				// Real error path -> execute full cleanup
 				unregisterPlayback(targetID)
 				return status.Errorf(codes.Internal, "C-pipeline processing failed with error code: %d", errCode)
 			}
 
 			// Success path (errCode == 0): Do NOT free yet.
-			// Leave contexts alive so the audio ring buffer can drain
-			// and the client can finish rendering. We will clean up on client disconnect
-			// or when the next request comes in for the same target.
-			log.Printf("[SIDECAR] Pipeline ended successfully for target %s — waiting for client to finish (audio drain)", targetID)
 			// We intentionally do NOT call unregisterPlayback here.
-			// The session stays registered until client disconnect or new request overwrites it.
+			// The session stays registered until client disconnect or new request
+			// for the same target overwrites it.
+			log.Printf("[SIDECAR] Pipeline ended successfully for target %s — waiting for client to finish (audio drain)", targetID)
 
 		case chunk := <-sessionCtx.StreamChan:
 			err := stream.Send(&proto.StreamResponse{
