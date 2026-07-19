@@ -196,6 +196,8 @@ func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 
 func main() {
 	socketPath := flag.String("socket", "", "Path to the Unix Domain Socket for IPC")
+	// Parse the incoming command-line arguments
+	flag.Parse()
 
 	if *socketPath == "" {
 		log.Fatal("Error: Sidecar must be started with a valid -socket path.")
