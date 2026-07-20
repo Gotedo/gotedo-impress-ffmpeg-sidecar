@@ -1879,7 +1879,7 @@ EOF
 
         export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lswresample
+        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv"
         ;;

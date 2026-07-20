@@ -172,7 +172,7 @@ tasks:
       FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
       # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample
+        -lavformat -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
     cmds:
@@ -196,7 +196,7 @@ tasks:
       # Windows requires Winsock and threading libraries
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample
+        -lavformat -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lws2_32 -lbcrypt -lmfplat -lmfuuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
     cmds:
@@ -220,7 +220,7 @@ tasks:
       # Linux requires standard pthread and math libraries for static linking
       # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample
+        -lavformat -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lasound -lm -lpthread -ldl
     cmds:

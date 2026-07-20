@@ -12,6 +12,7 @@
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
 #include <miniaudio.h>
 #include <string.h>
 #include <stdlib.h>

@@ -725,24 +725,109 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     return ret;
 
   // 1. Mux Video Stream
+  //    - Passthrough when the source is already H.264 (zero CPU / zero quality loss)
+  //    - Otherwise force a highly compatible H.264 re-encode so every file plays in
+  //      Chrome / Edge / Safari MSE.
   int out_video_idx = -1;
-  if (dec_ctx->video_stream_idx >= 0)
+  bool need_video_reencode = false;
+  AVCodecContext *h264_enc_ctx = NULL;
+  struct SwsContext *sws_ctx = NULL;
+  AVFrame *enc_video_frame = NULL;
+  AVPacket *enc_video_pkt = NULL;
+
+  if (dec_ctx->video_stream_idx >= 0 && dec_ctx->video_dec_ctx)
   {
-    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
-    if (!out_stream)
+    need_video_reencode = (dec_ctx->video_dec_ctx->codec_id != AV_CODEC_ID_H264);
+
+    if (!need_video_reencode)
     {
-      free_fmp4_muxer(out_fmt_ctx);
-      return AVERROR(ENOMEM);
+      // Fast path – pure passthrough
+      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+      AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+      if (!out_stream)
+      {
+        free_fmp4_muxer(out_fmt_ctx);
+        return AVERROR(ENOMEM);
+      }
+      ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+      if (ret < 0)
+      {
+        free_fmp4_muxer(out_fmt_ctx);
+        return ret;
+      }
+      out_stream->codecpar->codec_tag = 0;
+      out_video_idx = out_stream->index;
     }
-    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
-    if (ret < 0)
+    else
     {
-      free_fmp4_muxer(out_fmt_ctx);
-      return ret;
+      // Slow path – force H.264 (Baseline/Main, low-latency, GLOBAL_HEADER)
+      const AVCodec *h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+      if (!h264_codec)
+      {
+        free_fmp4_muxer(out_fmt_ctx);
+        return AVERROR_ENCODER_NOT_FOUND;
+      }
+
+      h264_enc_ctx = avcodec_alloc_context3(h264_codec);
+      if (!h264_enc_ctx)
+      {
+        free_fmp4_muxer(out_fmt_ctx);
+        return AVERROR(ENOMEM);
+      }
+
+      h264_enc_ctx->width = dec_ctx->video_dec_ctx->width;
+      h264_enc_ctx->height = dec_ctx->video_dec_ctx->height;
+      h264_enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+      h264_enc_ctx->time_base = (AVRational){1, 90000};
+      h264_enc_ctx->framerate = av_guess_frame_rate(
+          dec_ctx->fmt_ctx,
+          dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx],
+          NULL);
+      if (h264_enc_ctx->framerate.num == 0)
+        h264_enc_ctx->framerate = (AVRational){25, 1};
+
+      h264_enc_ctx->gop_size = 48;
+      h264_enc_ctx->max_b_frames = 0; // better for frag_keyframe + low latency
+      h264_enc_ctx->bit_rate = 2500000;
+      h264_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+      av_opt_set(h264_enc_ctx->priv_data, "profile", "main", 0);
+      av_opt_set(h264_enc_ctx->priv_data, "preset", "veryfast", 0);
+      av_opt_set(h264_enc_ctx->priv_data, "tune", "zerolatency", 0);
+
+      if (avcodec_open2(h264_enc_ctx, h264_codec, NULL) < 0)
+      {
+        avcodec_free_context(&h264_enc_ctx);
+        free_fmp4_muxer(out_fmt_ctx);
+        return AVERROR_UNKNOWN;
+      }
+
+      AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+      if (!out_stream)
+      {
+        avcodec_free_context(&h264_enc_ctx);
+        free_fmp4_muxer(out_fmt_ctx);
+        return AVERROR(ENOMEM);
+      }
+      avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx);
+      out_stream->codecpar->codec_tag = 0;
+      out_video_idx = out_stream->index;
+
+      // Colour-space converter (any decoder output → YUV420P)
+      sws_ctx = sws_getContext(
+          dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
+          dec_ctx->video_dec_ctx->pix_fmt,
+          h264_enc_ctx->width, h264_enc_ctx->height, AV_PIX_FMT_YUV420P,
+          SWS_BILINEAR, NULL, NULL, NULL);
+
+      enc_video_frame = av_frame_alloc();
+      enc_video_frame->format = AV_PIX_FMT_YUV420P;
+      enc_video_frame->width = h264_enc_ctx->width;
+      enc_video_frame->height = h264_enc_ctx->height;
+      av_frame_get_buffer(enc_video_frame, 32);
+
+      enc_video_pkt = av_packet_alloc();
     }
-    out_stream->codecpar->codec_tag = 0;
-    out_video_idx = out_stream->index;
   }
 
   // 2. Setup AAC Audio Transcoder & Mux Stream
@@ -833,6 +918,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
         if (dec_ctx->audio_dec_ctx)
           avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
+        if (h264_enc_ctx)
+          avcodec_flush_buffers(h264_enc_ctx);
         if (aac_enc_ctx)
           avcodec_flush_buffers(aac_enc_ctx);
         if (fifo)
@@ -870,49 +957,90 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     // VIDEO PATH
     if (pkt->stream_index == dec_ctx->video_stream_idx && out_video_idx >= 0)
     {
-      AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-      AVStream *out_stream = out_fmt_ctx->streams[out_video_idx];
-
-      double calculated_pts = pkt->pts != AV_NOPTS_VALUE
-                                  ? pkt->pts * av_q2d(in_stream->time_base)
-                                  : 0.0;
-      int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
-
-      extern void set_session_pts(uintptr_t token, double pts);
-      set_session_pts(tx_ctx.go_user_token, calculated_pts);
-
-      // CRITICAL: Real-time pacing lock.
-      // Forces the C pipeline to sleep if it is generating data faster than
-      // the real-world clock (plus our 10-second buffer allowance).
-      // Also aborts the wait immediately on any control signal.
-      int interrupted = 0;
-      while (true)
+      if (!need_video_reencode)
       {
-        if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
-            __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
-            __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+        // Passthrough (original path)
+        AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+        AVStream *out_stream = out_fmt_ctx->streams[out_video_idx];
+
+        double calculated_pts = pkt->pts != AV_NOPTS_VALUE
+                                    ? pkt->pts * av_q2d(in_stream->time_base)
+                                    : 0.0;
+        int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
+
+        extern void set_session_pts(uintptr_t token, double pts);
+        set_session_pts(tx_ctx.go_user_token, calculated_pts);
+
+        // CRITICAL: Real-time pacing lock.
+        // Forces the C pipeline to sleep if it is generating data faster than
+        // the real-world clock (plus our 10-second buffer allowance).
+        // Also aborts the wait immediately on any control signal.
+        int interrupted = 0;
+        while (true)
         {
-          interrupted = 1;
-          break;
+          if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
+              __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
+              __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+          {
+            interrupted = 1;
+            break;
+          }
+
+          int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
+          if (pkt_time_us > elapsed_us + READ_AHEAD_US)
+            av_usleep(15000); // Sleep 15 ms and re-evaluate the clock
+          else
+            break; // Clock has caught up – proceed with remuxing
         }
 
-        int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
-        if (pkt_time_us > elapsed_us + READ_AHEAD_US)
-          av_usleep(15000); // Sleep 15 ms and re-evaluate the clock
-        else
-          break; // Clock has caught up – proceed with remuxing
+        // Only write if the throttle was not interrupted by a control signal.
+        // (Writing an outdated packet after a seek would corrupt the timeline.)
+        if (!interrupted)
+        {
+          av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+          pkt->stream_index = out_video_idx;
+
+          // Catch fatal container formatting errors instead of feeding garbage to the browser
+          if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
+            __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+        }
       }
-
-      // Only write if the throttle was not interrupted by a control signal.
-      // (Writing an outdated packet after a seek would corrupt the timeline.)
-      if (!interrupted)
+      else
       {
-        av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
-        pkt->stream_index = out_video_idx;
+        // Full H.264 re-encode path
+        if (avcodec_send_packet(dec_ctx->video_dec_ctx, pkt) >= 0)
+        {
+          while (avcodec_receive_frame(dec_ctx->video_dec_ctx, frame) >= 0)
+          {
+            sws_scale(sws_ctx,
+                      (const uint8_t *const *)frame->data, frame->linesize,
+                      0, frame->height,
+                      enc_video_frame->data, enc_video_frame->linesize);
 
-        // Catch fatal container formatting errors instead of feeding garbage to the browser
-        if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
-          __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+            enc_video_frame->pts = frame->pts;
+
+            if (avcodec_send_frame(h264_enc_ctx, enc_video_frame) >= 0)
+            {
+              while (avcodec_receive_packet(h264_enc_ctx, enc_video_pkt) >= 0)
+              {
+                av_packet_rescale_ts(enc_video_pkt,
+                                     h264_enc_ctx->time_base,
+                                     out_fmt_ctx->streams[out_video_idx]->time_base);
+                enc_video_pkt->stream_index = out_video_idx;
+
+                double pts_sec = enc_video_pkt->pts *
+                                 av_q2d(out_fmt_ctx->streams[out_video_idx]->time_base);
+                extern void set_session_pts(uintptr_t token, double pts);
+                set_session_pts(tx_ctx.go_user_token, pts_sec);
+
+                if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
+                  __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+
+                av_packet_unref(enc_video_pkt);
+              }
+            }
+          }
+        }
       }
     }
 
@@ -966,6 +1094,21 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     av_packet_unref(pkt);
   }
 
+  // Flush H.264 encoder on EOF (only when we actually re-encoded)
+  if (need_video_reencode && h264_enc_ctx)
+  {
+    avcodec_send_frame(h264_enc_ctx, NULL); // return value intentionally ignored on flush
+    while (avcodec_receive_packet(h264_enc_ctx, enc_video_pkt) >= 0)
+    {
+      av_packet_rescale_ts(enc_video_pkt,
+                           h264_enc_ctx->time_base,
+                           out_fmt_ctx->streams[out_video_idx]->time_base);
+      enc_video_pkt->stream_index = out_video_idx;
+      av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt);
+      av_packet_unref(enc_video_pkt);
+    }
+  }
+
   // Write trailer to finalize the last fMP4 fragment
   if (out_fmt_ctx)
     av_write_trailer(out_fmt_ctx);
@@ -979,10 +1122,18 @@ cleanup:
     av_frame_free(&enc_frame);
   if (enc_pkt)
     av_packet_free(&enc_pkt);
+  if (enc_video_frame)
+    av_frame_free(&enc_video_frame);
+  if (enc_video_pkt)
+    av_packet_free(&enc_video_pkt);
   if (fifo)
     av_audio_fifo_free(fifo);
   if (resample_buf[0])
     av_freep(&resample_buf[0]); // Frees the contiguous memory block
+  if (sws_ctx)
+    sws_freeContext(sws_ctx);
+  if (h264_enc_ctx)
+    avcodec_free_context(&h264_enc_ctx);
   if (aac_enc_ctx)
     avcodec_free_context(&aac_enc_ctx);
   if (out_fmt_ctx)
