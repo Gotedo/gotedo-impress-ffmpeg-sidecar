@@ -813,7 +813,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       out_stream->codecpar->codec_tag = 0;
       out_video_idx = out_stream->index;
 
-      // Colour-space converter (any decoder output → YUV420P)
+      // Colour-space converter (any decoder output -> YUV420P)
       sws_ctx = sws_getContext(
           dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
           dec_ctx->video_dec_ctx->pix_fmt,
@@ -1007,17 +1007,52 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
       else
       {
-        // Full H.264 re-encode path
+        // Full H.264 re-encode path (with real-time pacing)
         if (avcodec_send_packet(dec_ctx->video_dec_ctx, pkt) >= 0)
         {
           while (avcodec_receive_frame(dec_ctx->video_dec_ctx, frame) >= 0)
           {
+            // Convert PTS from the input stream time_base -> encoder time_base
+            AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+            enc_video_frame->pts = av_rescale_q(frame->pts,
+                                                in_stream->time_base,
+                                                h264_enc_ctx->time_base);
+
+            // Real-time pacing (identical logic to the passthrough path)
+            double calculated_pts = frame->pts != AV_NOPTS_VALUE
+                                        ? frame->pts * av_q2d(in_stream->time_base)
+                                        : 0.0;
+            int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
+
+            extern void set_session_pts(uintptr_t token, double pts);
+            set_session_pts(tx_ctx.go_user_token, calculated_pts);
+
+            int interrupted = 0;
+            while (true)
+            {
+              if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
+                  __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
+                  __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+              {
+                interrupted = 1;
+                break;
+              }
+
+              int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
+              if (pkt_time_us > elapsed_us + READ_AHEAD_US)
+                av_usleep(15000);
+              else
+                break;
+            }
+
+            if (interrupted)
+              continue; // drop this frame, control signal will be handled on next loop
+
+            // Colour conversion + encode
             sws_scale(sws_ctx,
                       (const uint8_t *const *)frame->data, frame->linesize,
                       0, frame->height,
                       enc_video_frame->data, enc_video_frame->linesize);
-
-            enc_video_frame->pts = frame->pts;
 
             if (avcodec_send_frame(h264_enc_ctx, enc_video_frame) >= 0)
             {
@@ -1027,11 +1062,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      h264_enc_ctx->time_base,
                                      out_fmt_ctx->streams[out_video_idx]->time_base);
                 enc_video_pkt->stream_index = out_video_idx;
-
-                double pts_sec = enc_video_pkt->pts *
-                                 av_q2d(out_fmt_ctx->streams[out_video_idx]->time_base);
-                extern void set_session_pts(uintptr_t token, double pts);
-                set_session_pts(tx_ctx.go_user_token, pts_sec);
 
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
