@@ -69,7 +69,7 @@ message ControlRequest {
         STOP = 3;
     }
     Action action = 2;
-    int32 seek_seconds = 3; // Only used if action == SEEK
+    float seek_seconds = 3; // Only used if action == SEEK
 }
 
 message ControlResponse {

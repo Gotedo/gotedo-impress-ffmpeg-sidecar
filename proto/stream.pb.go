@@ -381,7 +381,7 @@ type ControlRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TargetId      string                 `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`
 	Action        ControlRequest_Action  `protobuf:"varint,2,opt,name=action,proto3,enum=ffmpeg.ControlRequest_Action" json:"action,omitempty"`
-	SeekSeconds   int32                  `protobuf:"varint,3,opt,name=seek_seconds,json=seekSeconds,proto3" json:"seek_seconds,omitempty"` // Only used if action == SEEK
+	SeekSeconds   float32                `protobuf:"fixed32,3,opt,name=seek_seconds,json=seekSeconds,proto3" json:"seek_seconds,omitempty"` // Only used if action == SEEK
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -430,7 +430,7 @@ func (x *ControlRequest) GetAction() ControlRequest_Action {
 	return ControlRequest_PLAY
 }
 
-func (x *ControlRequest) GetSeekSeconds() int32 {
+func (x *ControlRequest) GetSeekSeconds() float32 {
 	if x != nil {
 		return x.SeekSeconds
 	}
@@ -1179,7 +1179,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0eControlRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x125\n" +
 	"\x06action\x18\x02 \x01(\x0e2\x1d.ffmpeg.ControlRequest.ActionR\x06action\x12!\n" +
-	"\fseek_seconds\x18\x03 \x01(\x05R\vseekSeconds\"1\n" +
+	"\fseek_seconds\x18\x03 \x01(\x02R\vseekSeconds\"1\n" +
 	"\x06Action\x12\b\n" +
 	"\x04PLAY\x10\x00\x12\t\n" +
 	"\x05PAUSE\x10\x01\x12\b\n" +

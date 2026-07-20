@@ -571,7 +571,8 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 		}, nil
 
 	case proto.ControlRequest_SEEK:
-		seekMs := int64(req.GetSeekSeconds()) * 1000
+		// Multiply before casting to avoid losing precision.
+		seekMs := int64(req.GetSeekSeconds() * 1000)
 		if sess.DecCtx != nil {
 			// Use the flag-based request so the streaming loop performs the seek
 			// cleanly without racing with av_read_frame.

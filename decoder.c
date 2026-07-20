@@ -935,6 +935,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       int64_t seek_target = (int64_t)(target_ms * (int64_t)AV_TIME_BASE / 1000);
       int stream_idx = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
 
+      // CRITICAL FIX: Convert the microsecond target into the specific stream's timebase units
+      if (stream_idx >= 0)
+      {
+        seek_target = av_rescale_q(seek_target, AV_TIME_BASE_Q, dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
+      }
+
       if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
       {
         // Flush video decoders
@@ -979,7 +985,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           avcodec_open2(aac_enc_ctx, aac_codec, NULL);
 
           // Reset audio PTS exactly to the target time
-          audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
+          // CRITICAL FIX: Set to -1 to trigger auto-sync on the very first incoming audio packet
+          audio_pts_counter = -1;
         }
 
         // CRITICAL FIX: Recreate the fMP4 Muxer Context
@@ -1052,7 +1059,16 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     }
 
     ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
-    if (ret == AVERROR_EOF || ret < 0)
+
+    // Keep the thread alive on End-Of-File
+    if (ret == AVERROR_EOF)
+    {
+      av_usleep(100000); // Sleep for 100ms and poll again
+      continue;
+    }
+
+    // Only break the loop on genuine fatal I/O errors
+    if (ret < 0)
       break;
 
     if (ret >= 0)
@@ -1108,10 +1124,19 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
             int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
             if (pkt_time_us > elapsed_us + READ_AHEAD_US)
-              av_usleep(15000); // Sleep 15 ms and re-evaluate the clock
+              // Sleep and re-evaluate the clock
+              // Reduced to 5ms sleep for high responsiveness
+              av_usleep(5000);
             else
               break; // Clock has caught up – proceed with remuxing
           }
+        }
+
+        // CRITICAL: Immediately re-check if we broke because of a seek request
+        if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+        {
+          av_packet_unref(pkt);
+          continue; // Jump back to the top of the while(true) loop to execute the seek
         }
 
         // Only write if the throttle was not interrupted by a control signal.
@@ -1136,13 +1161,13 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         // Full H.264 re-encode path (with real-time pacing)
         if (avcodec_send_packet(dec_ctx->video_dec_ctx, pkt) >= 0)
         {
+          // CRITICAL FIX: Track the seek interrupt for the outer loop
+          int seek_interrupted = 0;
+
           while (avcodec_receive_frame(dec_ctx->video_dec_ctx, frame) >= 0)
           {
             // Convert PTS from the input stream time_base -> encoder time_base
             AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-            enc_video_frame->pts = av_rescale_q(frame->pts,
-                                                in_stream->time_base,
-                                                h264_enc_ctx->time_base);
 
             // Real-time pacing (identical logic to the passthrough path)
             double calculated_pts = frame->pts != AV_NOPTS_VALUE
@@ -1157,9 +1182,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
             if (just_seeked)
             {
-              // Force a keyframe on the first frame after a seek:
-              frame->pict_type = AV_PICTURE_TYPE_I;
-
               // First packet after a seek -> force the clock to match reality
               // so we don't sleep for minutes
               stream_start_time_us = av_gettime_relative() - pkt_time_us;
@@ -1179,20 +1201,43 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
                 int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
                 if (pkt_time_us > elapsed_us + READ_AHEAD_US)
-                  av_usleep(15000);
+                  av_usleep(5000);
                 else
                   break;
               }
             }
 
+            // CRITICAL FIX: Break the inner frame loop immediately
+            if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+            {
+              seek_interrupted = 1;
+              break;
+            }
+
             if (interrupted)
-              continue; // drop this frame, control signal will be handled on next loop
+              continue; // Skip encoding this frame if paused/stopped
 
             // Colour conversion + encode
             sws_scale(sws_ctx,
                       (const uint8_t *const *)frame->data, frame->linesize,
                       0, frame->height,
                       enc_video_frame->data, enc_video_frame->linesize);
+
+            enc_video_frame->pts = av_rescale_q(frame->pts,
+                                                in_stream->time_base,
+                                                h264_enc_ctx->time_base);
+
+            // CRITICAL FIX: Force IDR Keyframe on the encoder input frame using modern FFmpeg flags
+            if (frame->pict_type == AV_PICTURE_TYPE_I)
+            {
+              enc_video_frame->pict_type = AV_PICTURE_TYPE_I;
+              enc_video_frame->flags |= AV_FRAME_FLAG_KEY;
+            }
+            else
+            {
+              enc_video_frame->pict_type = AV_PICTURE_TYPE_NONE;
+              enc_video_frame->flags &= ~AV_FRAME_FLAG_KEY;
+            }
 
             if (avcodec_send_frame(h264_enc_ctx, enc_video_frame) >= 0)
             {
@@ -1203,17 +1248,23 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      out_fmt_ctx->streams[out_video_idx]->time_base);
                 enc_video_pkt->stream_index = out_video_idx;
 
-                printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
-                       (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
-                       (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
-                       enc_video_pkt ? enc_video_pkt->size : pkt->size);
+                printf("[C-MUX] Writing VIDEO packet pts=%lld  size=%d\n",
+                       (long long)enc_video_pkt->pts, enc_video_pkt->size);
                 fflush(stdout);
+
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
 
                 av_packet_unref(enc_video_pkt);
               }
             }
+          }
+
+          // CRITICAL FIX: Top-level packet cleanup on seek interrupt (targets the main loop)
+          if (seek_interrupted)
+          {
+            av_packet_unref(pkt);
+            continue;
           }
         }
       }
@@ -1222,6 +1273,16 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     // AUDIO PATH
     else if (pkt->stream_index == dec_ctx->audio_stream_idx && aac_enc_ctx && fifo)
     {
+      // CRITICAL FIX: Perfect A/V Sync Check
+      // If the counter is -1 (startup or post-seek), align the AAC encoder's base timeline
+      // strictly to the exact PTS of the demuxed audio packet.
+      if (audio_pts_counter == -1 && pkt->pts != AV_NOPTS_VALUE)
+      {
+        AVStream *in_audio_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
+        double pkt_pts_sec = pkt->pts * av_q2d(in_audio_stream->time_base);
+        audio_pts_counter = (int64_t)(pkt_pts_sec * 48000.0);
+      }
+
       if (avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt) >= 0)
       {
         while (avcodec_receive_frame(dec_ctx->audio_dec_ctx, frame) >= 0)
