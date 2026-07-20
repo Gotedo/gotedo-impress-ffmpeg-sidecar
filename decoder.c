@@ -915,34 +915,45 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
       {
-        // Flush decoders
+        // Flush video decoders/encoders
         if (dec_ctx->video_dec_ctx)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
-        if (dec_ctx->audio_dec_ctx)
-          avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
-
         // H.264 encoder can be flushed
         if (h264_enc_ctx)
-          avcodec_flush_buffers(h264_enc_ctx);
-
-        if (aac_enc_ctx)
         {
-          // Not supported
-          // avcodec_flush_buffers(aac_enc_ctx);
-
-          // Reset audio PTS to match the target time
-          audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
+          avcodec_flush_buffers(h264_enc_ctx);
+          // Force the next video frame to be a keyframe
+          h264_enc_ctx->frame_num = 0; // helps some encoders
         }
 
+        // Flush Audio decoders and FIFO
+        if (dec_ctx->audio_dec_ctx)
+          avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
         if (fifo)
           av_audio_fifo_reset(fifo);
 
-        // CRITICAL: Reset the entire output timeline
-        // audio_pts_counter = 0; // start audio from 0 again
+        // CRITICAL FIX: Recreate the AAC Encoder
+        // Native AAC encoder does not reset its internal PTS tracker on flush.
+        // We must destroy and recreate it to prevent "Queue input is backward in time"
+        // and fatal DTS monotonicity errors inside the newly spawned muxer.
+        if (aac_enc_ctx)
+        {
+          avcodec_free_context(&aac_enc_ctx);
 
-        // Force the next video frame to be a keyframe
-        if (h264_enc_ctx)
-          h264_enc_ctx->frame_num = 0; // helps some encoders
+          const AVCodec *aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+          aac_enc_ctx = avcodec_alloc_context3(aac_codec);
+          aac_enc_ctx->sample_rate = 48000;
+          av_channel_layout_default(&aac_enc_ctx->ch_layout, 2);
+          aac_enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+          aac_enc_ctx->bit_rate = 192000;
+          aac_enc_ctx->time_base = (AVRational){1, 48000};
+          aac_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+          avcodec_open2(aac_enc_ctx, aac_codec, NULL);
+
+          // Reset audio PTS exactly to the target time
+          audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
+        }
 
         // CRITICAL FIX: Recreate the fMP4 Muxer Context
         // This wipes the internal DTS trackers, preventing the "non monotonically increasing" crash.
@@ -992,6 +1003,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         printf("[C-SEEK] Seek to %lld ms succeeded. Resetting PTS counters.\n", (long long)target_ms);
         fflush(stdout);
       }
+
+      // Clear the lock flag so the loop proceeds
       __atomic_store_n(&dec_ctx->seek_requested, 0, __ATOMIC_RELEASE);
       continue;
     }
