@@ -5,6 +5,62 @@
 #include "_cgo_export.h"
 
 /**
+ * Allocates, configures, and opens an H.264 video encoder context (Main profile, veryfast, zerolatency).
+ *
+ * @param dec_ctx       Pointer to the active DemuxDecContext.
+ * @param out_enc_ctx   Pointer to receive the newly allocated AVCodecContext.
+ *
+ * @return 0 on success, or a negative FFmpeg error code on failure.
+ */
+static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_ctx)
+{
+  if (!dec_ctx || !dec_ctx->video_dec_ctx)
+    return AVERROR(EINVAL);
+
+  const AVCodec *h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+  if (!h264_codec)
+  {
+    return AVERROR_ENCODER_NOT_FOUND;
+  }
+
+  AVCodecContext *enc_ctx = avcodec_alloc_context3(h264_codec);
+  if (!enc_ctx)
+  {
+    return AVERROR(ENOMEM);
+  }
+
+  enc_ctx->width = dec_ctx->video_dec_ctx->width;
+  enc_ctx->height = dec_ctx->video_dec_ctx->height;
+  enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+  enc_ctx->time_base = (AVRational){1, 90000};
+  enc_ctx->framerate = av_guess_frame_rate(
+      dec_ctx->fmt_ctx,
+      dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx],
+      NULL);
+  if (enc_ctx->framerate.num == 0)
+    enc_ctx->framerate = (AVRational){25, 1};
+
+  enc_ctx->gop_size = 48;
+  enc_ctx->max_b_frames = 0; // Low latency
+  enc_ctx->bit_rate = 2500000;
+  enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
+
+  av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
+  av_opt_set(enc_ctx->priv_data, "preset", "veryfast", 0);
+  av_opt_set(enc_ctx->priv_data, "tune", "zerolatency", 0);
+
+  int ret = avcodec_open2(enc_ctx, h264_codec, NULL);
+  if (ret < 0)
+  {
+    avcodec_free_context(&enc_ctx);
+    return ret;
+  }
+
+  *out_enc_ctx = enc_ctx;
+  return 0;
+}
+
+/**
  * Initializes the audio resampler context (SwrContext).
  *
  * Media files contain various sample rates (e.g., 44.1kHz, 48kHz), formats (e.g., s16, s32, flt),
@@ -761,45 +817,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     else
     {
       // Slow path – force H.264 (Baseline/Main, low-latency, GLOBAL_HEADER)
-      const AVCodec *h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-      if (!h264_codec)
+      ret = init_h264_encoder(dec_ctx, &h264_enc_ctx);
+      if (ret < 0)
       {
         free_fmp4_muxer(out_fmt_ctx);
-        return AVERROR_ENCODER_NOT_FOUND;
-      }
-
-      h264_enc_ctx = avcodec_alloc_context3(h264_codec);
-      if (!h264_enc_ctx)
-      {
-        free_fmp4_muxer(out_fmt_ctx);
-        return AVERROR(ENOMEM);
-      }
-
-      h264_enc_ctx->width = dec_ctx->video_dec_ctx->width;
-      h264_enc_ctx->height = dec_ctx->video_dec_ctx->height;
-      h264_enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-      h264_enc_ctx->time_base = (AVRational){1, 90000};
-      h264_enc_ctx->framerate = av_guess_frame_rate(
-          dec_ctx->fmt_ctx,
-          dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx],
-          NULL);
-      if (h264_enc_ctx->framerate.num == 0)
-        h264_enc_ctx->framerate = (AVRational){25, 1};
-
-      h264_enc_ctx->gop_size = 48;
-      h264_enc_ctx->max_b_frames = 0; // better for frag_keyframe + low latency
-      h264_enc_ctx->bit_rate = 2500000;
-      h264_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-      av_opt_set(h264_enc_ctx->priv_data, "profile", "main", 0);
-      av_opt_set(h264_enc_ctx->priv_data, "preset", "veryfast", 0);
-      av_opt_set(h264_enc_ctx->priv_data, "tune", "zerolatency", 0);
-
-      if (avcodec_open2(h264_enc_ctx, h264_codec, NULL) < 0)
-      {
-        avcodec_free_context(&h264_enc_ctx);
-        free_fmp4_muxer(out_fmt_ctx);
-        return AVERROR_UNKNOWN;
+        return ret;
       }
 
       AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
@@ -915,15 +937,20 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
       {
-        // Flush video decoders/encoders
+        // Flush video decoders
         if (dec_ctx->video_dec_ctx)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
-        // H.264 encoder can be flushed
-        if (h264_enc_ctx)
+
+        // CRITICAL FIX: Recreate the H.264 Encoder
+        // Calling avcodec_flush_buffers on libx264 permanently stops its lookahead thread.
+        // We must destroy and recreate it to prevent terminal encoder failure.
+        if (need_video_reencode && h264_enc_ctx)
         {
-          avcodec_flush_buffers(h264_enc_ctx);
-          // Force the next video frame to be a keyframe
-          h264_enc_ctx->frame_num = 0; // helps some encoders
+          avcodec_free_context(&h264_enc_ctx);
+          if (init_h264_encoder(dec_ctx, &h264_enc_ctx) < 0)
+          {
+            __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+          }
         }
 
         // Flush Audio decoders and FIFO
