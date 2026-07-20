@@ -893,6 +893,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int64_t total_pause_us = 0;
   int64_t current_pause_start_us = 0;
   const int64_t READ_AHEAD_US = 10000000LL; // 10 seconds of runway
+  int just_seeked = 0;
 
   // Main streaming loop — designed to stay alive and react to control signals.
   while (true)
@@ -914,26 +915,42 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
       {
+        // Flush decoders
         if (dec_ctx->video_dec_ctx)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
         if (dec_ctx->audio_dec_ctx)
           avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
+
+        // H.264 encoder can be flushed
         if (h264_enc_ctx)
           avcodec_flush_buffers(h264_enc_ctx);
+
         if (aac_enc_ctx)
         {
-          avcodec_flush_buffers(aac_enc_ctx);
+          // Not supported
+          // avcodec_flush_buffers(aac_enc_ctx);
+
           // Reset audio PTS to match the target time
           audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
         }
         if (fifo)
           av_audio_fifo_reset(fifo);
-        audio_pts_counter = -1; // Sync reset
+
+        // CRITICAL: Reset the entire output timeline
+        audio_pts_counter = 0; // start audio from 0 again
+
+        // Force the next video frame to be a keyframe
+        if (h264_enc_ctx)
+          h264_enc_ctx->frame_num = 0; // helps some encoders
 
         // CRITICAL: Reset wall-clock baseline so the throttle aligns with the new seek position
         stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
         total_pause_us = 0;
         current_pause_start_us = 0;
+        just_seeked = 1;
+
+        printf("[C-SEEK] Seek to %lld ms succeeded. Resetting PTS counters.\n", (long long)target_ms);
+        fflush(stdout);
       }
       __atomic_store_n(&dec_ctx->seek_requested, 0, __ATOMIC_RELEASE);
       continue;
@@ -958,6 +975,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     if (ret == AVERROR_EOF || ret < 0)
       break;
 
+    if (ret >= 0)
+    {
+      printf("[C-READ] stream=%d  pts=%lld\n", pkt->stream_index, (long long)pkt->pts);
+      fflush(stdout);
+    }
+
     // VIDEO PATH
     if (pkt->stream_index == dec_ctx->video_stream_idx && out_video_idx >= 0)
     {
@@ -980,21 +1003,35 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         // the real-world clock (plus our 10-second buffer allowance).
         // Also aborts the wait immediately on any control signal.
         int interrupted = 0;
-        while (true)
-        {
-          if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
-              __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
-              __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
-          {
-            interrupted = 1;
-            break;
-          }
 
-          int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
-          if (pkt_time_us > elapsed_us + READ_AHEAD_US)
-            av_usleep(15000); // Sleep 15 ms and re-evaluate the clock
-          else
-            break; // Clock has caught up – proceed with remuxing
+        if (just_seeked)
+        {
+          // Force a keyframe on the first frame after a seek:
+          frame->pict_type = AV_PICTURE_TYPE_I;
+
+          // First packet after a seek -> force the clock to match reality
+          // so we don't sleep for minutes
+          stream_start_time_us = av_gettime_relative() - pkt_time_us;
+          just_seeked = 0;
+        }
+        else
+        {
+          while (true)
+          {
+            if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
+                __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
+                __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+            {
+              interrupted = 1;
+              break;
+            }
+
+            int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
+            if (pkt_time_us > elapsed_us + READ_AHEAD_US)
+              av_usleep(15000); // Sleep 15 ms and re-evaluate the clock
+            else
+              break; // Clock has caught up – proceed with remuxing
+          }
         }
 
         // Only write if the throttle was not interrupted by a control signal.
@@ -1005,9 +1042,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           pkt->stream_index = out_video_idx;
 
           // Catch fatal container formatting errors instead of feeding garbage to the browser
-          // printf("[DEBUG -> MUX] Write %s pkt pts=%lld\n",
-          //        (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
-          //        (long long)pkt->pts);
+          printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
+                 (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
+                 (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
+                 enc_video_pkt ? enc_video_pkt->size : pkt->size);
+          fflush(stdout);
           if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
             __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
         }
@@ -1035,21 +1074,35 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             set_session_pts(tx_ctx.go_user_token, calculated_pts);
 
             int interrupted = 0;
-            while (true)
-            {
-              if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
-                  __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
-                  __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
-              {
-                interrupted = 1;
-                break;
-              }
 
-              int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
-              if (pkt_time_us > elapsed_us + READ_AHEAD_US)
-                av_usleep(15000);
-              else
-                break;
+            if (just_seeked)
+            {
+              // Force a keyframe on the first frame after a seek:
+              frame->pict_type = AV_PICTURE_TYPE_I;
+
+              // First packet after a seek -> force the clock to match reality
+              // so we don't sleep for minutes
+              stream_start_time_us = av_gettime_relative() - pkt_time_us;
+              just_seeked = 0;
+            }
+            else
+            {
+              while (true)
+              {
+                if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
+                    __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
+                    __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+                {
+                  interrupted = 1;
+                  break;
+                }
+
+                int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
+                if (pkt_time_us > elapsed_us + READ_AHEAD_US)
+                  av_usleep(15000);
+                else
+                  break;
+              }
             }
 
             if (interrupted)
@@ -1070,6 +1123,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      out_fmt_ctx->streams[out_video_idx]->time_base);
                 enc_video_pkt->stream_index = out_video_idx;
 
+                printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
+                       (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
+                       (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
+                       enc_video_pkt ? enc_video_pkt->size : pkt->size);
+                fflush(stdout);
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
 
@@ -1097,7 +1155,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             // Without this, av_audio_fifo_write silently drops samples once the
             // fixed 8192-sample buffer fills. Dropped samples produce A/V desync
             // that surfaces as MEDIA_ERR_DECODE (Code 3) in the browser.
-            av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + out_samples);
+            int realloc_ret = av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + out_samples);
+            if (realloc_ret < 0)
+            {
+              char err_str[AV_ERROR_MAX_STRING_SIZE];
+              av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, realloc_ret);
+              av_log(NULL, AV_LOG_ERROR, "Could not reallocate audio FIFO: %s\n", err_str);
+
+              // Treat as fatal – stop the whole streaming loop cleanly
+              __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+              goto cleanup;
+            }
             av_audio_fifo_write(fifo, (void **)resample_buf, out_samples);
           }
 
@@ -1119,9 +1187,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 enc_pkt->stream_index = out_audio_idx;
 
                 // Native FFmpeg function safely interleaves the binary audio and video data
-                // printf("[DEBUG -> MUX] Write %s pkt pts=%lld\n",
-                //        (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
-                //        (long long)pkt->pts);
+                // printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
+                //        (pkt->stream_index == out_video_idx || /* re-encode case */) ? "VIDEO" : "AUDIO",
+                //        (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
+                //        enc_video_pkt ? enc_video_pkt->size : pkt->size);
+                // fflush(stdout);
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_pkt) < 0)
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
                 av_packet_unref(enc_pkt);
