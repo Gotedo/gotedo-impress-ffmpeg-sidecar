@@ -933,15 +933,55 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           // Reset audio PTS to match the target time
           audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
         }
+
         if (fifo)
           av_audio_fifo_reset(fifo);
 
         // CRITICAL: Reset the entire output timeline
-        audio_pts_counter = 0; // start audio from 0 again
+        // audio_pts_counter = 0; // start audio from 0 again
 
         // Force the next video frame to be a keyframe
         if (h264_enc_ctx)
           h264_enc_ctx->frame_num = 0; // helps some encoders
+
+        // CRITICAL FIX: Recreate the fMP4 Muxer Context
+        // This wipes the internal DTS trackers, preventing the "non monotonically increasing" crash.
+        // It outputs a fresh `moov` header to the browser, safely resetting the MSE engine timeline.
+        if (out_fmt_ctx)
+        {
+          free_fmp4_muxer(out_fmt_ctx);
+          out_fmt_ctx = NULL;
+        }
+
+        init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+
+        // Re-map the video stream into the new muxer
+        if (dec_ctx->video_stream_idx >= 0)
+        {
+          AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+          if (!need_video_reencode)
+          {
+            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar);
+          }
+          else if (h264_enc_ctx)
+          {
+            avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx);
+          }
+          out_stream->codecpar->codec_tag = 0;
+          out_video_idx = out_stream->index;
+        }
+
+        // Re-map the audio stream into the new muxer
+        if (dec_ctx->audio_stream_idx >= 0 && aac_enc_ctx)
+        {
+          AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+          avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx);
+          out_stream->codecpar->codec_tag = 0;
+          out_audio_idx = out_stream->index;
+        }
+
+        // Write the new initialization segment downstream
+        write_fmp4_header(out_fmt_ctx);
 
         // CRITICAL: Reset wall-clock baseline so the throttle aligns with the new seek position
         stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
