@@ -860,7 +860,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         out_stream->codecpar->codec_tag = 0;
 
         // FFmpeg AAC strict frame size enforcement (1024 frames)
-        fifo = av_audio_fifo_alloc(aac_enc_ctx->sample_fmt, 2, 8192);
+        fifo = av_audio_fifo_alloc(aac_enc_ctx->sample_fmt, 2, 32768);
         enc_frame = av_frame_alloc();
         enc_frame->nb_samples = aac_enc_ctx->frame_size;
         enc_frame->format = aac_enc_ctx->sample_fmt;
@@ -921,7 +921,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         if (h264_enc_ctx)
           avcodec_flush_buffers(h264_enc_ctx);
         if (aac_enc_ctx)
+        {
           avcodec_flush_buffers(aac_enc_ctx);
+          // Reset audio PTS to match the target time
+          audio_pts_counter = (target_ms * 48000LL) / 1000; // samples at 48 kHz
+        }
         if (fifo)
           av_audio_fifo_reset(fifo);
         audio_pts_counter = -1; // Sync reset
@@ -1001,6 +1005,9 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           pkt->stream_index = out_video_idx;
 
           // Catch fatal container formatting errors instead of feeding garbage to the browser
+          // printf("[DEBUG -> MUX] Write %s pkt pts=%lld\n",
+          //        (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
+          //        (long long)pkt->pts);
           if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
             __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
         }
@@ -1112,6 +1119,9 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 enc_pkt->stream_index = out_audio_idx;
 
                 // Native FFmpeg function safely interleaves the binary audio and video data
+                // printf("[DEBUG -> MUX] Write %s pkt pts=%lld\n",
+                //        (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
+                //        (long long)pkt->pts);
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_pkt) < 0)
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
                 av_packet_unref(enc_pkt);
