@@ -12,7 +12,7 @@
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/log.h> 
+#include <libavutil/log.h>
 #include <libswscale/swscale.h>
 #include <miniaudio.h>
 #include <string.h>
@@ -82,6 +82,7 @@ typedef struct DemuxDecContext
   volatile int64_t seek_target_ms; // Target time when seek_requested is set
   volatile int seek_requested;     // Set to 1 by Go to request a seek
   volatile int stop_requested;     // Clean exit signal from Go
+  volatile int eof_flushed;        // Indicates if EOF is reached and pipeline flushed; 1 = Flushed
 } DemuxDecContext;
 
 typedef struct TranscodeContext

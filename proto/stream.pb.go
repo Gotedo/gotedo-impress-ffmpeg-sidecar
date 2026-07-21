@@ -137,6 +137,7 @@ type StreamResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Fmp4Chunk     []byte                 `protobuf:"bytes,1,opt,name=fmp4_chunk,json=fmp4Chunk,proto3" json:"fmp4_chunk,omitempty"` // Raw binary fMP4 segment data
 	Pts           float64                `protobuf:"fixed64,2,opt,name=pts,proto3" json:"pts,omitempty"`                            // Current presentation timestamp of the muxed chunk in seconds
+	IsEof         bool                   `protobuf:"varint,3,opt,name=is_eof,json=isEof,proto3" json:"is_eof,omitempty"`            // Signals that all media packets have been flushed
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -183,6 +184,13 @@ func (x *StreamResponse) GetPts() float64 {
 		return x.Pts
 	}
 	return 0
+}
+
+func (x *StreamResponse) GetIsEof() bool {
+	if x != nil {
+		return x.IsEof
+	}
+	return false
 }
 
 type StreamControlRequest struct {
@@ -1161,11 +1169,12 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
-	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\"A\n" +
+	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\"X\n" +
 	"\x0eStreamResponse\x12\x1d\n" +
 	"\n" +
 	"fmp4_chunk\x18\x01 \x01(\fR\tfmp4Chunk\x12\x10\n" +
-	"\x03pts\x18\x02 \x01(\x01R\x03pts\"3\n" +
+	"\x03pts\x18\x02 \x01(\x01R\x03pts\x12\x15\n" +
+	"\x06is_eof\x18\x03 \x01(\bR\x05isEof\"3\n" +
 	"\x14StreamControlRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\"K\n" +
 	"\x15StreamControlResponse\x12\x18\n" +

@@ -773,7 +773,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   AVFrame *frame = NULL;
 
   tx_ctx.go_user_token = go_token;
-  tx_ctx.go_callback = goTestWriteCallback;
+  tx_ctx.go_callback = goStreamWriteCallback;
 
   // Initialize in-memory fMP4 muxer
   ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
@@ -916,6 +916,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int64_t current_pause_start_us = 0;
   const int64_t READ_AHEAD_US = 10000000LL; // 10 seconds of runway
   int just_seeked = 0;
+  int eof_reached = 0;      // Tracks if we hit the end of the file
+  int pipeline_flushed = 0; // Tracks if we drained the trapped encoder frames
 
   // Main streaming loop — designed to stay alive and react to control signals.
   while (true)
@@ -1033,6 +1035,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         total_pause_us = 0;
         current_pause_start_us = 0;
         just_seeked = 1;
+        eof_reached = 0;      // Reset EOF flag on seek
+        pipeline_flushed = 0; // Reset flush flag on seek
+        // Reset Go-side EOF state for new timeline
+        set_session_eof(tx_ctx.go_user_token, 0);
 
         printf("[C-SEEK] Seek to %lld ms succeeded. Resetting PTS counters.\n", (long long)target_ms);
         fflush(stdout);
@@ -1058,18 +1064,63 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       current_pause_start_us = 0;
     }
 
-    ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
-
-    // Keep the thread alive on End-Of-File
-    if (ret == AVERROR_EOF)
+    if (!eof_reached)
     {
-      av_usleep(100000); // Sleep for 100ms and poll again
-      continue;
+      ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
+      if (ret == AVERROR_EOF)
+      {
+        eof_reached = 1;
+      }
+      else if (ret < 0)
+      {
+        break; // Break only on fatal I/O crashes, not EOF
+      }
     }
 
-    // Only break the loop on genuine fatal I/O errors
-    if (ret < 0)
-      break;
+    if (eof_reached && !pipeline_flushed)
+    {
+      // Flush the H.264 Encoder to extract the final trapped video frames
+      if (need_video_reencode && h264_enc_ctx)
+      {
+        avcodec_send_frame(h264_enc_ctx, NULL); // return value intentionally ignored on flush
+        while (avcodec_receive_packet(h264_enc_ctx, enc_video_pkt) >= 0)
+        {
+          av_packet_rescale_ts(enc_video_pkt, h264_enc_ctx->time_base, out_fmt_ctx->streams[out_video_idx]->time_base);
+          enc_video_pkt->stream_index = out_video_idx;
+          av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt);
+          av_packet_unref(enc_video_pkt);
+        }
+      }
+
+      // Flush the AAC Encoder to extract the final trapped audio packets
+      if (aac_enc_ctx)
+      {
+        avcodec_send_frame(aac_enc_ctx, NULL);
+        while (avcodec_receive_packet(aac_enc_ctx, enc_pkt) >= 0)
+        {
+          av_packet_rescale_ts(enc_pkt, aac_enc_ctx->time_base, out_fmt_ctx->streams[out_audio_idx]->time_base);
+          enc_pkt->stream_index = out_audio_idx;
+          av_interleaved_write_frame(out_fmt_ctx, enc_pkt);
+          av_packet_unref(enc_pkt);
+        }
+      }
+
+      pipeline_flushed = 1;
+
+      // CRITICAL: Notify Go that all trailing packets from this point forward are EOF
+      extern void set_session_eof(uintptr_t token, int is_eof);
+      set_session_eof(tx_ctx.go_user_token, 1);
+
+      printf("[C-EOF] Pipeline flushed successfully. Final frames sent to browser. Idling for seeks.\n");
+      fflush(stdout);
+    }
+
+    // If we are at the end of the file and flushed, keep the pipeline alive for backward seeks
+    if (eof_reached && pipeline_flushed)
+    {
+      av_usleep(100000); // Sleep for 100ms
+      continue;          // Bypass the rest of the loop and wait for a control signal
+    }
 
     if (ret >= 0)
     {
@@ -1343,21 +1394,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
     }
     av_packet_unref(pkt);
-  }
-
-  // Flush H.264 encoder on EOF (only when we actually re-encoded)
-  if (need_video_reencode && h264_enc_ctx)
-  {
-    avcodec_send_frame(h264_enc_ctx, NULL); // return value intentionally ignored on flush
-    while (avcodec_receive_packet(h264_enc_ctx, enc_video_pkt) >= 0)
-    {
-      av_packet_rescale_ts(enc_video_pkt,
-                           h264_enc_ctx->time_base,
-                           out_fmt_ctx->streams[out_video_idx]->time_base);
-      enc_video_pkt->stream_index = out_video_idx;
-      av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt);
-      av_packet_unref(enc_video_pkt);
-    }
   }
 
   // Write trailer to finalize the last fMP4 fragment

@@ -38,6 +38,7 @@ type ChunkPayload struct {
 type SessionContext struct {
 	StreamChan      chan ChunkPayload
 	CurrentPTS      float64
+	IsEOF           int
 	Mu              sync.Mutex
 	playbackSession *PlaybackSession
 }
@@ -169,11 +170,11 @@ func stopPlayback(targetID string) {
 	}
 }
 
-//export goTestWriteCallback
-func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
+//export goStreamWriteCallback
+func goStreamWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goTestWriteCallback: %v", r)
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goStreamWriteCallback: %v", r)
 		}
 	}()
 
@@ -194,6 +195,25 @@ func goTestWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	// Stream the chunk alongside the current active time context
 	// Allow the channel to block the C thread to establish backpressure.
 	session.StreamChan <- ChunkPayload{Data: data, PTS: pts}
+}
+
+//export set_session_eof
+func set_session_eof(token C.uintptr_t, isEof C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered in set_session_eof: %v", r)
+		}
+	}()
+
+	handle := cgo.Handle(token)
+	session := handle.Value().(*SessionContext)
+
+	session.Mu.Lock()
+	session.IsEOF = int(isEof)
+	session.Mu.Unlock()
+
+	// Send an empty chunk to the channel to trigger response for EOF
+	session.StreamChan <- ChunkPayload{}
 }
 
 func main() {
@@ -332,6 +352,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			err := stream.Send(&proto.StreamResponse{
 				Fmp4Chunk: chunk.Data,
 				Pts:       chunk.PTS,
+				IsEof:     sessionCtx.IsEOF != 0,
 			})
 			if err != nil {
 				log.Printf("[SIDECAR ERROR] Failed to send gRPC response: %v", err)

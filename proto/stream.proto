@@ -40,6 +40,7 @@ message StreamRequest {
 message StreamResponse {
     bytes fmp4_chunk = 1; // Raw binary fMP4 segment data
     double pts = 2;        // Current presentation timestamp of the muxed chunk in seconds
+    bool is_eof = 3; // Signals that all media packets have been flushed
 }
 
 message StreamControlRequest {
