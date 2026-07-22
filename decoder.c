@@ -210,6 +210,9 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
       goto fail;
   }
 
+  // Media probe banner
+  log_input_stream_properties(ctx, input_path);
+
   return 0;
 
 fail:
@@ -301,7 +304,7 @@ static int write_to_memory_cb(void *opaque, const uint8_t *buf, int buf_size)
 int init_fmp4_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_ctx)
 {
   int ret;
-  size_t avio_buf_size = 4096;
+  size_t avio_buf_size = 65536;
   uint8_t *avio_buf = NULL;
   AVIOContext *avio_ctx = NULL;
 
@@ -362,7 +365,8 @@ int write_fmp4_header(AVFormatContext *out_fmt_ctx)
   int ret;
   AVDictionary *opts = NULL;
 
-  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset", 0);
+  // Ensure FFmpeg fMP4 muxer explicitly handles negative CTS offsets
+  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset+negative_cts_offsets", 0);
   if (ret < 0)
   {
     return ret;
@@ -437,6 +441,70 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
 
   ma_context_uninit(&context);
   return count;
+}
+
+/**
+ * Logs comprehensive metadata for all streams in the input media file.
+ */
+void log_input_stream_properties(DemuxDecContext *ctx, const char *file_path)
+{
+  if (!ctx || !ctx->fmt_ctx)
+    return;
+
+  LOG_INFO("C-PROBE", "================ MEDIA PROPERTIES ================");
+  LOG_INFO("C-PROBE", "File: %s", file_path ? file_path : "Unknown");
+  LOG_INFO("C-PROBE", "Format: %s (%s)",
+           ctx->fmt_ctx->iformat ? ctx->fmt_ctx->iformat->name : "Unknown",
+           ctx->fmt_ctx->iformat ? ctx->fmt_ctx->iformat->long_name : "Unknown");
+
+  if (ctx->fmt_ctx->duration != AV_NOPTS_VALUE)
+  {
+    LOG_INFO("C-PROBE", "Duration: %.2f seconds", (double)ctx->fmt_ctx->duration / AV_TIME_BASE);
+  }
+
+  for (unsigned int i = 0; i < ctx->fmt_ctx->nb_streams; i++)
+  {
+    AVStream *st = ctx->fmt_ctx->streams[i];
+    AVCodecParameters *par = st->codecpar;
+
+    if (par->codec_type == AVMEDIA_TYPE_VIDEO)
+    {
+      const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+      const char *profile_str = avcodec_profile_name(par->codec_id, par->profile);
+      const char *pix_fmt_str = av_get_pix_fmt_name(par->format);
+      AVRational fps = av_guess_frame_rate(ctx->fmt_ctx, st, NULL);
+
+      LOG_INFO("C-PROBE", "--- Video Stream [Index %d] ---", i);
+      LOG_INFO("C-PROBE", "  Codec: %s (%s)",
+               codec ? codec->name : "Unknown",
+               codec ? codec->long_name : "Unknown");
+      LOG_INFO("C-PROBE", "  Resolution: %dx%d", par->width, par->height);
+      LOG_INFO("C-PROBE", "  Profile: %s (Value: %d)", profile_str ? profile_str : "Unknown/Baseline", par->profile);
+      LOG_INFO("C-PROBE", "  Level: %d (%.1f)", par->level, (double)par->level / 10.0);
+      LOG_INFO("C-PROBE", "  Pixel Format: %s", pix_fmt_str ? pix_fmt_str : "Unknown");
+      LOG_INFO("C-PROBE", "  Framerate: %.2f fps", fps.den > 0 ? av_q2d(fps) : 0.0);
+      LOG_INFO("C-PROBE", "  Timebase: %d/%d", st->time_base.num, st->time_base.den);
+      LOG_INFO("C-PROBE", "  Bitrate: %lld kbps", (long long)(par->bit_rate / 1000));
+    }
+    else if (par->codec_type == AVMEDIA_TYPE_AUDIO)
+    {
+      const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+      const char *profile_str = avcodec_profile_name(par->codec_id, par->profile);
+      char layout_buf[64] = {0};
+      av_channel_layout_describe(&par->ch_layout, layout_buf, sizeof(layout_buf));
+
+      LOG_INFO("C-PROBE", "--- Audio Stream [Index %d] ---", i);
+      LOG_INFO("C-PROBE", "  Codec: %s (%s)",
+               codec ? codec->name : "Unknown",
+               codec ? codec->long_name : "Unknown");
+      LOG_INFO("C-PROBE", "  Profile: %s (Value: %d)", profile_str ? profile_str : "Unknown", par->profile);
+      LOG_INFO("C-PROBE", "  Sample Rate: %d Hz", par->sample_rate);
+      LOG_INFO("C-PROBE", "  Channels: %d (%s)", par->ch_layout.nb_channels, layout_buf);
+      LOG_INFO("C-PROBE", "  Format: %s", av_get_sample_fmt_name(par->format));
+      LOG_INFO("C-PROBE", "  Timebase: %d/%d", st->time_base.num, st->time_base.den);
+    }
+  }
+  LOG_INFO("C-PROBE", "==================================================");
 }
 
 int probe_media_properties(const char *file_path, CMediaProperties *props)
@@ -1021,6 +1089,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int just_seeked = 0;
   int eof_reached = 0;      // Tracks if we hit the end of the file
   int pipeline_flushed = 0; // Tracks if we drained the trapped encoder frames
+  int trailer_written = 0;  // Track if the last fMP4 fragment has been flushed
 
   LOG_INFO("C-MUX", "Entering main streaming pipeline loop");
 
@@ -1125,6 +1194,9 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         {
           LOG_ERROR("C-SEEK", "Failed to re-initialize fMP4 muxer after seek");
         }
+
+        // Reset the trailer flag for the new timeline
+        trailer_written = 0;
 
         // Re-map the video stream into the new muxer
         if (dec_ctx->video_stream_idx >= 0 && out_fmt_ctx)
@@ -1262,6 +1334,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
 
       pipeline_flushed = 1;
+
+      // Force the muxer to flush the final trapped frames
+      if (out_fmt_ctx && !trailer_written)
+      {
+        int trail_ret = av_write_trailer(out_fmt_ctx);
+        if (trail_ret < 0)
+        {
+          LOG_FFMPEG_ERR("C-MUX", "Failed to write fMP4 trailer at EOF", trail_ret);
+        }
+        trailer_written = 1;
+      }
 
       // CRITICAL: Notify Go that all trailing packets from this point forward are EOF
       extern void set_session_eof(uintptr_t token, int is_eof);
@@ -1568,7 +1651,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   }
 
   // Write trailer to finalize the last fMP4 fragment
-  if (out_fmt_ctx)
+  if (out_fmt_ctx && !trailer_written)
   {
     int trail_ret = av_write_trailer(out_fmt_ctx);
     if (trail_ret < 0)

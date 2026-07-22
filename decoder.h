@@ -250,4 +250,7 @@ void set_dec_ctx_paused(DemuxDecContext *ctx, int paused);
 void request_seek_on_dec_ctx(DemuxDecContext *ctx, int64_t seek_ms);
 void request_stop_on_dec_ctx(DemuxDecContext *ctx);
 
+// Media probe banner
+void log_input_stream_properties(DemuxDecContext *ctx, const char *file_path);
+
 #endif // DECODER_H
