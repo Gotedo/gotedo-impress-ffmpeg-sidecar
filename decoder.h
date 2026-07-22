@@ -19,6 +19,50 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+// LOGGING SYSTEM
+// Driven by compile-time tags. In Go/CGO, pass -DPRODUCTION
+// via CGO_CFLAGS to disable development logs.
+#ifndef PRODUCTION
+#define LOG_DEBUG(prefix, fmt, ...)                         \
+  do                                                        \
+  {                                                         \
+    printf("[%s] DEBUG: " fmt "\n", prefix, ##__VA_ARGS__); \
+    fflush(stdout);                                         \
+  } while (0)
+#else
+#define LOG_DEBUG(prefix, fmt, ...) /* Ignored in production */
+#endif
+
+#define LOG_INFO(prefix, fmt, ...)                         \
+  do                                                       \
+  {                                                        \
+    printf("[%s] INFO: " fmt "\n", prefix, ##__VA_ARGS__); \
+    fflush(stdout);                                        \
+  } while (0)
+
+#define LOG_WARN(prefix, fmt, ...)                         \
+  do                                                       \
+  {                                                        \
+    printf("[%s] WARN: " fmt "\n", prefix, ##__VA_ARGS__); \
+    fflush(stdout);                                        \
+  } while (0)
+
+#define LOG_ERROR(prefix, fmt, ...)                                  \
+  do                                                                 \
+  {                                                                  \
+    fprintf(stderr, "[%s] ERROR: " fmt "\n", prefix, ##__VA_ARGS__); \
+    fflush(stderr);                                                  \
+  } while (0)
+
+// Helper to format FFmpeg errors for logging
+#define LOG_FFMPEG_ERR(prefix, msg, err_code)                          \
+  do                                                                   \
+  {                                                                    \
+    char err_buf[AV_ERROR_MAX_STRING_SIZE] = {0};                      \
+    av_make_error_string(err_buf, AV_ERROR_MAX_STRING_SIZE, err_code); \
+    LOG_ERROR(prefix, "%s: %s (code: %d)", msg, err_buf, err_code);    \
+  } while (0)
+
 // Evaluates complex macros inside C space and assigns them to tokens CGO can read
 enum
 {

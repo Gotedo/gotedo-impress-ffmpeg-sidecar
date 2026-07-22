@@ -772,18 +772,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   AVPacket *pkt = NULL;
   AVFrame *frame = NULL;
 
-  tx_ctx.go_user_token = go_token;
-  tx_ctx.go_callback = goStreamWriteCallback;
-
-  // Initialize in-memory fMP4 muxer
-  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
-  if (ret < 0)
-    return ret;
-
-  // 1. Mux Video Stream
-  //    - Passthrough when the source is already H.264 (zero CPU / zero quality loss)
-  //    - Otherwise force a highly compatible H.264 re-encode so every file plays in
-  //      Chrome / Edge / Safari MSE.
+  // Hoist all structural variables to the top to ensure safe goto cleanup
   int out_video_idx = -1;
   bool need_video_reencode = false;
   AVCodecContext *h264_enc_ctx = NULL;
@@ -791,6 +780,29 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   AVFrame *enc_video_frame = NULL;
   AVPacket *enc_video_pkt = NULL;
 
+  int out_audio_idx = -1;
+  AVCodecContext *aac_enc_ctx = NULL;
+  AVAudioFifo *fifo = NULL;
+  AVFrame *enc_frame = NULL;
+  AVPacket *enc_pkt = NULL;
+  uint8_t *resample_buf[2] = {NULL, NULL};
+  int64_t audio_pts_counter = -1; // Allows clean reset after seek
+
+  tx_ctx.go_user_token = go_token;
+  tx_ctx.go_callback = goStreamWriteCallback;
+
+  // Initialize in-memory fMP4 muxer
+  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+  if (ret < 0)
+  {
+    LOG_FFMPEG_ERR("C-MUX", "Failed to initialize fMP4 muxer", ret);
+    return ret;
+  }
+
+  // 1. Mux Video Stream
+  //    - Passthrough when the source is already H.264 (zero CPU / zero quality loss)
+  //    - Otherwise force a highly compatible H.264 re-encode so every file plays in
+  //      Chrome / Edge / Safari MSE.
   if (dec_ctx->video_stream_idx >= 0 && dec_ctx->video_dec_ctx)
   {
     need_video_reencode = (dec_ctx->video_dec_ctx->codec_id != AV_CODEC_ID_H264);
@@ -802,12 +814,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
       if (!out_stream)
       {
+        LOG_ERROR("C-MUX", "Failed to allocate new video stream for passthrough");
         free_fmp4_muxer(out_fmt_ctx);
         return AVERROR(ENOMEM);
       }
       ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
       if (ret < 0)
       {
+        LOG_FFMPEG_ERR("C-MUX", "Failed to copy video parameters", ret);
         free_fmp4_muxer(out_fmt_ctx);
         return ret;
       }
@@ -820,6 +834,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       ret = init_h264_encoder(dec_ctx, &h264_enc_ctx);
       if (ret < 0)
       {
+        LOG_FFMPEG_ERR("C-MUX", "Failed to initialize H.264 encoder", ret);
         free_fmp4_muxer(out_fmt_ctx);
         return ret;
       }
@@ -827,11 +842,19 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
       if (!out_stream)
       {
+        LOG_ERROR("C-MUX", "Failed to allocate new video stream for encoding");
         avcodec_free_context(&h264_enc_ctx);
         free_fmp4_muxer(out_fmt_ctx);
         return AVERROR(ENOMEM);
       }
-      avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx);
+      ret = avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx);
+      if (ret < 0)
+      {
+        LOG_FFMPEG_ERR("C-MUX", "Failed to copy H.264 parameters to stream", ret);
+        avcodec_free_context(&h264_enc_ctx);
+        free_fmp4_muxer(out_fmt_ctx);
+        return ret;
+      }
       out_stream->codecpar->codec_tag = 0;
       out_video_idx = out_stream->index;
 
@@ -842,31 +865,54 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           h264_enc_ctx->width, h264_enc_ctx->height, AV_PIX_FMT_YUV420P,
           SWS_BILINEAR, NULL, NULL, NULL);
 
+      if (!sws_ctx)
+      {
+        LOG_ERROR("C-MUX", "Failed to allocate sws_ctx for color conversion");
+        ret = AVERROR(ENOMEM);
+        goto cleanup;
+      }
+
       enc_video_frame = av_frame_alloc();
+      if (!enc_video_frame)
+      {
+        LOG_ERROR("C-MUX", "Failed to allocate enc_video_frame");
+        ret = AVERROR(ENOMEM);
+        goto cleanup;
+      }
       enc_video_frame->format = AV_PIX_FMT_YUV420P;
       enc_video_frame->width = h264_enc_ctx->width;
       enc_video_frame->height = h264_enc_ctx->height;
-      av_frame_get_buffer(enc_video_frame, 32);
+
+      ret = av_frame_get_buffer(enc_video_frame, 32);
+      if (ret < 0)
+      {
+        LOG_FFMPEG_ERR("C-MUX", "Failed to allocate buffer for enc_video_frame", ret);
+        goto cleanup;
+      }
 
       enc_video_pkt = av_packet_alloc();
+      if (!enc_video_pkt)
+      {
+        LOG_ERROR("C-MUX", "Failed to allocate enc_video_pkt");
+        ret = AVERROR(ENOMEM);
+        goto cleanup;
+      }
     }
   }
 
   // 2. Setup AAC Audio Transcoder & Mux Stream
-  int out_audio_idx = -1;
-  AVCodecContext *aac_enc_ctx = NULL;
-  AVAudioFifo *fifo = NULL;
-  AVFrame *enc_frame = NULL;
-  AVPacket *enc_pkt = NULL;
-  uint8_t *resample_buf[2] = {NULL, NULL};
-  int64_t audio_pts_counter = -1; // Allows clean reset after seek
-
   if (dec_ctx->audio_stream_idx >= 0)
   {
     const AVCodec *aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (aac_codec)
     {
       aac_enc_ctx = avcodec_alloc_context3(aac_codec);
+      if (!aac_enc_ctx)
+      {
+        LOG_ERROR("C-MUX", "Failed to allocate AAC encoding context");
+        ret = AVERROR(ENOMEM);
+        goto cleanup;
+      }
       aac_enc_ctx->sample_rate = 48000;
       av_channel_layout_default(&aac_enc_ctx->ch_layout, 2);
       aac_enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
@@ -874,36 +920,93 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       aac_enc_ctx->time_base = (AVRational){1, 48000};   // Required for smooth MSE sync
       aac_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Essential for MSE AAC extradata
 
-      if (avcodec_open2(aac_enc_ctx, aac_codec, NULL) >= 0)
+      ret = avcodec_open2(aac_enc_ctx, aac_codec, NULL);
+      if (ret >= 0)
       {
         AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+        if (!out_stream)
+        {
+          LOG_ERROR("C-MUX", "Failed to allocate new audio stream");
+          ret = AVERROR(ENOMEM);
+          goto cleanup;
+        }
         out_audio_idx = out_stream->index;
-        avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx);
+
+        ret = avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx);
+        if (ret < 0)
+        {
+          LOG_FFMPEG_ERR("C-MUX", "Failed to copy AAC parameters to stream", ret);
+          goto cleanup;
+        }
         out_stream->codecpar->codec_tag = 0;
 
         // FFmpeg AAC strict frame size enforcement (1024 frames)
         fifo = av_audio_fifo_alloc(aac_enc_ctx->sample_fmt, 2, 32768);
+        if (!fifo)
+        {
+          LOG_ERROR("C-MUX", "Failed to allocate audio FIFO");
+          ret = AVERROR(ENOMEM);
+          goto cleanup;
+        }
+
         enc_frame = av_frame_alloc();
+        if (!enc_frame)
+        {
+          LOG_ERROR("C-MUX", "Failed to allocate AAC encoder frame");
+          ret = AVERROR(ENOMEM);
+          goto cleanup;
+        }
         enc_frame->nb_samples = aac_enc_ctx->frame_size;
         enc_frame->format = aac_enc_ctx->sample_fmt;
         av_channel_layout_copy(&enc_frame->ch_layout, &aac_enc_ctx->ch_layout);
-        av_frame_get_buffer(enc_frame, 0);
+
+        ret = av_frame_get_buffer(enc_frame, 0);
+        if (ret < 0)
+        {
+          LOG_FFMPEG_ERR("C-MUX", "Failed to allocate buffer for AAC frame", ret);
+          goto cleanup;
+        }
+
         enc_pkt = av_packet_alloc();
+        if (!enc_pkt)
+        {
+          LOG_ERROR("C-MUX", "Failed to allocate AAC encoder packet");
+          ret = AVERROR(ENOMEM);
+          goto cleanup;
+        }
 
         // Static buffer for intermediate SWR conversions (up to 8192 samples per read)
-        av_samples_alloc(resample_buf, NULL, 2, 8192, AV_SAMPLE_FMT_FLTP, 0);
+        ret = av_samples_alloc(resample_buf, NULL, 2, 8192, AV_SAMPLE_FMT_FLTP, 0);
+        if (ret < 0)
+        {
+          LOG_FFMPEG_ERR("C-MUX", "Failed to allocate audio resample buffer", ret);
+          goto cleanup;
+        }
       }
+      else
+      {
+        LOG_FFMPEG_ERR("C-MUX", "Failed to open AAC encoder", ret);
+        goto cleanup;
+      }
+    }
+    else
+    {
+      LOG_ERROR("C-MUX", "AAC encoder not found in FFmpeg build");
     }
   }
 
   ret = write_fmp4_header(out_fmt_ctx);
   if (ret < 0)
+  {
+    LOG_FFMPEG_ERR("C-MUX", "Failed to write initial fMP4 header", ret);
     goto cleanup; // Ensures any audio resources allocated above are freed
+  }
 
   pkt = av_packet_alloc();
   frame = av_frame_alloc();
   if (!pkt || !frame)
   {
+    LOG_ERROR("C-MUX", "Failed to allocate main loop packet/frame");
     ret = AVERROR(ENOMEM);
     goto cleanup;
   }
@@ -919,6 +1022,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int eof_reached = 0;      // Tracks if we hit the end of the file
   int pipeline_flushed = 0; // Tracks if we drained the trapped encoder frames
 
+  LOG_INFO("C-MUX", "Entering main streaming pipeline loop");
+
   // Main streaming loop — designed to stay alive and react to control signals.
   while (true)
   {
@@ -926,7 +1031,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     // Atomic loads for thread-safety. The Go control thread (ControlStream)
     // can set these flags at any time without locking the entire pipeline.
     if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE))
+    {
+      LOG_DEBUG("C-MUX", "Stop requested from Go routine. Exiting pipeline.");
       break;
+    }
 
     if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
     {
@@ -943,8 +1051,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         seek_target = av_rescale_q(seek_target, AV_TIME_BASE_Q, dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
       }
 
-      if (av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD) >= 0)
+      int seek_ret = av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD);
+      if (seek_ret >= 0)
       {
+        LOG_INFO("C-SEEK", "Executing backward seek to ms: %lld", (long long)target_ms);
+
         // Flush video decoders
         if (dec_ctx->video_dec_ctx)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
@@ -957,6 +1068,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           avcodec_free_context(&h264_enc_ctx);
           if (init_h264_encoder(dec_ctx, &h264_enc_ctx) < 0)
           {
+            LOG_ERROR("C-SEEK", "Failed to recreate H.264 encoder after seek");
             __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
           }
         }
@@ -976,15 +1088,24 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           avcodec_free_context(&aac_enc_ctx);
 
           const AVCodec *aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-          aac_enc_ctx = avcodec_alloc_context3(aac_codec);
-          aac_enc_ctx->sample_rate = 48000;
-          av_channel_layout_default(&aac_enc_ctx->ch_layout, 2);
-          aac_enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-          aac_enc_ctx->bit_rate = 192000;
-          aac_enc_ctx->time_base = (AVRational){1, 48000};
-          aac_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+          if (aac_codec)
+          {
+            aac_enc_ctx = avcodec_alloc_context3(aac_codec);
+            if (aac_enc_ctx)
+            {
+              aac_enc_ctx->sample_rate = 48000;
+              av_channel_layout_default(&aac_enc_ctx->ch_layout, 2);
+              aac_enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+              aac_enc_ctx->bit_rate = 192000;
+              aac_enc_ctx->time_base = (AVRational){1, 48000};
+              aac_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-          avcodec_open2(aac_enc_ctx, aac_codec, NULL);
+              if (avcodec_open2(aac_enc_ctx, aac_codec, NULL) < 0)
+              {
+                LOG_ERROR("C-SEEK", "Failed to reopen AAC encoder after seek");
+              }
+            }
+          }
 
           // Reset audio PTS exactly to the target time
           // CRITICAL FIX: Set to -1 to trigger auto-sync on the very first incoming audio packet
@@ -1000,35 +1121,59 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           out_fmt_ctx = NULL;
         }
 
-        init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+        if (init_fmp4_muxer(&out_fmt_ctx, &tx_ctx) < 0)
+        {
+          LOG_ERROR("C-SEEK", "Failed to re-initialize fMP4 muxer after seek");
+        }
 
         // Re-map the video stream into the new muxer
-        if (dec_ctx->video_stream_idx >= 0)
+        if (dec_ctx->video_stream_idx >= 0 && out_fmt_ctx)
         {
           AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
-          if (!need_video_reencode)
+          if (out_stream)
           {
-            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar);
+            if (!need_video_reencode)
+            {
+              if (avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar) < 0)
+              {
+                LOG_ERROR("C-SEEK", "Failed to map video parameters to new muxer");
+              }
+            }
+            else if (h264_enc_ctx)
+            {
+              if (avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx) < 0)
+              {
+                LOG_ERROR("C-SEEK", "Failed to map H.264 parameters to new muxer");
+              }
+            }
+            out_stream->codecpar->codec_tag = 0;
+            out_video_idx = out_stream->index;
           }
-          else if (h264_enc_ctx)
-          {
-            avcodec_parameters_from_context(out_stream->codecpar, h264_enc_ctx);
-          }
-          out_stream->codecpar->codec_tag = 0;
-          out_video_idx = out_stream->index;
         }
 
         // Re-map the audio stream into the new muxer
-        if (dec_ctx->audio_stream_idx >= 0 && aac_enc_ctx)
+        if (dec_ctx->audio_stream_idx >= 0 && aac_enc_ctx && out_fmt_ctx)
         {
           AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
-          avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx);
-          out_stream->codecpar->codec_tag = 0;
-          out_audio_idx = out_stream->index;
+          if (out_stream)
+          {
+            if (avcodec_parameters_from_context(out_stream->codecpar, aac_enc_ctx) < 0)
+            {
+              LOG_ERROR("C-SEEK", "Failed to map AAC parameters to new muxer");
+            }
+            out_stream->codecpar->codec_tag = 0;
+            out_audio_idx = out_stream->index;
+          }
         }
 
         // Write the new initialization segment downstream
-        write_fmp4_header(out_fmt_ctx);
+        if (out_fmt_ctx)
+        {
+          if (write_fmp4_header(out_fmt_ctx) < 0)
+          {
+            LOG_ERROR("C-SEEK", "Failed to write fMP4 header after seek");
+          }
+        }
 
         // CRITICAL: Reset wall-clock baseline so the throttle aligns with the new seek position
         stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
@@ -1040,8 +1185,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         // Reset Go-side EOF state for new timeline
         set_session_eof(tx_ctx.go_user_token, 0);
 
-        printf("[C-SEEK] Seek to %lld ms succeeded. Resetting PTS counters.\n", (long long)target_ms);
-        fflush(stdout);
+        LOG_INFO("C-SEEK", "Seek to %lld ms succeeded. Resetting PTS counters.", (long long)target_ms);
+      }
+      else
+      {
+        LOG_FFMPEG_ERR("C-SEEK", "AVSeek execution failed", seek_ret);
       }
 
       // Clear the lock flag so the loop proceeds
@@ -1069,10 +1217,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
       if (ret == AVERROR_EOF)
       {
+        LOG_INFO("C-READ", "EOF reached. Preparing to flush trapped frames.");
         eof_reached = 1;
       }
       else if (ret < 0)
       {
+        LOG_FFMPEG_ERR("C-READ", "Fatal frame read error", ret);
         break; // Break only on fatal I/O crashes, not EOF
       }
     }
@@ -1087,7 +1237,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         {
           av_packet_rescale_ts(enc_video_pkt, h264_enc_ctx->time_base, out_fmt_ctx->streams[out_video_idx]->time_base);
           enc_video_pkt->stream_index = out_video_idx;
-          av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt);
+          if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
+          {
+            LOG_WARN("C-MUX", "Failed to write flushed video packet");
+          }
           av_packet_unref(enc_video_pkt);
         }
       }
@@ -1095,12 +1248,15 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       // Flush the AAC Encoder to extract the final trapped audio packets
       if (aac_enc_ctx)
       {
-        avcodec_send_frame(aac_enc_ctx, NULL);
+        avcodec_send_frame(aac_enc_ctx, NULL); // Intentional ignore on flush
         while (avcodec_receive_packet(aac_enc_ctx, enc_pkt) >= 0)
         {
           av_packet_rescale_ts(enc_pkt, aac_enc_ctx->time_base, out_fmt_ctx->streams[out_audio_idx]->time_base);
           enc_pkt->stream_index = out_audio_idx;
-          av_interleaved_write_frame(out_fmt_ctx, enc_pkt);
+          if (av_interleaved_write_frame(out_fmt_ctx, enc_pkt) < 0)
+          {
+            LOG_WARN("C-MUX", "Failed to write flushed audio packet");
+          }
           av_packet_unref(enc_pkt);
         }
       }
@@ -1111,8 +1267,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       extern void set_session_eof(uintptr_t token, int is_eof);
       set_session_eof(tx_ctx.go_user_token, 1);
 
-      printf("[C-EOF] Pipeline flushed successfully. Final frames sent to browser. Idling for seeks.\n");
-      fflush(stdout);
+      LOG_INFO("C-EOF", "Pipeline flushed successfully. Final frames sent to browser. Idling for seeks.");
     }
 
     // If we are at the end of the file and flushed, keep the pipeline alive for backward seeks
@@ -1124,8 +1279,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
     if (ret >= 0)
     {
-      printf("[C-READ] stream=%d  pts=%lld\n", pkt->stream_index, (long long)pkt->pts);
-      fflush(stdout);
+      LOG_DEBUG("C-READ", "stream=%d pts=%lld", pkt->stream_index, (long long)pkt->pts);
     }
 
     // VIDEO PATH
@@ -1198,13 +1352,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           pkt->stream_index = out_video_idx;
 
           // Catch fatal container formatting errors instead of feeding garbage to the browser
-          printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
-                 (pkt->stream_index == out_video_idx) ? "VIDEO" : "AUDIO",
-                 (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
-                 enc_video_pkt ? enc_video_pkt->size : pkt->size);
-          fflush(stdout);
+          LOG_DEBUG("C-MUX", "Writing VIDEO packet pts=%lld size=%d",
+                    (long long)pkt->pts, pkt->size);
+
           if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
+          {
+            LOG_ERROR("C-MUX", "Failed to write interleaved video packet (passthrough). Halting.");
             __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+          }
         }
       }
       else
@@ -1269,10 +1424,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
               continue; // Skip encoding this frame if paused/stopped
 
             // Colour conversion + encode
-            sws_scale(sws_ctx,
-                      (const uint8_t *const *)frame->data, frame->linesize,
-                      0, frame->height,
-                      enc_video_frame->data, enc_video_frame->linesize);
+            int scale_ret = sws_scale(sws_ctx,
+                                      (const uint8_t *const *)frame->data, frame->linesize,
+                                      0, frame->height,
+                                      enc_video_frame->data, enc_video_frame->linesize);
+            if (scale_ret < 0)
+            {
+              LOG_WARN("C-MUX", "Hardware scaling failed for current video frame");
+            }
 
             enc_video_frame->pts = av_rescale_q(frame->pts,
                                                 in_stream->time_base,
@@ -1299,12 +1458,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      out_fmt_ctx->streams[out_video_idx]->time_base);
                 enc_video_pkt->stream_index = out_video_idx;
 
-                printf("[C-MUX] Writing VIDEO packet pts=%lld  size=%d\n",
-                       (long long)enc_video_pkt->pts, enc_video_pkt->size);
-                fflush(stdout);
+                LOG_DEBUG("C-MUX", "Writing VIDEO packet pts=%lld size=%d",
+                          (long long)enc_video_pkt->pts, enc_video_pkt->size);
 
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
+                {
+                  LOG_ERROR("C-MUX", "Failed to write interleaved encoded video packet. Halting.");
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+                }
 
                 av_packet_unref(enc_video_pkt);
               }
@@ -1350,21 +1511,31 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             int realloc_ret = av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + out_samples);
             if (realloc_ret < 0)
             {
-              char err_str[AV_ERROR_MAX_STRING_SIZE];
-              av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, realloc_ret);
-              av_log(NULL, AV_LOG_ERROR, "Could not reallocate audio FIFO: %s\n", err_str);
-
+              LOG_FFMPEG_ERR("C-MUX", "Could not reallocate audio FIFO", realloc_ret);
               // Treat as fatal – stop the whole streaming loop cleanly
               __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
               goto cleanup;
             }
-            av_audio_fifo_write(fifo, (void **)resample_buf, out_samples);
+
+            int write_ret = av_audio_fifo_write(fifo, (void **)resample_buf, out_samples);
+            if (write_ret < 0)
+            {
+              LOG_FFMPEG_ERR("C-MUX", "Failed to write into audio FIFO", write_ret);
+              __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+              goto cleanup;
+            }
           }
 
           // Consume from FIFO to feed AAC Encoder (needs exactly frame_size per packet)
           while (av_audio_fifo_size(fifo) >= aac_enc_ctx->frame_size)
           {
-            av_audio_fifo_read(fifo, (void **)enc_frame->data, aac_enc_ctx->frame_size);
+            int read_ret = av_audio_fifo_read(fifo, (void **)enc_frame->data, aac_enc_ctx->frame_size);
+            if (read_ret < 0)
+            {
+              LOG_FFMPEG_ERR("C-MUX", "Failed to read from audio FIFO", read_ret);
+              break; // Exit FIFO processing loop for this frame cycle
+            }
+
             if (audio_pts_counter == -1)
               audio_pts_counter = 0;
             enc_frame->pts = audio_pts_counter;
@@ -1378,14 +1549,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      out_fmt_ctx->streams[out_audio_idx]->time_base);
                 enc_pkt->stream_index = out_audio_idx;
 
-                // Native FFmpeg function safely interleaves the binary audio and video data
-                // printf("[C-MUX] Writing %s packet pts=%lld  size=%d\n",
-                //        (pkt->stream_index == out_video_idx || /* re-encode case */) ? "VIDEO" : "AUDIO",
-                //        (long long)(enc_video_pkt ? enc_video_pkt->pts : pkt->pts),
-                //        enc_video_pkt ? enc_video_pkt->size : pkt->size);
-                // fflush(stdout);
+                LOG_DEBUG("C-MUX", "Writing AUDIO packet pts=%lld size=%d",
+                          (long long)enc_pkt->pts, enc_pkt->size);
+
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_pkt) < 0)
+                {
+                  LOG_ERROR("C-MUX", "Failed to write interleaved audio packet. Halting.");
                   __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+                }
                 av_packet_unref(enc_pkt);
               }
             }
@@ -1398,9 +1569,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
   // Write trailer to finalize the last fMP4 fragment
   if (out_fmt_ctx)
-    av_write_trailer(out_fmt_ctx);
+  {
+    int trail_ret = av_write_trailer(out_fmt_ctx);
+    if (trail_ret < 0)
+    {
+      LOG_FFMPEG_ERR("C-MUX", "Failed to write fMP4 trailer", trail_ret);
+    }
+  }
 
 cleanup:
+  LOG_INFO("C-MUX", "Commencing final teardown of dynamic streaming pipeline structs.");
+
   if (frame)
     av_frame_free(&frame);
   if (pkt)
