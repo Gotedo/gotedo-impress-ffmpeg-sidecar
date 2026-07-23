@@ -1807,17 +1807,21 @@ case "${OS}-${ARCH}" in
     windows-amd64)
         export CC="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
+        -lpng -lbz2 -llzma -lws2_32 -lbcrypt -lmfplat -lmfuuid -lole32 -lstrmiids -luuid -lshlwapi -lpsapi -lwinmm -lncrypt -lcrypt32 -lsecur32 -lstdc++ -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
-        GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=-static"
+        GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
         export CGO_LDFLAGS="-static"
         ;;
     windows-arm64)
         export CC="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang++"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lws2_32 -lbcrypt -lmfplat -lmfuuid"
+        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
+        -lpng -lbz2 -llzma -lws2_32 -lbcrypt -lmfplat -lmfuuid -lole32 -lstrmiids -luuid -lshlwapi -lpsapi -lwinmm -lncrypt -lcrypt32 -lsecur32 -lstdc++ -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
-        GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=-static"
+        GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
         export CGO_LDFLAGS="-static"
         ;;
     linux-amd64)
@@ -1916,7 +1920,7 @@ export GOFLAGS="-mod=readonly"
 echo ">>> Verifying module dependencies for ${OS}-${ARCH}..."
 go mod download
 
-go build $GO_BUILDFLAGS -o "${OUT_DIR}/${OUT_FILE}" .
+go build "$GO_BUILDFLAGS" -o "${OUT_DIR}/${OUT_FILE}" .
 
 echo ">>> Sidecar successfully built at ${OUT_DIR}/${OUT_FILE}"
 SIDECAR_BUILDER
