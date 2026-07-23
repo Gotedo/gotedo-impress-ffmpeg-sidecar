@@ -878,7 +878,6 @@ build_dep() {
             ;;
         meson)
             BUILD_DIR="${src_dir}/build_${OS}_${ARCH}"
-            find "${src_dir}" -exec touch -t $(date +%Y%m%d%H%M.%S) {} + 2>/dev/null || true
             meson setup "${BUILD_DIR}" "${src_dir}" \
                 --cross-file "${WORKDIR}/${CROSS_FILE}" \
                 --prefix="${sysroot}" \
@@ -886,6 +885,11 @@ build_dep() {
                 --buildtype=release \
                 -Db_staticpic=true \
                 ${extra_flags}
+
+            # Resolve "Clock skew detected" errors by normalizing timestamps
+            # This ensures no file is "from the future" relative to the container clock.
+            find "${src_dir}" -exec touch -t $(date +%Y%m%d%H%M.%S) {} + 2>/dev/null || true
+
             meson compile -C "${BUILD_DIR}" -j $(nproc) -l $(nproc)
             meson install -C "${BUILD_DIR}"
             ;;
