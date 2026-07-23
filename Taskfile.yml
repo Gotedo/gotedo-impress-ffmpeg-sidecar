@@ -322,6 +322,10 @@ tasks:
           -e SIDECAR_OUT_FILE={{.OUT_FILE_NAME}} \
           -e MACOSX_DEPLOYMENT_TARGET="{{.MACOSX_DEPLOYMENT_TARGET}}" \
           -e RELEASE="{{.RELEASE}}" \
+          -e GOCACHE="/go/build-cache" \
+          -e GOMODCACHE="/go/pkg/mod" \
+          -v "{{.TASKFILE_DIR}}/build_cache/go_module_cache/{{.TARGET_OS}}/{{.TARGET_ARCH}}:/go/pkg/mod" \
+          -v "{{.TASKFILE_DIR}}/build_cache/go_build_cache/{{.TARGET_OS}}/{{.TARGET_ARCH}}:/go/go-build" \
           -v "{{.OUT_DIR}}:/output" \
           -v "{{.TASKFILE_DIR}}:/src" \
           -v "{{.FFMPEG_LIB_DIR}}:/ffmpeg_libs" \
