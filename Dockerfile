@@ -1830,7 +1830,9 @@ case "${OS}-${ARCH}" in
         TARGET_FLAG="-target x86_64-linux-gnu"
         export CGO_CFLAGS="$TARGET_FLAG -fPIC"
         export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lm -lpthread -ldl -lstdc++"
+        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
+        -lpng -lbz2 -llzma -lm -lpthread -ldl -lstdc++"
         ;;
     linux-arm64)
         export CC="/usr/bin/clang"
@@ -1838,7 +1840,9 @@ case "${OS}-${ARCH}" in
         TARGET_FLAG="-target aarch64-linux-gnu"
         export CGO_CFLAGS="$TARGET_FLAG -fPIC"
         export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lm -lpthread -ldl -lstdc++"
+        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
+        -lpng -lbz2 -llzma -lm -lpthread -ldl -lstdc++"
         ;;
     darwin-amd64 | darwin-arm64)
         export CC="/usr/bin/clang"
@@ -1920,7 +1924,12 @@ export GOFLAGS="-mod=readonly"
 echo ">>> Verifying module dependencies for ${OS}-${ARCH}..."
 go mod download
 
-go build "$GO_BUILDFLAGS" -o "${OUT_DIR}/${OUT_FILE}" .
+# Safely unpacks flags if present, drops them cleanly if empty
+if [ -n "$GO_BUILDFLAGS" ]; then
+    go build "$GO_BUILDFLAGS" -o "${OUT_DIR}/${OUT_FILE}" .
+else
+    go build -o "${OUT_DIR}/${OUT_FILE}" .
+fi
 
 echo ">>> Sidecar successfully built at ${OUT_DIR}/${OUT_FILE}"
 SIDECAR_BUILDER
