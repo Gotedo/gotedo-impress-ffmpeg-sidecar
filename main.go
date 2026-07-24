@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/cgo"
 	"sync"
 	"syscall"
@@ -217,20 +218,33 @@ func set_session_eof(token C.uintptr_t, isEof C.int) {
 }
 
 func main() {
-	socketPath := flag.String("socket", "", "Path to the Unix Domain Socket for IPC")
+	addr := flag.String("addr", "", "Address for IPC (Unix Domain Socket path or TCP Address)")
 	// Parse the incoming command-line arguments
 	flag.Parse()
 
-	if *socketPath == "" {
-		log.Fatal("Error: Sidecar must be started with a valid -socket path.")
+	if *addr == "" {
+		log.Fatal("Error: Sidecar must be started with a valid -addr path or address.")
 	}
 
-	// Clean up stale socket files if they exist from previous unexpected crashes
-	_ = os.Remove(*socketPath)
+	var listener net.Listener
+	var err error
 
-	listener, err := net.Listen("unix", *socketPath)
-	if err != nil {
-		log.Fatalf("Failed to bind Unix Domain Socket: %v", err)
+	if runtime.GOOS == "windows" {
+		// Windows: Listen on TCP
+		listener, err = net.Listen("tcp", *addr)
+		if err != nil {
+			log.Fatalf("Failed to bind TCP Address: %v", err)
+		}
+		log.Printf("FFmpeg Go-gRPC Sidecar listening on TCP: %s", *addr)
+	} else {
+		// Unix-like: Clean up stale socket files if they exist from previous unexpected crashes
+		_ = os.Remove(*addr)
+
+		listener, err = net.Listen("unix", *addr)
+		if err != nil {
+			log.Fatalf("Failed to bind Unix Domain Socket: %v", err)
+		}
+		log.Printf("FFmpeg Go-gRPC Sidecar listening on UDS: %s", *addr)
 	}
 
 	grpcServer := grpc.NewServer()
@@ -243,11 +257,14 @@ func main() {
 		<-sigChan
 		log.Println("Stopping gRPC sidecar server safely...")
 		grpcServer.GracefulStop()
-		_ = os.Remove(*socketPath)
+
+		if runtime.GOOS != "windows" {
+			_ = os.Remove(*addr)
+		}
 		os.Exit(0)
 	}()
 
-	log.Printf("FFmpeg Go-gRPC Sidecar listening on UDS: %s", *socketPath)
+	log.Printf("FFmpeg Go-gRPC Sidecar listening on UDS: %s", *addr)
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("gRPC server run failure: %v", err)
 	}
