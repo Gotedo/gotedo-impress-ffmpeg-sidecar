@@ -424,15 +424,24 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
 
   for (ma_uint32 i = 0; i < playbackDeviceCount && count < max_devices; i++)
   {
-    // Use the index 'i' (or a simplified name-based ID) to avoid ma_device_id struct issues
+#if defined(__APPLE__) && (defined(MA_HAS_COREAUDIO) || defined(MA_SUPPORT_COREAUDIO) || defined(MINIAUDIO_H))
+    // On macOS, extract the native CoreAudio AudioDeviceID from miniaudio's device ID union.
+    // This provides a valid integer string (e.g. "74") required by CoreAudio's SetDefaultOutputDevice.
+    uint32_t native_id = (uint32_t)pPlaybackDeviceInfos[i].id.coreaudio;
+    snprintf(devices[count].id, sizeof(devices[count].id), "%u", native_id);
+#else
+    // On non-Apple platforms where the browser manages audio output via HTMLMediaElement.setSinkId(),
+    // fallback to sequential string indices or keep standard miniaudio indexing.
     snprintf(devices[count].id, sizeof(devices[count].id), "%u", i);
+#endif
 
-    // Use strncpy carefully; ensure 'devices' is a valid pointer
+    // Safely copy device name with guaranteed null-termination
     strncpy(devices[count].name, pPlaybackDeviceInfos[i].name, sizeof(devices[count].name) - 1);
 
     // Ensure null-termination
     devices[count].name[sizeof(devices[count].name) - 1] = '\0';
 
+    // Set default flag
     devices[count].is_default = pPlaybackDeviceInfos[i].isDefault;
 
     // Increment the count at the end of the loop
