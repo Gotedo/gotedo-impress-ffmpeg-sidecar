@@ -332,7 +332,7 @@ tasks:
           ffmpeg-builder {{.TARGET_OS}} {{.TARGET_ARCH}} sidecar
 
   install:proto_plugins:
-    desc: "Checks and installs Go gRPC plugins locally to ./bin"
+    desc: "Checks and installs Go gRPC plugins locally to ./bin. It unsets GOOS and GOARCH to avoid failure during cross-compilation. The proto plugins will always be installed using the HOST's GOOS and GOARCH."
     run: once
     internal: true
     cmds:
@@ -340,12 +340,12 @@ tasks:
       - |
         if [ ! -f "./bin/protoc-gen-go.exe" ] && [ ! -f "./bin/protoc-gen-go" ]; then
           echo "Installing protoc-gen-go..."
-          GOBIN="$(pwd)/bin" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          GOBIN="$(pwd)/bin" GOOS="" GOARCH="" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
         fi
       - |
         if [ ! -f "./bin/protoc-gen-go-grpc.exe" ] && [ ! -f "./bin/protoc-gen-go-grpc" ]; then
           echo "Installing protoc-gen-go-grpc..."
-          GOBIN="$(pwd)/bin" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          GOBIN="$(pwd)/bin" GOOS="" GOARCH="" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
         fi
 
   generate:proto:
