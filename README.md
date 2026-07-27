@@ -6,6 +6,14 @@ At its core is a high-performance, embedded C and FFmpeg streaming library desig
 
 To maintain compliance with the **GPL/LGPL license requirements** (due to the use of FFmpeg) while keeping the parent application closed-source, this sidecar runs as an isolated background process and communicates with the main application strictly over network boundaries (via **gRPC** or **WebSockets**). Consequently, this sidecar and its complete build system are fully open-source.
 
+## About Gotedo Impress
+
+`Gotedo Impress` is a presentation software from the Gotedo Platform which enables easy multi-projector management of media presentations in churches or businesses. Media types supported by Gotedo Impress include: a wide range of video formats, a wide range of image formats, PowerPoint presentations, Document files such Microsoft Word files, PDF files, etc.
+
+At the core of Gotedo Impress is the ability to manage media on multiple projectors or monitors independently and simultaneously. For example, you can have a Bible verse displayed on Projector A, a video playing on Projector B, and a PowerPoint slideshow live on Projector C. Gotedo Impress will give you the ability to control each media on each projector independently and simultaneously.
+
+Gotedo Impress is free to use by individual users, churches, and businesses. You can learn more about Gotedo at https://about.gotedo.com/en/products/gotedo-impress.
+
 ---
 
 ## GPL Compliance
