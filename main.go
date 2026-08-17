@@ -218,6 +218,9 @@ func set_session_eof(token C.uintptr_t, isEof C.int) {
 }
 
 func main() {
+	// Config `log` to send normal operational logs to os.Stdout rather than os.Stderr
+	log.SetOutput(os.Stdout)
+
 	addr := flag.String("addr", "", "Address for IPC (Unix Domain Socket path or TCP Address)")
 	// Parse the incoming command-line arguments
 	flag.Parse()
@@ -520,7 +523,7 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 	var outBuf *C.uint8_t
 	var outSize C.int
 
-	// Call the native C function we built in Task 2.7.2
+	// Call the native video screenshot function
 	ret := C.extract_video_screenshot(cPath, C.int64_t(timeTargetMs), &outBuf, &outSize)
 	if ret < 0 {
 		return nil, status.Errorf(codes.Internal, "native frame extraction failed with code: %d", int(ret))
