@@ -5,3 +5,4 @@ dist
 .DS_Store
 .task/
 test_*.mp4
+*.mkv
