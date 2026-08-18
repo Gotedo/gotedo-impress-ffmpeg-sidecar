@@ -1215,6 +1215,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int just_seeked = 0;
   int eof_reached = 0;
 
+  // Track previous stream DTS to enforce strict monotonicity for fMP4
+  int64_t last_video_dts = AV_NOPTS_VALUE;
+  int64_t last_audio_dts = AV_NOPTS_VALUE;
+
   LOG_INFO("C-MUX", "Entering zero-copy passthrough streaming loop");
 
   while (true)
@@ -1242,6 +1246,9 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
       if (seek_ret >= 0)
       {
         LOG_INFO("C-SEEK", "[PASSTHROUGH] Executing backward seek to ms: %lld", (long long)target_ms);
+
+        // Flush demuxer buffers to eliminate stale packets after seeking
+        avformat_flush(dec_ctx->fmt_ctx);
 
         // Re-initialize fMP4 muxer context to reset DTS timeline for the browser
         if (out_fmt_ctx)
@@ -1289,6 +1296,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
         current_pause_start_us = 0;
         just_seeked = 1;
         eof_reached = 0;
+
+        // Reset DTS state trackers for the new post-seek segment timeline
+        last_video_dts = AV_NOPTS_VALUE;
+        last_audio_dts = AV_NOPTS_VALUE;
 
         extern void set_session_eof(uintptr_t token, int is_eof);
         set_session_eof(tx_ctx.go_user_token, 0);
@@ -1409,15 +1420,35 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       if (!interrupted)
       {
-        // Fallback for containers (like MKV) that do not set explicit DTS on packets
-        if (pkt->dts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE)
-        {
-          pkt->dts = pkt->pts;
-        }
-
         // Rescale timestamps from input demuxer timebase to output fMP4 stream timebase
         av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
         pkt->stream_index = target_out_idx;
+
+        // Enforce strict DTS monotonicity and PTS >= DTS rules for fMP4 B-frames
+        int64_t *last_dts_ptr = (target_out_idx == out_video_idx) ? &last_video_dts : &last_audio_dts;
+
+        // Fallback for containers (like MKV) that do not set explicit DTS on packets
+        if (pkt->dts == AV_NOPTS_VALUE)
+        {
+          if (*last_dts_ptr != AV_NOPTS_VALUE)
+            pkt->dts = *last_dts_ptr + 1;
+          else
+            pkt->dts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : 0;
+        }
+
+        // Fix B-frame out-of-order DTS from MKV demuxer
+        if (*last_dts_ptr != AV_NOPTS_VALUE && pkt->dts <= *last_dts_ptr)
+        {
+          pkt->dts = *last_dts_ptr + 1;
+        }
+
+        // Ensure Composition Time Offset (PTS - DTS) is never negative
+        if (pkt->pts != AV_NOPTS_VALUE && pkt->pts < pkt->dts)
+        {
+          pkt->pts = pkt->dts;
+        }
+
+        *last_dts_ptr = pkt->dts;
 
         LOG_DEBUG("C-MUX", "[PASSTHROUGH] Writing packet stream=%d pts=%lld dts=%lld size=%d",
                   target_out_idx, (long long)pkt->pts, (long long)pkt->dts, pkt->size);
