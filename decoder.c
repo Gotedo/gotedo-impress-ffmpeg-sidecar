@@ -1211,7 +1211,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int64_t stream_start_time_us = av_gettime_relative();
   int64_t total_pause_us = 0;
   int64_t current_pause_start_us = 0;
-  const int64_t READ_AHEAD_US = 10000000LL; // 10 seconds of runway
+  const int64_t READ_AHEAD_US = 2000000LL; // 2 seconds of runway (prevents high-bitrate MSE buffer quota eviction)
   int just_seeked = 0;
   int eof_reached = 0;
 
@@ -1379,7 +1379,9 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
     {
       AVStream *out_stream = out_fmt_ctx->streams[target_out_idx];
 
-      double calculated_pts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts * av_q2d(in_stream->time_base) : 0.0;
+      // Fall back to DTS if PTS is unassigned in container packets (e.g., MOV/MP4 demuxing)
+      int64_t pacing_pts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : pkt->dts;
+      double calculated_pts = (pacing_pts != AV_NOPTS_VALUE) ? pacing_pts * av_q2d(in_stream->time_base) : 0.0;
       int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
 
       extern void set_session_pts(uintptr_t token, double pts);
