@@ -35,6 +35,7 @@ message StreamRequest {
     string target_id = 1; // "preview" or projector screen ID string
     string file_path = 2;
     string audio_device_id = 3;
+    string stream_mode = 4;
 }
 
 message StreamResponse {
@@ -134,6 +135,11 @@ message MetadataResponse {
     int32 sample_rate = 30;       // Audio sampling clock rate (Hz, e.g., 48000)
     string channel_layout = 31;   // e.g., "stereo", "5.1(side)", "mono"
     int64 audio_bit_rate = 32;    // Audio track individual operational bitrate
+
+    // Candidate MIME string fields to hold the pre-calculated webview compatibility targets
+    string candidate_video_mime = 33; // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0"' or 'video/mp4; codecs="avc1.64002a"'
+    string candidate_audio_mime = 34; // e.g., 'audio/mp4; codecs="mp4a.40.2"' or 'audio/webm; codecs="opus"'
+    string candidate_full_mime  = 35; // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0, mp4a.40.2"'
 }
 
 message ScreenshotRequest {

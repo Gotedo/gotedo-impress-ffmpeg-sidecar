@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"runtime/cgo"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type ffmpegServer struct {
@@ -39,7 +41,7 @@ type ChunkPayload struct {
 type SessionContext struct {
 	StreamChan      chan ChunkPayload
 	CurrentPTS      float64
-	IsEOF           int
+	IsEOF           int32 // int32 for atomic operations
 	Mu              sync.Mutex
 	playbackSession *PlaybackSession
 }
@@ -207,14 +209,9 @@ func set_session_eof(token C.uintptr_t, isEof C.int) {
 	}()
 
 	handle := cgo.Handle(token)
-	session := handle.Value().(*SessionContext)
-
-	session.Mu.Lock()
-	session.IsEOF = int(isEof)
-	session.Mu.Unlock()
-
-	// Send an empty chunk to the channel to trigger response for EOF
-	session.StreamChan <- ChunkPayload{}
+	if sessCtx, ok := handle.Value().(*SessionContext); ok && sessCtx != nil {
+		atomic.StoreInt32(&sessCtx.IsEOF, int32(isEof))
+	}
 }
 
 func main() {
@@ -222,8 +219,33 @@ func main() {
 	log.SetOutput(os.Stdout)
 
 	addr := flag.String("addr", "", "Address for IPC (Unix Domain Socket path or TCP Address)")
+	probePath := flag.String("probe", "", "Path to media file to probe metadata and exit")
 	// Parse the incoming command-line arguments
 	flag.Parse()
+
+	if *probePath != "" {
+		server := &ffmpegServer{}
+		resp, err := server.GetMediaProperties(context.Background(), &proto.MetadataRequest{
+			FilePath: *probePath,
+		})
+		if err != nil {
+			log.Fatalf("CLI Probe Failed: %v", err)
+		}
+
+		marshaller := protojson.MarshalOptions{
+			Indent:          "  ",
+			Multiline:       true,
+			EmitUnpopulated: false,
+		}
+
+		jsonBytes, err := marshaller.Marshal(resp)
+		if err != nil {
+			log.Fatalf("Failed to serialize response: %v", err)
+		}
+
+		fmt.Println(string(jsonBytes))
+		os.Exit(0)
+	}
 
 	if *addr == "" {
 		log.Fatal("Error: Sidecar must be started with a valid -addr path or address.")
@@ -276,10 +298,13 @@ func main() {
 // StartStream implements the gRPC streaming endpoint with per-target session tracking
 func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpegService_StartStreamServer) error {
 	targetID := req.GetTargetId()
-	log.Printf("[SIDECAR] Received StartStream request for target=%s file: %s", targetID, req.GetFilePath())
+	streamMode := req.GetStreamMode()
+	filePath := req.GetFilePath()
 
-	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
-		return status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
+	log.Printf("[SIDECAR] Received StartStream request for target=%s; file: %s; stream mode: %s", targetID, filePath, streamMode)
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
 	}
 
 	// PRE: Handle case where target already has an active playback
@@ -299,21 +324,29 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	}
 
 	// 1. Create isolated Go session context + cgo handle
+	// PERFORMANCE FIX: Increased buffer from 100 to 10000 for high-bitrate 4K fMP4 streams
 	sessionCtx := &SessionContext{
-		StreamChan: make(chan ChunkPayload, 100),
+		StreamChan: make(chan ChunkPayload, 10000),
 	}
 
 	// Wrap this private instance in a localized runtime Cgo handle
 	handle := cgo.NewHandle(sessionCtx)
 	// We will delete the handle inside unregisterPlayback
 
+	// Convert streamMode string ("passthrough" vs "transcode") to C flag
+	isPassthrough := C.int(0)
+	if streamMode == "passthrough" {
+		isPassthrough = C.int(1)
+	}
+
 	// 2. Allocate C contexts (we keep explicit frees for early error paths)
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
+	decCtx.is_passthrough = isPassthrough
 
-	cPath := C.CString(req.GetFilePath())
+	cPath := C.CString(filePath)
 	defer C.free(unsafe.Pointer(cPath))
 
-	// 3. Open decoders
+	// 3. Open decoders (allocated only if !is_passthrough)
 	if ret := C.open_input_and_decoders(decCtx, cPath); ret < 0 {
 		C.free(unsafe.Pointer(decCtx))
 		handle.Delete()
@@ -328,7 +361,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		SessionCtx: sessionCtx,
 		Handle:     handle,
 		Cancel:     cancel,
-		FilePath:   req.GetFilePath(),
+		FilePath:   filePath,
 	}
 	// Update the session context
 	sessionCtx.Mu.Lock()
@@ -372,7 +405,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			err := stream.Send(&proto.StreamResponse{
 				Fmp4Chunk: chunk.Data,
 				Pts:       chunk.PTS,
-				IsEof:     sessionCtx.IsEOF != 0,
+				IsEof:     atomic.LoadInt32(&sessionCtx.IsEOF) != 0, // Thread-safe atomic load
 			})
 			if err != nil {
 				log.Printf("[SIDECAR ERROR] Failed to send gRPC response: %v", err)
@@ -440,6 +473,7 @@ func set_session_pts(userToken C.uintptr_t, pts C.double) {
 }
 
 // GetMediaProperties probes a media file using native FFmpeg extraction loops.
+// GetMediaProperties probes a media file using native FFmpeg extraction loops.
 func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.MetadataRequest) (*proto.MetadataResponse, error) {
 	log.Printf("[SIDECAR] Received comprehensive GetMediaProperties request for file: %s", req.GetFilePath())
 
@@ -501,6 +535,10 @@ func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.Metada
 		SampleRate:         int32(cProps.sample_rate),
 		ChannelLayout:      C.GoString(&cProps.channel_layout[0]),
 		AudioBitRate:       int64(cProps.audio_bit_rate),
+
+		CandidateVideoMime: C.GoString(&cProps.candidate_video_mime[0]),
+		CandidateAudioMime: C.GoString(&cProps.candidate_audio_mime[0]),
+		CandidateFullMime:  C.GoString(&cProps.candidate_full_mime[0]),
 	}, nil
 }
 

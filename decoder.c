@@ -5,7 +5,9 @@
 #include "_cgo_export.h"
 
 /**
- * Allocates, configures, and opens an H.264 video encoder context (Main profile, veryfast, zerolatency).
+ * Allocates, configures, and opens an H.264 video encoder context.
+ * Automatically downscales 4K/UHD source videos to 1080p to ensure
+ * real-time software encoding performance.
  *
  * @param dec_ctx       Pointer to the active DemuxDecContext.
  * @param out_enc_ctx   Pointer to receive the newly allocated AVCodecContext.
@@ -17,7 +19,22 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
   if (!dec_ctx || !dec_ctx->video_dec_ctx)
     return AVERROR(EINVAL);
 
-  const AVCodec *h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+  // Attempt to find platform hardware encoders first, fallback to standard H.264
+  const AVCodec *h264_codec = NULL;
+
+#if defined(__APPLE__)
+  h264_codec = avcodec_find_encoder_by_name("h264_videotoolbox");
+#elif defined(_WIN32)
+  h264_codec = avcodec_find_encoder_by_name("h264_nvenc");
+  if (!h264_codec)
+    h264_codec = avcodec_find_encoder_by_name("h264_qsv");
+#endif
+
+  if (!h264_codec)
+  {
+    h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+  }
+
   if (!h264_codec)
   {
     return AVERROR_ENCODER_NOT_FOUND;
@@ -29,8 +46,39 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     return AVERROR(ENOMEM);
   }
 
-  enc_ctx->width = dec_ctx->video_dec_ctx->width;
-  enc_ctx->height = dec_ctx->video_dec_ctx->height;
+  int src_width = dec_ctx->video_dec_ctx->width;
+  int src_height = dec_ctx->video_dec_ctx->height;
+
+  // Downscale 4K / UHD sources to 1080p max for real-time CPU encoding performance
+  int target_width = src_width;
+  int target_height = src_height;
+
+  if (src_width > 1920 || src_height > 1080)
+  {
+    float aspect = (float)src_width / (float)src_height;
+
+    // Scale based on whichever dimension exceeds its limit more aggressively
+    if ((float)src_width / 1920.0f > (float)src_height / 1080.0f)
+    {
+      target_width = 1920;
+      target_height = (int)(1920.0f / aspect);
+    }
+    else
+    {
+      target_height = 1080;
+      target_width = (int)(1080.0f * aspect);
+    }
+
+    // Ensure both dimensions are even numbers for YUV420P compatibility
+    target_width &= ~1;
+    target_height &= ~1;
+
+    LOG_INFO("C-ENC", "Downscaling video from %dx%d to %dx%d for real-time streaming",
+             src_width, src_height, target_width, target_height);
+  }
+
+  enc_ctx->width = target_width;
+  enc_ctx->height = target_height;
   enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
   enc_ctx->time_base = (AVRational){1, 90000};
   enc_ctx->framerate = av_guess_frame_rate(
@@ -41,13 +89,21 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     enc_ctx->framerate = (AVRational){25, 1};
 
   enc_ctx->gop_size = 48;
-  enc_ctx->max_b_frames = 0; // Low latency
-  enc_ctx->bit_rate = 2500000;
+  enc_ctx->max_b_frames = 0;                     // Low latency
+  enc_ctx->bit_rate = 4000000;                   // Balanced bitrate for smooth 1080p streaming
   enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
 
-  av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
-  av_opt_set(enc_ctx->priv_data, "preset", "veryfast", 0);
-  av_opt_set(enc_ctx->priv_data, "tune", "zerolatency", 0);
+  // Configure codec-specific private options safely depending on selected encoder
+  if (strcmp(h264_codec->name, "libx264") == 0)
+  {
+    av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
+    av_opt_set(enc_ctx->priv_data, "preset", "ultrafast", 0);
+    av_opt_set(enc_ctx->priv_data, "tune", "zerolatency", 0);
+  }
+  else if (strcmp(h264_codec->name, "h264_videotoolbox") == 0)
+  {
+    av_opt_set_int(enc_ctx->priv_data, "realtime", 1, 0);
+  }
 
   int ret = avcodec_open2(enc_ctx, h264_codec, NULL);
   if (ret < 0)
@@ -116,6 +172,29 @@ int init_audio_resampler(DemuxDecContext *ctx)
 }
 
 /**
+ * Callback to select hardware-accelerated pixel formats dynamically.
+ */
+static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
+{
+  const enum AVPixelFormat *p;
+  for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++)
+  {
+    LOG_INFO("C-DEC", "Decoder proposed pixel format: %s (%d)", av_get_pix_fmt_name(*p), *p);
+
+    if (*p == AV_PIX_FMT_VIDEOTOOLBOX ||
+        *p == AV_PIX_FMT_D3D11 ||
+        *p == AV_PIX_FMT_VAAPI ||
+        *p == AV_PIX_FMT_CUDA)
+    {
+      LOG_INFO("C-DEC", "Matched Hardware Pixel Format: %s", av_get_pix_fmt_name(*p));
+      return *p;
+    }
+  }
+  LOG_WARN("C-DEC", "No matching hardware pixel format found. Falling back to software format.");
+  return *pix_fmts;
+}
+
+/**
  * Opens a media file, reads its metadata, and initializes the decoders
  * for both the primary video and audio streams.
  *
@@ -143,6 +222,9 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   ctx->audio_dec_ctx = NULL;
   ctx->swr_ctx = NULL;
 
+  // Enable verbose FFmpeg internal logging
+  av_log_set_level(AV_LOG_VERBOSE);
+
   // 1. Open the media file container and extract initial stream parameters
   ret = avformat_open_input(&ctx->fmt_ctx, input_path, NULL, NULL);
   if (ret < 0)
@@ -153,13 +235,33 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   if (ret < 0)
     goto fail;
 
-  // 3. Find and configure the best Video Stream in the container
+  // Discover stream indices for demuxing/remuxing
   const AVCodec *video_codec = NULL;
   ret = av_find_best_stream(ctx->fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &video_codec, 0);
   if (ret >= 0)
   {
     ctx->video_stream_idx = ret;
+  }
 
+  const AVCodec *audio_codec = NULL;
+  ret = av_find_best_stream(ctx->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, &audio_codec, 0);
+  if (ret >= 0)
+  {
+    ctx->audio_stream_idx = ret;
+  }
+
+  // --- PASSTHROUGH MODE SHORT-CIRCUIT ---
+  // If passthrough is active, bypass decoder, hardware context, and resampler allocations completely.
+  if (ctx->is_passthrough)
+  {
+    LOG_INFO("C-DEC", "Passthrough mode enabled — skipping decoder, HW acceleration, and resampler initialization.");
+    log_input_stream_properties(ctx, input_path);
+    return 0;
+  }
+
+  // 3. Find and configure the best Video Stream in the container
+  if (ctx->video_stream_idx >= 0 && video_codec)
+  {
     // Allocate raw codec context block
     ctx->video_dec_ctx = avcodec_alloc_context3(video_codec);
     if (!ctx->video_dec_ctx)
@@ -173,19 +275,89 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     if (ret < 0)
       goto fail;
 
-    // Initialize and open the decoder thread
+    // --- DIAGNOSTIC 1: Enumerate compiled HW types in libavutil ---
+    LOG_INFO("C-DEC", "--- Available HW Device Types in FFmpeg Build ---");
+    enum AVHWDeviceType iter_type = AV_HWDEVICE_TYPE_NONE;
+    int hw_type_count = 0;
+    while ((iter_type = av_hwdevice_iterate_types(iter_type)) != AV_HWDEVICE_TYPE_NONE)
+    {
+      LOG_INFO("C-DEC", "  [+] HW Device Supported: %s (enum %d)", av_hwdevice_get_type_name(iter_type), iter_type);
+      hw_type_count++;
+    }
+    if (hw_type_count == 0)
+    {
+      LOG_WARN("C-DEC", "  [-] NO hardware device types are supported by this FFmpeg build!");
+    }
+
+    // --- DIAGNOSTIC 2: Query Codec HW Configurations ---
+    LOG_INFO("C-DEC", "--- HW Configs for Codec '%s' ---", video_codec->name);
+    for (int i = 0;; i++)
+    {
+      const AVCodecHWConfig *config = avcodec_get_hw_config(video_codec, i);
+      if (!config)
+        break;
+
+      if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+      {
+        LOG_INFO("C-DEC", "  [+] Codec supports HW Device: %s (PixFormat enum %d)",
+                 av_hwdevice_get_type_name(config->device_type), config->pix_fmt);
+      }
+    }
+
+    // --- HARDWARE ACCELERATION INITIALIZATION ---
+    enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
+
+#if defined(__APPLE__)
+    hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+#elif defined(_WIN32)
+    hw_type = AV_HWDEVICE_TYPE_D3D11VA;
+#elif defined(__linux__)
+    hw_type = AV_HWDEVICE_TYPE_VAAPI;
+#endif
+
+    // UNCONDITIONAL LOG: Verifies preprocessor macro resolution
+    LOG_INFO("C-DEC", "Resolved target hw_type enum: %d (%s)",
+             hw_type, hw_type != AV_HWDEVICE_TYPE_NONE ? av_hwdevice_get_type_name(hw_type) : "NONE");
+
+    if (hw_type != AV_HWDEVICE_TYPE_NONE)
+    {
+      int hw_ret = av_hwdevice_ctx_create(&ctx->video_dec_ctx->hw_device_ctx, hw_type, NULL, NULL, 0);
+      if (hw_ret < 0)
+      {
+        LOG_WARN("C-DEC", "Failed to create hardware device context. Falling back to software decoding.");
+
+        // Multi-threaded fallback for software decoding
+        ctx->video_dec_ctx->thread_count = 0;
+        ctx->video_dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+      }
+      else
+      {
+        ctx->video_dec_ctx->get_format = get_hw_format;
+
+        // CRITICAL FIX: Hardware decoders require single-threaded context configuration in FFmpeg.
+        // Frame multithreading (FF_THREAD_FRAME) forces avcodec_open2 to silently disable hwaccel.
+        ctx->video_dec_ctx->thread_count = 1;
+        ctx->video_dec_ctx->thread_type = 0;
+
+        LOG_INFO("C-DEC", "Successfully initialized hardware acceleration type: %d", hw_type);
+      }
+    }
+    else
+    {
+      // Multi-threaded configuration for platforms without hardware acceleration
+      ctx->video_dec_ctx->thread_count = 0;
+      ctx->video_dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
+    // --- END OF HARDWARE ACCELERATION INITIALIZATION ---
+
     ret = avcodec_open2(ctx->video_dec_ctx, video_codec, NULL);
     if (ret < 0)
       goto fail;
   }
 
   // 4. Find and configure the best Audio Stream in the container
-  const AVCodec *audio_codec = NULL;
-  ret = av_find_best_stream(ctx->fmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, &audio_codec, 0);
-  if (ret >= 0)
+  if (ctx->audio_stream_idx >= 0 && audio_codec)
   {
-    ctx->audio_stream_idx = ret;
-
     // Allocate raw audio codec context block
     ctx->audio_dec_ctx = avcodec_alloc_context3(audio_codec);
     if (!ctx->audio_dec_ctx)
@@ -366,7 +538,7 @@ int write_fmp4_header(AVFormatContext *out_fmt_ctx)
   AVDictionary *opts = NULL;
 
   // Ensure FFmpeg fMP4 muxer explicitly handles negative CTS offsets
-  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset+negative_cts_offsets", 0);
+  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset+negative_cts_offsets+delay_moov", 0);
   if (ret < 0)
   {
     return ret;
@@ -566,6 +738,10 @@ int probe_media_properties(const char *file_path, CMediaProperties *props)
   if ((tag = av_dict_get(fmt_ctx->metadata, "creation_time", NULL, 0)))
     snprintf(props->creation_time, sizeof(props->creation_time), "%s", tag->value);
 
+  // Raw codec string accumulators for unified MSE MIME generation
+  char v_codec_raw[64] = {0};
+  char a_codec_raw[64] = {0};
+
   // 3. Scan Across Stream Layout Arrays
   for (unsigned int i = 0; i < fmt_ctx->nb_streams; i++)
   {
@@ -612,6 +788,32 @@ int probe_media_properties(const char *file_path, CMediaProperties *props)
       snprintf(props->color_space, sizeof(props->color_space), "%s", av_color_space_name(codec_par->color_space) ? av_color_space_name(codec_par->color_space) : "");
       snprintf(props->color_transfer, sizeof(props->color_transfer), "%s", av_color_transfer_name(codec_par->color_trc) ? av_color_transfer_name(codec_par->color_trc) : "");
       snprintf(props->color_primaries, sizeof(props->color_primaries), "%s", av_color_primaries_name(codec_par->color_primaries) ? av_color_primaries_name(codec_par->color_primaries) : "");
+
+      // RFC 6381 Candidate Video MIME Calculation
+      if (codec_par->codec_id == AV_CODEC_ID_H264)
+      {
+        int profile = codec_par->profile != AV_PROFILE_UNKNOWN ? codec_par->profile : 0x4d;
+        int level = codec_par->level != AV_LEVEL_UNKNOWN ? codec_par->level : 31;
+        snprintf(v_codec_raw, sizeof(v_codec_raw), "avc1.%02x00%02x", profile, level);
+        snprintf(props->candidate_video_mime, sizeof(props->candidate_video_mime), "video/mp4; codecs=\"%s\"", v_codec_raw);
+      }
+      else if (codec_par->codec_id == AV_CODEC_ID_HEVC)
+      {
+        int profile = codec_par->profile != AV_PROFILE_UNKNOWN ? codec_par->profile : 1;
+        int level = codec_par->level != AV_LEVEL_UNKNOWN ? codec_par->level : 153;
+        snprintf(v_codec_raw, sizeof(v_codec_raw), "hvc1.%d.4.L%d.B0", profile, level);
+        snprintf(props->candidate_video_mime, sizeof(props->candidate_video_mime), "video/mp4; codecs=\"%s\"", v_codec_raw);
+      }
+      else if (codec_par->codec_id == AV_CODEC_ID_VP9)
+      {
+        snprintf(v_codec_raw, sizeof(v_codec_raw), "vp9");
+        snprintf(props->candidate_video_mime, sizeof(props->candidate_video_mime), "video/webm; codecs=\"%s\"", v_codec_raw);
+      }
+      else if (codec_par->codec_id == AV_CODEC_ID_AV1)
+      {
+        snprintf(v_codec_raw, sizeof(v_codec_raw), "av01.0.08M.08");
+        snprintf(props->candidate_video_mime, sizeof(props->candidate_video_mime), "video/mp4; codecs=\"%s\"", v_codec_raw);
+      }
     }
 
     // Handle Audio Track
@@ -635,7 +837,34 @@ int probe_media_properties(const char *file_path, CMediaProperties *props)
       char layout_buf[64];
       av_channel_layout_describe(&codec_par->ch_layout, layout_buf, sizeof(layout_buf));
       snprintf(props->channel_layout, sizeof(props->channel_layout), "%s", layout_buf);
+
+      // RFC 6381 Candidate Audio MIME Calculation
+      if (codec_par->codec_id == AV_CODEC_ID_AAC)
+      {
+        snprintf(a_codec_raw, sizeof(a_codec_raw), "mp4a.40.2");
+        snprintf(props->candidate_audio_mime, sizeof(props->candidate_audio_mime), "audio/mp4; codecs=\"%s\"", a_codec_raw);
+      }
+      else if (codec_par->codec_id == AV_CODEC_ID_OPUS)
+      {
+        snprintf(a_codec_raw, sizeof(a_codec_raw), "opus");
+        snprintf(props->candidate_audio_mime, sizeof(props->candidate_audio_mime), "audio/webm; codecs=\"%s\"", a_codec_raw);
+      }
     }
+  }
+
+  // Combine Video and Audio candidate strings for Full MSE SourceBuffer descriptor
+  if (v_codec_raw[0] != '\0' && a_codec_raw[0] != '\0')
+  {
+    const char *container = (strstr(props->candidate_video_mime, "video/webm") != NULL) ? "video/webm" : "video/mp4";
+    snprintf(props->candidate_full_mime, sizeof(props->candidate_full_mime), "%s; codecs=\"%s, %s\"", container, v_codec_raw, a_codec_raw);
+  }
+  else if (props->candidate_video_mime[0] != '\0')
+  {
+    snprintf(props->candidate_full_mime, sizeof(props->candidate_full_mime), "%s", props->candidate_video_mime);
+  }
+  else if (props->candidate_audio_mime[0] != '\0')
+  {
+    snprintf(props->candidate_full_mime, sizeof(props->candidate_full_mime), "%s", props->candidate_audio_mime);
   }
 
   // Context demolition cleanup
@@ -688,6 +917,11 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   }
   AVCodecContext *dec_ctx = avcodec_alloc_context3(decoder);
   avcodec_parameters_to_context(dec_ctx, codec_par);
+
+  // Enable multi-threaded decoding to prevent 4K/HDR bottlenecks
+  dec_ctx->thread_count = 0;
+  dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+
   if (avcodec_open2(dec_ctx, decoder, NULL) < 0)
   {
     avcodec_free_context(&dec_ctx);
@@ -742,10 +976,57 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     return -6; // Failed to decode a usable frame
   }
 
+  // Setup SwsContext for color-space and bit-depth normalization (fixes HDR/10-bit color tinting & distortion)
+  struct SwsContext *sws_ctx = sws_getContext(
+      dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt,
+      dec_ctx->width, dec_ctx->height, AV_PIX_FMT_YUV420P,
+      SWS_BILINEAR, NULL, NULL, NULL);
+
+  if (!sws_ctx)
+  {
+    av_frame_free(&frame);
+    avcodec_free_context(&dec_ctx);
+    avformat_close_input(&fmt_ctx);
+    return -7;
+  }
+
+  int src_range = (dec_ctx->color_range == AVCOL_RANGE_JPEG);
+  const int *src_inv_table = sws_getCoefficients(dec_ctx->colorspace);
+  const int *dst_inv_table = sws_getCoefficients(AVCOL_SPC_BT709);
+  sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
+
+  AVFrame *scaled_frame = av_frame_alloc();
+  if (!scaled_frame)
+  {
+    sws_freeContext(sws_ctx);
+    av_frame_free(&frame);
+    avcodec_free_context(&dec_ctx);
+    avformat_close_input(&fmt_ctx);
+    return -7;
+  }
+  scaled_frame->format = AV_PIX_FMT_YUV420P;
+  scaled_frame->width = dec_ctx->width;
+  scaled_frame->height = dec_ctx->height;
+
+  if (av_frame_get_buffer(scaled_frame, 32) < 0)
+  {
+    sws_freeContext(sws_ctx);
+    av_frame_free(&scaled_frame);
+    av_frame_free(&frame);
+    avcodec_free_context(&dec_ctx);
+    avformat_close_input(&fmt_ctx);
+    return -7;
+  }
+
+  sws_scale(sws_ctx, (const uint8_t *const *)frame->data, frame->linesize,
+            0, dec_ctx->height, scaled_frame->data, scaled_frame->linesize);
+
   // 5. Setup internal MJPEG image encoder pipeline
   const AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
   if (!encoder)
   {
+    sws_freeContext(sws_ctx);
+    av_frame_free(&scaled_frame);
     av_frame_free(&frame);
     avcodec_free_context(&dec_ctx);
     avformat_close_input(&fmt_ctx);
@@ -761,11 +1042,12 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
   if (avcodec_open2(enc_ctx, encoder, NULL) < 0)
   {
-    av_frame_free(&frame);
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // Try fallback if YUVJ420P is constrained
     if (avcodec_open2(enc_ctx, encoder, NULL) < 0)
     {
       avcodec_free_context(&enc_ctx);
+      sws_freeContext(sws_ctx);
+      av_frame_free(&scaled_frame);
       av_frame_free(&frame);
       avcodec_free_context(&dec_ctx);
       avformat_close_input(&fmt_ctx);
@@ -774,12 +1056,12 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   }
 
   // Ensure our frame format matches encoder expectations or enforce color ranges
-  frame->format = enc_ctx->pix_fmt;
+  scaled_frame->format = enc_ctx->pix_fmt;
 
   AVPacket *enc_pkt = av_packet_alloc();
   int encode_success = 0;
 
-  if (avcodec_send_frame(enc_ctx, frame) >= 0)
+  if (avcodec_send_frame(enc_ctx, scaled_frame) >= 0)
   {
     if (avcodec_receive_packet(enc_ctx, enc_pkt) >= 0)
     {
@@ -796,6 +1078,8 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
   // Final multi-context teardown and cleanup routines
   av_packet_free(&enc_pkt);
+  sws_freeContext(sws_ctx);
+  av_frame_free(&scaled_frame);
   av_frame_free(&frame);
   avcodec_free_context(&enc_ctx);
   avcodec_free_context(&dec_ctx);
@@ -841,8 +1125,333 @@ int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms)
   return 0;
 }
 
+int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
+{
+  int ret = 0;
+  TranscodeContext tx_ctx;
+  AVFormatContext *out_fmt_ctx = NULL;
+  AVPacket *pkt = NULL;
+
+  int out_video_idx = -1;
+  int out_audio_idx = -1;
+
+  tx_ctx.go_user_token = go_token;
+  tx_ctx.go_callback = goStreamWriteCallback;
+
+  // 1. Initialize in-memory fMP4 muxer context
+  ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
+  if (ret < 0)
+  {
+    LOG_FFMPEG_ERR("C-MUX", "[PASSTHROUGH] Failed to initialize fMP4 muxer", ret);
+    return ret;
+  }
+
+  // 2. Direct Video Stream Copy (No Decoder/Encoder Context Needed)
+  if (dec_ctx->video_stream_idx >= 0)
+  {
+    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+    if (!out_stream)
+    {
+      LOG_ERROR("C-MUX", "[PASSTHROUGH] Failed to allocate video stream");
+      free_fmp4_muxer(out_fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+    if (ret < 0)
+    {
+      LOG_FFMPEG_ERR("C-MUX", "[PASSTHROUGH] Failed to copy video parameters", ret);
+      free_fmp4_muxer(out_fmt_ctx);
+      return ret;
+    }
+    out_stream->codecpar->codec_tag = 0;
+    out_video_idx = out_stream->index;
+  }
+
+  // 3. Direct Audio Stream Copy (No Decoder/Encoder Context Needed)
+  if (dec_ctx->audio_stream_idx >= 0)
+  {
+    AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
+    AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+    if (!out_stream)
+    {
+      LOG_ERROR("C-MUX", "[PASSTHROUGH] Failed to allocate audio stream");
+      free_fmp4_muxer(out_fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+    ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+    if (ret < 0)
+    {
+      LOG_FFMPEG_ERR("C-MUX", "[PASSTHROUGH] Failed to copy audio parameters", ret);
+      free_fmp4_muxer(out_fmt_ctx);
+      return ret;
+    }
+    out_stream->codecpar->codec_tag = 0;
+    out_audio_idx = out_stream->index;
+  }
+
+  // Write initial fMP4 header segment
+  ret = write_fmp4_header(out_fmt_ctx);
+  if (ret < 0)
+  {
+    LOG_FFMPEG_ERR("C-MUX", "[PASSTHROUGH] Failed to write initial fMP4 header", ret);
+    free_fmp4_muxer(out_fmt_ctx);
+    return ret;
+  }
+
+  pkt = av_packet_alloc();
+  if (!pkt)
+  {
+    LOG_ERROR("C-MUX", "[PASSTHROUGH] Failed to allocate packet");
+    free_fmp4_muxer(out_fmt_ctx);
+    return AVERROR(ENOMEM);
+  }
+
+  // Real-time pacing variables
+  int64_t stream_start_time_us = av_gettime_relative();
+  int64_t total_pause_us = 0;
+  int64_t current_pause_start_us = 0;
+  const int64_t READ_AHEAD_US = 10000000LL; // 10 seconds of runway
+  int just_seeked = 0;
+  int eof_reached = 0;
+
+  LOG_INFO("C-MUX", "Entering zero-copy passthrough streaming loop");
+
+  while (true)
+  {
+    // Atomic control flag checks from Go routine
+    if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE))
+    {
+      LOG_DEBUG("C-MUX", "[PASSTHROUGH] Stop requested. Exiting pipeline.");
+      break;
+    }
+
+    // Handle seeking in passthrough mode
+    if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+    {
+      int64_t target_ms = __atomic_load_n(&dec_ctx->seek_target_ms, __ATOMIC_ACQUIRE);
+      int64_t seek_target = (int64_t)(target_ms * (int64_t)AV_TIME_BASE / 1000);
+      int stream_idx = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
+
+      if (stream_idx >= 0)
+      {
+        seek_target = av_rescale_q(seek_target, AV_TIME_BASE_Q, dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
+      }
+
+      int seek_ret = av_seek_frame(dec_ctx->fmt_ctx, stream_idx, seek_target, AVSEEK_FLAG_BACKWARD);
+      if (seek_ret >= 0)
+      {
+        LOG_INFO("C-SEEK", "[PASSTHROUGH] Executing backward seek to ms: %lld", (long long)target_ms);
+
+        // Re-initialize fMP4 muxer context to reset DTS timeline for the browser
+        if (out_fmt_ctx)
+        {
+          free_fmp4_muxer(out_fmt_ctx);
+          out_fmt_ctx = NULL;
+        }
+
+        if (init_fmp4_muxer(&out_fmt_ctx, &tx_ctx) < 0)
+        {
+          LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to re-initialize fMP4 muxer after seek");
+        }
+
+        // Re-map video stream
+        if (dec_ctx->video_stream_idx >= 0 && out_fmt_ctx)
+        {
+          AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+          if (out_stream)
+          {
+            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar);
+            out_stream->codecpar->codec_tag = 0;
+            out_video_idx = out_stream->index;
+          }
+        }
+
+        // Re-map audio stream
+        if (dec_ctx->audio_stream_idx >= 0 && out_fmt_ctx)
+        {
+          AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
+          if (out_stream)
+          {
+            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar);
+            out_stream->codecpar->codec_tag = 0;
+            out_audio_idx = out_stream->index;
+          }
+        }
+
+        if (out_fmt_ctx)
+        {
+          write_fmp4_header(out_fmt_ctx);
+        }
+
+        stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
+        total_pause_us = 0;
+        current_pause_start_us = 0;
+        just_seeked = 1;
+        eof_reached = 0;
+
+        extern void set_session_eof(uintptr_t token, int is_eof);
+        set_session_eof(tx_ctx.go_user_token, 0);
+
+        LOG_INFO("C-SEEK", "[PASSTHROUGH] Seek to %lld ms succeeded.", (long long)target_ms);
+      }
+      else
+      {
+        LOG_FFMPEG_ERR("C-SEEK", "[PASSTHROUGH] AVSeek execution failed", seek_ret);
+      }
+
+      __atomic_store_n(&dec_ctx->seek_requested, 0, __ATOMIC_RELEASE);
+      continue;
+    }
+
+    // Handle pausing
+    if (__atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+    {
+      if (current_pause_start_us == 0)
+        current_pause_start_us = av_gettime_relative();
+      av_usleep(20000);
+      continue;
+    }
+    else if (current_pause_start_us > 0)
+    {
+      total_pause_us += (av_gettime_relative() - current_pause_start_us);
+      current_pause_start_us = 0;
+    }
+
+    // Read packet from demuxer
+    if (!eof_reached)
+    {
+      ret = av_read_frame(dec_ctx->fmt_ctx, pkt);
+      if (ret == AVERROR_EOF)
+      {
+        LOG_INFO("C-READ", "[PASSTHROUGH] EOF reached.");
+        eof_reached = 1;
+
+        if (out_fmt_ctx)
+        {
+          av_write_trailer(out_fmt_ctx);
+        }
+
+        extern void set_session_eof(uintptr_t token, int is_eof);
+        set_session_eof(tx_ctx.go_user_token, 1);
+      }
+      else if (ret < 0)
+      {
+        LOG_FFMPEG_ERR("C-READ", "[PASSTHROUGH] Fatal packet read error", ret);
+        break;
+      }
+    }
+
+    if (eof_reached)
+    {
+      av_usleep(100000);
+      continue;
+    }
+
+    // Determine target output stream index
+    int target_out_idx = -1;
+    AVStream *in_stream = NULL;
+
+    if (pkt->stream_index == dec_ctx->video_stream_idx)
+    {
+      target_out_idx = out_video_idx;
+      in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+    }
+    else if (pkt->stream_index == dec_ctx->audio_stream_idx)
+    {
+      target_out_idx = out_audio_idx;
+      in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
+    }
+
+    // Perform packet copy and real-time pacing
+    if (target_out_idx >= 0 && in_stream)
+    {
+      AVStream *out_stream = out_fmt_ctx->streams[target_out_idx];
+
+      double calculated_pts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts * av_q2d(in_stream->time_base) : 0.0;
+      int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
+
+      extern void set_session_pts(uintptr_t token, double pts);
+      set_session_pts(tx_ctx.go_user_token, calculated_pts);
+
+      int interrupted = 0;
+
+      if (just_seeked)
+      {
+        stream_start_time_us = av_gettime_relative() - pkt_time_us;
+        just_seeked = 0;
+      }
+      else
+      {
+        while (true)
+        {
+          if (__atomic_load_n(&dec_ctx->stop_requested, __ATOMIC_ACQUIRE) ||
+              __atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE) ||
+              __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+          {
+            interrupted = 1;
+            break;
+          }
+
+          int64_t elapsed_us = av_gettime_relative() - stream_start_time_us - total_pause_us;
+          if (pkt_time_us > elapsed_us + READ_AHEAD_US)
+            av_usleep(5000);
+          else
+            break;
+        }
+      }
+
+      if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
+      {
+        av_packet_unref(pkt);
+        continue;
+      }
+
+      if (!interrupted)
+      {
+        // Fallback for containers (like MKV) that do not set explicit DTS on packets
+        if (pkt->dts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE)
+        {
+          pkt->dts = pkt->pts;
+        }
+
+        // Rescale timestamps from input demuxer timebase to output fMP4 stream timebase
+        av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+        pkt->stream_index = target_out_idx;
+
+        LOG_DEBUG("C-MUX", "[PASSTHROUGH] Writing packet stream=%d pts=%lld dts=%lld size=%d",
+                  target_out_idx, (long long)pkt->pts, (long long)pkt->dts, pkt->size);
+
+        if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
+        {
+          LOG_ERROR("C-MUX", "[PASSTHROUGH] Failed to write packet to fMP4 output. Halting.");
+          __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+        }
+      }
+    }
+
+    av_packet_unref(pkt);
+  }
+
+  LOG_INFO("C-MUX", "[PASSTHROUGH] Commencing final teardown of passthrough pipeline.");
+
+  if (pkt)
+    av_packet_free(&pkt);
+  if (out_fmt_ctx)
+    free_fmp4_muxer(out_fmt_ctx);
+
+  return ret;
+}
+
 int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 {
+  // ZERO-COPY PASSTHROUGH SHORT-CIRCUIT
+  if (dec_ctx->is_passthrough)
+  {
+    LOG_INFO("C-MUX", "Routing execution to Zero-Copy Passthrough pipeline");
+    return run_passthrough_mux_loop(dec_ctx, go_token);
+  }
+
   int ret;
   TranscodeContext tx_ctx;
   AVFormatContext *out_fmt_ctx = NULL;
@@ -948,6 +1557,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         ret = AVERROR(ENOMEM);
         goto cleanup;
       }
+
+      // Configure explicit color matrix mapping (crucial for HDR / BT.2020 -> BT.709 conversion)
+      int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
+      const int *src_inv_table = sws_getCoefficients(dec_ctx->video_dec_ctx->colorspace);
+      const int *dst_inv_table = sws_getCoefficients(AVCOL_SPC_BT709);
+      sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
 
       enc_video_frame = av_frame_alloc();
       if (!enc_video_frame)
@@ -1456,7 +2071,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
       else
       {
-        // Full H.264 re-encode path (with real-time pacing)
+        // Full H.264 re-encode path (with real-time pacing, hardware-to-system frame transfer, and dynamic sws context)
         if (avcodec_send_packet(dec_ctx->video_dec_ctx, pkt) >= 0)
         {
           // CRITICAL FIX: Track the seek interrupt for the outer loop
@@ -1464,12 +2079,36 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
           while (avcodec_receive_frame(dec_ctx->video_dec_ctx, frame) >= 0)
           {
+            AVFrame *sw_frame = frame;
+
+            // 1. Generic Hardware Surface Check:
+            // Transfer GPU hardware surface frames (VideoToolbox / D3D11 / VAAPI / CUDA)
+            // into CPU system memory so sws_scale can access valid pixel memory pointers.
+            const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
+            if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+            {
+              AVFrame *cpu_frame = av_frame_alloc();
+              if (cpu_frame)
+              {
+                if (av_hwframe_transfer_data(cpu_frame, frame, 0) >= 0)
+                {
+                  cpu_frame->pts = frame->pts;
+                  cpu_frame->pict_type = frame->pict_type;
+                  sw_frame = cpu_frame;
+                }
+                else
+                {
+                  av_frame_free(&cpu_frame);
+                }
+              }
+            }
+
             // Convert PTS from the input stream time_base -> encoder time_base
             AVStream *in_stream = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
 
             // Real-time pacing (identical logic to the passthrough path)
-            double calculated_pts = frame->pts != AV_NOPTS_VALUE
-                                        ? frame->pts * av_q2d(in_stream->time_base)
+            double calculated_pts = sw_frame->pts != AV_NOPTS_VALUE
+                                        ? sw_frame->pts * av_q2d(in_stream->time_base)
                                         : 0.0;
             int64_t pkt_time_us = (int64_t)(calculated_pts * 1000000.0);
 
@@ -1508,29 +2147,58 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             // CRITICAL FIX: Break the inner frame loop immediately
             if (__atomic_load_n(&dec_ctx->seek_requested, __ATOMIC_ACQUIRE))
             {
+              if (sw_frame != frame)
+                av_frame_free(&sw_frame);
               seek_interrupted = 1;
               break;
             }
 
             if (interrupted)
+            {
+              if (sw_frame != frame)
+                av_frame_free(&sw_frame);
               continue; // Skip encoding this frame if paused/stopped
+            }
+
+            // 2. Dynamic Scale Context Management with Direct Color Conversion:
+            // Reuses or updates sws_ctx based on sw_frame's ACTUAL pixel format (e.g. NV12/P010LE).
+            // Prevents "bad src image pointers" errors when scaling transferred GPU frames.
+            sws_ctx = sws_getCachedContext(
+                sws_ctx,
+                sw_frame->width, sw_frame->height, sw_frame->format,
+                h264_enc_ctx->width, h264_enc_ctx->height, AV_PIX_FMT_YUV420P,
+                SWS_FAST_BILINEAR, NULL, NULL, NULL);
+
+            if (sws_ctx)
+            {
+              // CRITICAL FIX: Standardize coefficients to prevent sws_scale from
+              // inserting a slow intermediate YUV -> RGB -> YUV conversion pass.
+              int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
+              int dst_range = 0; // MPEG range
+              const int *table = sws_getCoefficients(SWS_CS_DEFAULT);
+
+              sws_setColorspaceDetails(sws_ctx,
+                                       table, src_range,
+                                       table, dst_range,
+                                       0, 1 << 16, 1 << 16);
+            }
 
             // Colour conversion + encode
             int scale_ret = sws_scale(sws_ctx,
-                                      (const uint8_t *const *)frame->data, frame->linesize,
-                                      0, frame->height,
+                                      (const uint8_t *const *)sw_frame->data, sw_frame->linesize,
+                                      0, sw_frame->height,
                                       enc_video_frame->data, enc_video_frame->linesize);
             if (scale_ret < 0)
             {
               LOG_WARN("C-MUX", "Hardware scaling failed for current video frame");
             }
 
-            enc_video_frame->pts = av_rescale_q(frame->pts,
+            enc_video_frame->pts = av_rescale_q(sw_frame->pts,
                                                 in_stream->time_base,
                                                 h264_enc_ctx->time_base);
 
             // CRITICAL FIX: Force IDR Keyframe on the encoder input frame using modern FFmpeg flags
-            if (frame->pict_type == AV_PICTURE_TYPE_I)
+            if (sw_frame->pict_type == AV_PICTURE_TYPE_I)
             {
               enc_video_frame->pict_type = AV_PICTURE_TYPE_I;
               enc_video_frame->flags |= AV_FRAME_FLAG_KEY;
@@ -1561,6 +2229,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
                 av_packet_unref(enc_video_pkt);
               }
+            }
+
+            // Cleanup temporary CPU frame mapping if allocated for GPU hardware surface
+            if (sw_frame != frame)
+            {
+              av_frame_free(&sw_frame);
             }
           }
 

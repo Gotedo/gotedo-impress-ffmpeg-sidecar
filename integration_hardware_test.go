@@ -83,6 +83,35 @@ func generateRealTestMedia(t *testing.T) (string, func()) {
 	}
 }
 
+// generate4KHDRTestMedia resolves the 4K HEVC HDR sample file from current dir or assets/
+func generate4KHDRTestMedia(t *testing.T) (string, func()) {
+	t.Helper()
+
+	pathsToTry := []string{
+		"4K HEVC 59.940 Broadcast Capture Sample.mkv",
+		filepath.Join("assets", "4K HEVC 59.940 Broadcast Capture Sample.mkv"),
+	}
+
+	var selectedPath string
+	for _, p := range pathsToTry {
+		absP, err := filepath.Abs(p)
+		if err == nil {
+			if _, err := os.Stat(absP); err == nil {
+				selectedPath = absP
+				break
+			}
+		}
+	}
+
+	if selectedPath == "" {
+		t.Skip("4K HDR test asset '4K HEVC 59.940 Broadcast Capture Sample.mkv' not found. Skipping 4K tests.")
+	}
+
+	return selectedPath, func() {
+		// No-op: Do not delete the source repository asset
+	}
+}
+
 // -------------------------------------------------------------------------
 // Integration Test 1: Real System Soundcard Enumeration
 // -------------------------------------------------------------------------
@@ -343,4 +372,117 @@ func TestIntegration_VideoScreenshotExtractionAndDiskWrite(t *testing.T) {
 	}
 
 	t.Logf("[SCREENSHOT SUCCESS] Thumbnail saved for visual inspection! Find it here:\n👉 %s", outputPath)
+}
+
+// -------------------------------------------------------------------------
+// Integration Test 5: Candidate RFC 6381 MIME Generation (4K HEVC HDR)
+// -------------------------------------------------------------------------
+func TestIntegration_CandidateMimeProbing4KHDR(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generate4KHDRTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	t.Logf("[PROBE 4K HDR] Requesting candidate MIME descriptors for: %s", mediaPath)
+	resp, err := client.GetMediaProperties(ctx, &proto.MetadataRequest{
+		FilePath: mediaPath,
+	})
+	if err != nil {
+		t.Fatalf("Failed to probe 4K HDR media properties: %v", err)
+	}
+
+	if resp.GetCandidateVideoMime() == "" {
+		t.Error("Candidate video MIME string is empty")
+	}
+	if resp.GetCandidateAudioMime() == "" {
+		t.Error("Candidate audio MIME string is empty")
+	}
+	if resp.GetCandidateFullMime() == "" {
+		t.Error("Candidate full MIME string is empty")
+	}
+
+	t.Logf("[PROBE 4K HDR] Candidate Video MIME : %s", resp.GetCandidateVideoMime())
+	t.Logf("[PROBE 4K HDR] Candidate Audio MIME : %s", resp.GetCandidateAudioMime())
+	t.Logf("[PROBE 4K HDR] Candidate Full MIME  : %s", resp.GetCandidateFullMime())
+}
+
+// -------------------------------------------------------------------------
+// Integration Test 6: Zero-Copy Passthrough Streaming Pipeline (4K HEVC HDR)
+// -------------------------------------------------------------------------
+func TestIntegration_PassthroughStreamingPipeline4KHDR(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generate4KHDRTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Logf("[PASSTHROUGH TEST] Starting zero-copy passthrough stream for 4K asset: %s", mediaPath)
+	stream, err := client.StartStream(ctx, &proto.StreamRequest{
+		TargetId:   "passthrough-4k-target",
+		FilePath:   mediaPath,
+		StreamMode: "passthrough",
+	})
+	if err != nil {
+		t.Fatalf("Failed to initialize passthrough stream over gRPC: %v", err)
+	}
+
+	errChan := make(chan error, 1)
+	chunkCount := 0
+	totalBytes := 0
+
+	go func() {
+		outFile, err := os.Create("test_output_passthrough.mp4")
+		if err != nil {
+			t.Errorf("Failed to create test output file: %v", err)
+			return
+		}
+		defer outFile.Close()
+
+		for {
+			resp, err := stream.Recv()
+			if err == io.EOF {
+				errChan <- nil
+				return
+			}
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			chunk := resp.GetFmp4Chunk()
+			if len(chunk) > 0 {
+				chunkCount++
+				totalBytes += len(chunk)
+
+				if _, err := outFile.Write(chunk); err != nil {
+					t.Errorf("Failed to write passthrough chunk to disk: %v", err)
+				}
+			}
+
+			// Capture initial 30 fMP4 fragments to verify pipeline stability
+			if chunkCount >= 30 {
+				errChan <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-errChan:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Passthrough stream encountered fatal error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout: Passthrough stream failed to deliver 30 fMP4 chunks within 10 seconds")
+	}
+
+	cancel()
+	t.Logf("[PASSTHROUGH SUCCESS] Successfully remuxed %d chunks (%d bytes total) in zero-copy mode.", chunkCount, totalBytes)
 }

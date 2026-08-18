@@ -78,6 +78,7 @@ type StreamRequest struct {
 	TargetId      string                 `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // "preview" or projector screen ID string
 	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
 	AudioDeviceId string                 `protobuf:"bytes,3,opt,name=audio_device_id,json=audioDeviceId,proto3" json:"audio_device_id,omitempty"`
+	StreamMode    string                 `protobuf:"bytes,4,opt,name=stream_mode,json=streamMode,proto3" json:"stream_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -129,6 +130,13 @@ func (x *StreamRequest) GetFilePath() string {
 func (x *StreamRequest) GetAudioDeviceId() string {
 	if x != nil {
 		return x.AudioDeviceId
+	}
+	return ""
+}
+
+func (x *StreamRequest) GetStreamMode() string {
+	if x != nil {
+		return x.StreamMode
 	}
 	return ""
 }
@@ -719,6 +727,10 @@ type MetadataResponse struct {
 	SampleRate         int32  `protobuf:"varint,30,opt,name=sample_rate,json=sampleRate,proto3" json:"sample_rate,omitempty"`          // Audio sampling clock rate (Hz, e.g., 48000)
 	ChannelLayout      string `protobuf:"bytes,31,opt,name=channel_layout,json=channelLayout,proto3" json:"channel_layout,omitempty"`  // e.g., "stereo", "5.1(side)", "mono"
 	AudioBitRate       int64  `protobuf:"varint,32,opt,name=audio_bit_rate,json=audioBitRate,proto3" json:"audio_bit_rate,omitempty"`  // Audio track individual operational bitrate
+	// Candidate MIME string fields to hold the pre-calculated webview compatibility targets
+	CandidateVideoMime string `protobuf:"bytes,33,opt,name=candidate_video_mime,json=candidateVideoMime,proto3" json:"candidate_video_mime,omitempty"` // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0"' or 'video/mp4; codecs="avc1.64002a"'
+	CandidateAudioMime string `protobuf:"bytes,34,opt,name=candidate_audio_mime,json=candidateAudioMime,proto3" json:"candidate_audio_mime,omitempty"` // e.g., 'audio/mp4; codecs="mp4a.40.2"' or 'audio/webm; codecs="opus"'
+	CandidateFullMime  string `protobuf:"bytes,35,opt,name=candidate_full_mime,json=candidateFullMime,proto3" json:"candidate_full_mime,omitempty"`    // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0, mp4a.40.2"'
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -977,6 +989,27 @@ func (x *MetadataResponse) GetAudioBitRate() int64 {
 	return 0
 }
 
+func (x *MetadataResponse) GetCandidateVideoMime() string {
+	if x != nil {
+		return x.CandidateVideoMime
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetCandidateAudioMime() string {
+	if x != nil {
+		return x.CandidateAudioMime
+	}
+	return ""
+}
+
+func (x *MetadataResponse) GetCandidateFullMime() string {
+	if x != nil {
+		return x.CandidateFullMime
+	}
+	return ""
+}
+
 type ScreenshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
@@ -1165,11 +1198,13 @@ var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/stream.proto\x12\x06ffmpeg\"q\n" +
+	"\x12proto/stream.proto\x12\x06ffmpeg\"\x92\x01\n" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
-	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\"X\n" +
+	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\x12\x1f\n" +
+	"\vstream_mode\x18\x04 \x01(\tR\n" +
+	"streamMode\"X\n" +
 	"\x0eStreamResponse\x12\x1d\n" +
 	"\n" +
 	"fmp4_chunk\x18\x01 \x01(\fR\tfmp4Chunk\x12\x10\n" +
@@ -1206,7 +1241,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0fDevicesResponse\x12-\n" +
 	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices\".\n" +
 	"\x0fMetadataRequest\x12\x1b\n" +
-	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\xbf\b\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\xd3\t\n" +
 	"\x10MetadataResponse\x12\x1f\n" +
 	"\vformat_name\x18\x01 \x01(\tR\n" +
 	"formatName\x12(\n" +
@@ -1246,7 +1281,10 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\vsample_rate\x18\x1e \x01(\x05R\n" +
 	"sampleRate\x12%\n" +
 	"\x0echannel_layout\x18\x1f \x01(\tR\rchannelLayout\x12$\n" +
-	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate\"I\n" +
+	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate\x120\n" +
+	"\x14candidate_video_mime\x18! \x01(\tR\x12candidateVideoMime\x120\n" +
+	"\x14candidate_audio_mime\x18\" \x01(\tR\x12candidateAudioMime\x12.\n" +
+	"\x13candidate_full_mime\x18# \x01(\tR\x11candidateFullMime\"I\n" +
 	"\x11ScreenshotRequest\x12\x1b\n" +
 	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x12\x17\n" +
 	"\atime_ms\x18\x02 \x01(\x03R\x06timeMs\"P\n" +

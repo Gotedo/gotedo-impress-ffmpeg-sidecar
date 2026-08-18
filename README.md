@@ -411,7 +411,7 @@ rm -rf build_cache/ dist/
 To run integration tests for this sidecar, do:
 
 ```bash
-/bin/task build IS_TEST=true
+./bin/task build IS_TEST=true
 ```
 
 ---

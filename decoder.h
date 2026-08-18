@@ -18,6 +18,15 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdint.h>
+
+#ifndef AV_PROFILE_UNKNOWN
+#define AV_PROFILE_UNKNOWN -99
+#endif
+
+#ifndef AV_LEVEL_UNKNOWN
+#define AV_LEVEL_UNKNOWN -99
+#endif
 
 // LOGGING SYSTEM
 // Driven by compile-time tags. In Go/CGO, pass -DPRODUCTION
@@ -103,6 +112,7 @@ typedef struct DemuxDecContext
   // Video Decoder State
   int video_stream_idx;
   AVCodecContext *video_dec_ctx;
+  int is_passthrough; // 1 = Zero-Copy Remux, 0 = Transcode
 
   // Audio Decoder State
   int audio_stream_idx;
@@ -148,6 +158,7 @@ typedef struct
 // Media properties schema
 typedef struct
 {
+  // Container & Global Metadata
   char format_name[64];
   char format_long_name[128];
   int64_t duration_ms;
@@ -162,6 +173,7 @@ typedef struct
   char creation_time[64];
   char last_modified[64];
 
+  // Primary Video Stream Parameters
   int32_t has_video;
   char video_codec[32];
   char video_codec_long_name[128];
@@ -175,6 +187,7 @@ typedef struct
   char color_transfer[32];
   char color_primaries[32];
 
+  // Primary Audio Stream Parameters
   int32_t has_audio;
   char audio_codec[32];
   char audio_codec_long_name[128];
@@ -183,6 +196,11 @@ typedef struct
   int32_t sample_rate;
   char channel_layout[64];
   int64_t audio_bit_rate;
+
+  // Candidate Browser MIME Codec Strings
+  char candidate_video_mime[128];
+  char candidate_audio_mime[128];
+  char candidate_full_mime[256];
 } CMediaProperties;
 
 // Function prototypes
@@ -252,5 +270,8 @@ void request_stop_on_dec_ctx(DemuxDecContext *ctx);
 
 // Media probe banner
 void log_input_stream_properties(DemuxDecContext *ctx, const char *file_path);
+
+// Forward declaration of the zero-copy passthrough loop
+int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token);
 
 #endif // DECODER_H
