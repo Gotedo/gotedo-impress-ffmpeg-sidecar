@@ -300,8 +300,9 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	targetID := req.GetTargetId()
 	streamMode := req.GetStreamMode()
 	filePath := req.GetFilePath()
+	streamContainer := req.GetContainer()
 
-	log.Printf("[SIDECAR] Received StartStream request for target=%s; file: %s; stream mode: %s", targetID, filePath, streamMode)
+	log.Printf("[SIDECAR] Received StartStream request for target=%s; file: %s; stream mode: %s; stream container: %s", targetID, filePath, streamMode, streamContainer)
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
@@ -341,7 +342,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 	// Map Protobuf ContainerFormat to C PassthroughContainerType
 	var containerType C.PassthroughContainerType = C.CONTAINER_FMP4
-	if req.GetContainer() == proto.PassthroughContainerFormat_CONTAINER_WEBM {
+	if streamContainer == proto.PassthroughContainerFormat_CONTAINER_WEBM {
 		containerType = C.CONTAINER_WEBM
 	}
 

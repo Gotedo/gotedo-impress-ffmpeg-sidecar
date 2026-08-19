@@ -234,8 +234,10 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   ctx->video_dec_ctx = NULL;
   ctx->audio_dec_ctx = NULL;
   ctx->swr_ctx = NULL;
-  ctx->is_passthrough = 0;
-  ctx->container_type = CONTAINER_FMP4; // Default safe fallback
+
+  // CAUTION: Disabled to avoid overriding the values set in Go
+  // ctx->is_passthrough = 0;
+  // ctx->container_type = CONTAINER_FMP4; // Default safe fallback
 
   // Enable verbose FFmpeg internal logging
   av_log_set_level(AV_LOG_VERBOSE);
@@ -508,7 +510,11 @@ int init_passthrough_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_c
     }
 
     // Configure WebM live cluster streaming flags for real-time MSE ingestion
+    // 'live': Enables realtime stream mode (omits duration in header, writes simple blocks)
     av_opt_set((*out_fmt_ctx)->priv_data, "live", "1", 0);
+
+    // 'cluster_time_limit': Force cluster creation every 1000ms (1 second) or on keyframes
+    av_opt_set((*out_fmt_ctx)->priv_data, "cluster_time_limit", "1000", 0);
   }
   else
   {
@@ -523,6 +529,10 @@ int init_passthrough_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_c
     av_opt_set((*out_fmt_ctx)->priv_data, "movflags",
                "empty_moov+default_base_moof+frag_keyframe+separate_moof", 0);
   }
+
+  // FORCE SHIFT NEGATIVE PTS/DTS TO ZERO
+  // Resolves Opus negative pre-roll timestamps (e.g. pts=-1360) crashing WebKit MSE
+  av_opt_set(*out_fmt_ctx, "avoid_negative_ts", "make_zero", 0);
 
   avio_buf = (uint8_t *)av_malloc(avio_buf_size);
   if (!avio_buf)
