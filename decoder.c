@@ -1088,43 +1088,6 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   return encode_success ? 0 : -9;
 }
 
-/**
- * Seeks to a specific time in milliseconds.
- * Flushes decoders and seeks the format context.
- * Note: This is a basic implementation. Full seamless seeking while streaming
- * fMP4 to MSE requires additional frontend handling.
- */
-int seek_playback(DemuxDecContext *dec_ctx, int64_t seek_time_ms)
-{
-  if (!dec_ctx || !dec_ctx->fmt_ctx)
-  {
-    return -1;
-  }
-
-  int64_t seek_target = (int64_t)(seek_time_ms * (int64_t)AV_TIME_BASE / 1000);
-
-  // Seek on video stream if available, otherwise on default
-  int stream_index = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
-
-  int ret = av_seek_frame(dec_ctx->fmt_ctx, stream_index, seek_target, AVSEEK_FLAG_BACKWARD);
-  if (ret < 0)
-  {
-    return ret;
-  }
-
-  // Flush decoders
-  if (dec_ctx->video_dec_ctx)
-  {
-    avcodec_flush_buffers(dec_ctx->video_dec_ctx);
-  }
-  if (dec_ctx->audio_dec_ctx)
-  {
-    avcodec_flush_buffers(dec_ctx->audio_dec_ctx);
-  }
-
-  return 0;
-}
-
 int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
 {
   int ret = 0;
@@ -1214,6 +1177,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
   const int64_t READ_AHEAD_US = 2000000LL; // 2 seconds of runway (prevents high-bitrate MSE buffer quota eviction)
   int just_seeked = 0;
   int eof_reached = 0;
+  int trailer_written = 0; // Prevents duplicate fMP4 trailer writes across seeks
 
   // Track previous stream DTS to enforce strict monotonicity for fMP4
   int64_t last_video_dts = AV_NOPTS_VALUE;
@@ -1247,7 +1211,8 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
       {
         LOG_INFO("C-SEEK", "[PASSTHROUGH] Executing backward seek to ms: %lld", (long long)target_ms);
 
-        // Flush demuxer buffers to eliminate stale packets after seeking
+        // Flushes internal demuxer packet queues so pre-seek packets
+        // do not leak into the new fMP4 segment.
         avformat_flush(dec_ctx->fmt_ctx);
 
         // Re-initialize fMP4 muxer context to reset DTS timeline for the browser
@@ -1268,7 +1233,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
           AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
           if (out_stream)
           {
-            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar);
+            if (avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx]->codecpar) < 0)
+            {
+              LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to map video parameters to new muxer");
+            }
             out_stream->codecpar->codec_tag = 0;
             out_video_idx = out_stream->index;
           }
@@ -1280,7 +1248,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
           AVStream *out_stream = avformat_new_stream(out_fmt_ctx, NULL);
           if (out_stream)
           {
-            avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar);
+            if (avcodec_parameters_copy(out_stream->codecpar, dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar) < 0)
+            {
+              LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to map audio parameters to new muxer");
+            }
             out_stream->codecpar->codec_tag = 0;
             out_audio_idx = out_stream->index;
           }
@@ -1288,7 +1259,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
         if (out_fmt_ctx)
         {
-          write_fmp4_header(out_fmt_ctx);
+          if (write_fmp4_header(out_fmt_ctx) < 0)
+          {
+            LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to write fMP4 header after seek");
+          }
         }
 
         stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
@@ -1296,6 +1270,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
         current_pause_start_us = 0;
         just_seeked = 1;
         eof_reached = 0;
+        trailer_written = 0;
 
         // Reset DTS state trackers for the new post-seek segment timeline
         last_video_dts = AV_NOPTS_VALUE;
@@ -1338,9 +1313,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
         LOG_INFO("C-READ", "[PASSTHROUGH] EOF reached.");
         eof_reached = 1;
 
-        if (out_fmt_ctx)
+        if (out_fmt_ctx && !trailer_written)
         {
           av_write_trailer(out_fmt_ctx);
+          trailer_written = 1;
         }
 
         extern void set_session_eof(uintptr_t token, int is_eof);
@@ -1377,6 +1353,16 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token)
     // Perform packet copy and real-time pacing
     if (target_out_idx >= 0 && in_stream)
     {
+      // Post-seek keyframe guard: drop lead-in P/B frames returned by demuxer
+      if (just_seeked && pkt->stream_index == dec_ctx->video_stream_idx)
+      {
+        if (!(pkt->flags & AV_PKT_FLAG_KEY))
+        {
+          av_packet_unref(pkt);
+          continue; // Wait for the first actual IDR/I-frame
+        }
+      }
+
       AVStream *out_stream = out_fmt_ctx->streams[target_out_idx];
 
       // Fall back to DTS if PTS is unassigned in container packets (e.g., MOV/MP4 demuxing)
@@ -2105,6 +2091,18 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       else
       {
         // Full H.264 re-encode path (with real-time pacing, hardware-to-system frame transfer, and dynamic sws context)
+
+        // Post-seek keyframe guard for decoder:
+        // Do not feed non-keyframes into a flushed decoder post-seek
+        if (just_seeked)
+        {
+          if (!(pkt->flags & AV_PKT_FLAG_KEY))
+          {
+            av_packet_unref(pkt);
+            continue; // Skip non-keyframe packets until the first valid IDR frame
+          }
+        }
+
         if (avcodec_send_packet(dec_ctx->video_dec_ctx, pkt) >= 0)
         {
           // CRITICAL FIX: Track the seek interrupt for the outer loop

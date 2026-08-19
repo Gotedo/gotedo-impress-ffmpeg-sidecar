@@ -90,7 +90,7 @@ func (s *PlaybackSession) captureCurrentPTSForPause() float64 {
 // registerPlayback stores (or replaces) a playback session for a target.
 // Safe to call even if a session already exists for that target.
 func registerPlayback(targetID string, sess *PlaybackSession) {
-	if _, exists := getPlayback(targetID); exists {
+	if _, exists := getPlaybackSession(targetID); exists {
 		log.Printf("[SIDECAR] Overwriting existing playback for target: %s", targetID)
 	}
 
@@ -141,8 +141,8 @@ func unregisterPlayback(targetID string) {
 	log.Printf("[SIDECAR -> unregisterPlayback] Unregistered playback for target: %s", targetID)
 }
 
-// getPlayback returns the active session for a target (thread-safe)
-func getPlayback(targetID string) (*PlaybackSession, bool) {
+// getPlaybackSession returns the active session for a target (thread-safe)
+func getPlaybackSession(targetID string) (*PlaybackSession, bool) {
 	playbacksMu.RLock()
 	defer playbacksMu.RUnlock()
 	sess, ok := activePlaybacks[targetID]
@@ -308,7 +308,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	}
 
 	// PRE: Handle case where target already has an active playback
-	if oldSess, exists := getPlayback(targetID); exists && oldSess != nil {
+	if oldSess, exists := getPlaybackSession(targetID); exists && oldSess != nil {
 		log.Printf("[SIDECAR] Target %s already has active playback — replacing it", targetID)
 
 		// Cancel the old streaming context so its handler exits cleanly
@@ -603,7 +603,7 @@ func (s *ffmpegServer) Shutdown(ctx context.Context, req *proto.ShutdownRequest)
 func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequest) (*proto.ControlResponse, error) {
 	targetID := req.GetTargetId()
 	action := req.GetAction()
-	sess, ok := getPlayback(targetID)
+	sess, ok := getPlaybackSession(targetID)
 
 	if !ok || sess == nil {
 		return &proto.ControlResponse{
@@ -623,7 +623,15 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 		}, nil
 
 	case proto.ControlRequest_PLAY:
-		if sess.DecCtx != nil {
+		if sess.DecCtx != nil && sess.SessionCtx != nil {
+			// If playback is current at EOF
+			if atomic.LoadInt32(&sess.SessionCtx.IsEOF) != 0 {
+				// Trigger an atomic seek to 0 ms.
+				// This sets dec_ctx->seek_requested = 1 in C, breaking the EOF idle loop.
+				C.request_seek_on_dec_ctx(sess.DecCtx, C.int64_t(0))
+				atomic.StoreInt32(&sess.SessionCtx.IsEOF, int32(0))
+			}
+			// Unpause the session
 			C.set_dec_ctx_paused(sess.DecCtx, C.int(0))
 		}
 		log.Printf("[SIDECAR] RESUMED target: %s", targetID)
