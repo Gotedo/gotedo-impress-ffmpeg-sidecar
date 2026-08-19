@@ -105,6 +105,12 @@ enum
   GO_AVERROR_ETIMEDOUT = AVERROR(ETIMEDOUT) // Connection or I/O operation timed out
 };
 
+typedef enum
+{
+  CONTAINER_FMP4 = 0,
+  CONTAINER_WEBM = 1
+} PassthroughContainerType;
+
 typedef struct DemuxDecContext
 {
   AVFormatContext *fmt_ctx;
@@ -112,7 +118,8 @@ typedef struct DemuxDecContext
   // Video Decoder State
   int video_stream_idx;
   AVCodecContext *video_dec_ctx;
-  int is_passthrough; // 1 = Zero-Copy Remux, 0 = Transcode
+  int is_passthrough;                      // 1 = Zero-Copy Remux, 0 = Transcode
+  PassthroughContainerType container_type; // CONTAINER_FMP4 (0) or CONTAINER_WEBM (1)
 
   // Audio Decoder State
   int audio_stream_idx;
@@ -271,6 +278,6 @@ void request_stop_on_dec_ctx(DemuxDecContext *ctx);
 void log_input_stream_properties(DemuxDecContext *ctx, const char *file_path);
 
 // Forward declaration of the zero-copy passthrough loop
-int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token);
+int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, PassthroughContainerType container_type);
 
 #endif // DECODER_H

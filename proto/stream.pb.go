@@ -21,6 +21,98 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type PassthroughContainerFormat int32
+
+const (
+	PassthroughContainerFormat_CONTAINER_FMP4 PassthroughContainerFormat = 0
+	PassthroughContainerFormat_CONTAINER_WEBM PassthroughContainerFormat = 1
+)
+
+// Enum value maps for PassthroughContainerFormat.
+var (
+	PassthroughContainerFormat_name = map[int32]string{
+		0: "CONTAINER_FMP4",
+		1: "CONTAINER_WEBM",
+	}
+	PassthroughContainerFormat_value = map[string]int32{
+		"CONTAINER_FMP4": 0,
+		"CONTAINER_WEBM": 1,
+	}
+)
+
+func (x PassthroughContainerFormat) Enum() *PassthroughContainerFormat {
+	p := new(PassthroughContainerFormat)
+	*p = x
+	return p
+}
+
+func (x PassthroughContainerFormat) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PassthroughContainerFormat) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_stream_proto_enumTypes[0].Descriptor()
+}
+
+func (PassthroughContainerFormat) Type() protoreflect.EnumType {
+	return &file_proto_stream_proto_enumTypes[0]
+}
+
+func (x PassthroughContainerFormat) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PassthroughContainerFormat.Descriptor instead.
+func (PassthroughContainerFormat) EnumDescriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{0}
+}
+
+type StreamMode int32
+
+const (
+	StreamMode_passthrough StreamMode = 0
+	StreamMode_transcode   StreamMode = 1
+)
+
+// Enum value maps for StreamMode.
+var (
+	StreamMode_name = map[int32]string{
+		0: "passthrough",
+		1: "transcode",
+	}
+	StreamMode_value = map[string]int32{
+		"passthrough": 0,
+		"transcode":   1,
+	}
+)
+
+func (x StreamMode) Enum() *StreamMode {
+	p := new(StreamMode)
+	*p = x
+	return p
+}
+
+func (x StreamMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StreamMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_stream_proto_enumTypes[1].Descriptor()
+}
+
+func (StreamMode) Type() protoreflect.EnumType {
+	return &file_proto_stream_proto_enumTypes[1]
+}
+
+func (x StreamMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StreamMode.Descriptor instead.
+func (StreamMode) EnumDescriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{1}
+}
+
 type ControlRequest_Action int32
 
 const (
@@ -57,11 +149,11 @@ func (x ControlRequest_Action) String() string {
 }
 
 func (ControlRequest_Action) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_stream_proto_enumTypes[0].Descriptor()
+	return file_proto_stream_proto_enumTypes[2].Descriptor()
 }
 
 func (ControlRequest_Action) Type() protoreflect.EnumType {
-	return &file_proto_stream_proto_enumTypes[0]
+	return &file_proto_stream_proto_enumTypes[2]
 }
 
 func (x ControlRequest_Action) Number() protoreflect.EnumNumber {
@@ -74,11 +166,12 @@ func (ControlRequest_Action) EnumDescriptor() ([]byte, []int) {
 }
 
 type StreamRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetId      string                 `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // "preview" or projector screen ID string
-	FilePath      string                 `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	AudioDeviceId string                 `protobuf:"bytes,3,opt,name=audio_device_id,json=audioDeviceId,proto3" json:"audio_device_id,omitempty"`
-	StreamMode    string                 `protobuf:"bytes,4,opt,name=stream_mode,json=streamMode,proto3" json:"stream_mode,omitempty"`
+	state         protoimpl.MessageState     `protogen:"open.v1"`
+	TargetId      string                     `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // "preview" or projector screen ID string
+	FilePath      string                     `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	AudioDeviceId string                     `protobuf:"bytes,3,opt,name=audio_device_id,json=audioDeviceId,proto3" json:"audio_device_id,omitempty"`
+	StreamMode    StreamMode                 `protobuf:"varint,4,opt,name=stream_mode,json=streamMode,proto3,enum=ffmpeg.StreamMode" json:"stream_mode,omitempty"` // passthrough or transcode
+	Container     PassthroughContainerFormat `protobuf:"varint,5,opt,name=container,proto3,enum=ffmpeg.PassthroughContainerFormat" json:"container,omitempty"`     // CONTAINER_FMP4 or CONTAINER_WEBM
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -134,11 +227,18 @@ func (x *StreamRequest) GetAudioDeviceId() string {
 	return ""
 }
 
-func (x *StreamRequest) GetStreamMode() string {
+func (x *StreamRequest) GetStreamMode() StreamMode {
 	if x != nil {
 		return x.StreamMode
 	}
-	return ""
+	return StreamMode_passthrough
+}
+
+func (x *StreamRequest) GetContainer() PassthroughContainerFormat {
+	if x != nil {
+		return x.Container
+	}
+	return PassthroughContainerFormat_CONTAINER_FMP4
 }
 
 type StreamResponse struct {
@@ -1198,13 +1298,14 @@ var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/stream.proto\x12\x06ffmpeg\"\x92\x01\n" +
+	"\x12proto/stream.proto\x12\x06ffmpeg\"\xe8\x01\n" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
-	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\x12\x1f\n" +
-	"\vstream_mode\x18\x04 \x01(\tR\n" +
-	"streamMode\"X\n" +
+	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\x123\n" +
+	"\vstream_mode\x18\x04 \x01(\x0e2\x12.ffmpeg.StreamModeR\n" +
+	"streamMode\x12@\n" +
+	"\tcontainer\x18\x05 \x01(\x0e2\".ffmpeg.PassthroughContainerFormatR\tcontainer\"X\n" +
 	"\x0eStreamResponse\x12\x1d\n" +
 	"\n" +
 	"fmp4_chunk\x18\x01 \x01(\fR\tfmp4Chunk\x12\x10\n" +
@@ -1294,7 +1395,14 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\"\x11\n" +
 	"\x0fShutdownRequest\".\n" +
 	"\x10ShutdownResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted2\xb7\x04\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted*D\n" +
+	"\x1aPassthroughContainerFormat\x12\x12\n" +
+	"\x0eCONTAINER_FMP4\x10\x00\x12\x12\n" +
+	"\x0eCONTAINER_WEBM\x10\x01*,\n" +
+	"\n" +
+	"StreamMode\x12\x0f\n" +
+	"\vpassthrough\x10\x00\x12\r\n" +
+	"\ttranscode\x10\x012\xb7\x04\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
@@ -1318,52 +1426,56 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 	return file_proto_stream_proto_rawDescData
 }
 
-var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_proto_stream_proto_goTypes = []any{
-	(ControlRequest_Action)(0),    // 0: ffmpeg.ControlRequest.Action
-	(*StreamRequest)(nil),         // 1: ffmpeg.StreamRequest
-	(*StreamResponse)(nil),        // 2: ffmpeg.StreamResponse
-	(*StreamControlRequest)(nil),  // 3: ffmpeg.StreamControlRequest
-	(*StreamControlResponse)(nil), // 4: ffmpeg.StreamControlResponse
-	(*LatencyRequest)(nil),        // 5: ffmpeg.LatencyRequest
-	(*LatencyResponse)(nil),       // 6: ffmpeg.LatencyResponse
-	(*ControlRequest)(nil),        // 7: ffmpeg.ControlRequest
-	(*ControlResponse)(nil),       // 8: ffmpeg.ControlResponse
-	(*DevicesRequest)(nil),        // 9: ffmpeg.DevicesRequest
-	(*AudioDevice)(nil),           // 10: ffmpeg.AudioDevice
-	(*DevicesResponse)(nil),       // 11: ffmpeg.DevicesResponse
-	(*MetadataRequest)(nil),       // 12: ffmpeg.MetadataRequest
-	(*MetadataResponse)(nil),      // 13: ffmpeg.MetadataResponse
-	(*ScreenshotRequest)(nil),     // 14: ffmpeg.ScreenshotRequest
-	(*ScreenshotResponse)(nil),    // 15: ffmpeg.ScreenshotResponse
-	(*ShutdownRequest)(nil),       // 16: ffmpeg.ShutdownRequest
-	(*ShutdownResponse)(nil),      // 17: ffmpeg.ShutdownResponse
+	(PassthroughContainerFormat)(0), // 0: ffmpeg.PassthroughContainerFormat
+	(StreamMode)(0),                 // 1: ffmpeg.StreamMode
+	(ControlRequest_Action)(0),      // 2: ffmpeg.ControlRequest.Action
+	(*StreamRequest)(nil),           // 3: ffmpeg.StreamRequest
+	(*StreamResponse)(nil),          // 4: ffmpeg.StreamResponse
+	(*StreamControlRequest)(nil),    // 5: ffmpeg.StreamControlRequest
+	(*StreamControlResponse)(nil),   // 6: ffmpeg.StreamControlResponse
+	(*LatencyRequest)(nil),          // 7: ffmpeg.LatencyRequest
+	(*LatencyResponse)(nil),         // 8: ffmpeg.LatencyResponse
+	(*ControlRequest)(nil),          // 9: ffmpeg.ControlRequest
+	(*ControlResponse)(nil),         // 10: ffmpeg.ControlResponse
+	(*DevicesRequest)(nil),          // 11: ffmpeg.DevicesRequest
+	(*AudioDevice)(nil),             // 12: ffmpeg.AudioDevice
+	(*DevicesResponse)(nil),         // 13: ffmpeg.DevicesResponse
+	(*MetadataRequest)(nil),         // 14: ffmpeg.MetadataRequest
+	(*MetadataResponse)(nil),        // 15: ffmpeg.MetadataResponse
+	(*ScreenshotRequest)(nil),       // 16: ffmpeg.ScreenshotRequest
+	(*ScreenshotResponse)(nil),      // 17: ffmpeg.ScreenshotResponse
+	(*ShutdownRequest)(nil),         // 18: ffmpeg.ShutdownRequest
+	(*ShutdownResponse)(nil),        // 19: ffmpeg.ShutdownResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
-	0,  // 0: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
-	10, // 1: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
-	1,  // 2: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
-	3,  // 3: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
-	5,  // 4: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
-	7,  // 5: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
-	9,  // 6: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
-	12, // 7: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
-	14, // 8: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
-	16, // 9: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
-	2,  // 10: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	4,  // 11: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	6,  // 12: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	8,  // 13: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	11, // 14: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	13, // 15: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
-	15, // 16: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
-	17, // 17: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
-	10, // [10:18] is the sub-list for method output_type
-	2,  // [2:10] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	1,  // 0: ffmpeg.StreamRequest.stream_mode:type_name -> ffmpeg.StreamMode
+	0,  // 1: ffmpeg.StreamRequest.container:type_name -> ffmpeg.PassthroughContainerFormat
+	2,  // 2: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
+	12, // 3: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
+	3,  // 4: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
+	5,  // 5: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
+	7,  // 6: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
+	9,  // 7: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
+	11, // 8: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
+	14, // 9: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
+	16, // 10: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
+	18, // 11: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
+	4,  // 12: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	6,  // 13: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	8,  // 14: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	10, // 15: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	13, // 16: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	15, // 17: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	17, // 18: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
+	19, // 19: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
+	12, // [12:20] is the sub-list for method output_type
+	4,  // [4:12] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proto_stream_proto_init() }
@@ -1376,7 +1488,7 @@ func file_proto_stream_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      3,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,

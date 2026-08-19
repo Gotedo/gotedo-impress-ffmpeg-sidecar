@@ -31,11 +31,22 @@ service FFmpegService {
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
+enum PassthroughContainerFormat {
+  CONTAINER_FMP4 = 0;
+  CONTAINER_WEBM = 1;
+}
+
+enum StreamMode {
+  passthrough = 0;
+  transcode = 1;
+}
+
 message StreamRequest {
     string target_id = 1; // "preview" or projector screen ID string
     string file_path = 2;
     string audio_device_id = 3;
-    string stream_mode = 4;
+    StreamMode stream_mode = 4; // passthrough or transcode
+    PassthroughContainerFormat container = 5;   // CONTAINER_FMP4 or CONTAINER_WEBM
 }
 
 message StreamResponse {

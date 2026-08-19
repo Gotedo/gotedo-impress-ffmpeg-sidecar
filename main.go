@@ -335,13 +335,20 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 	// Convert streamMode string ("passthrough" vs "transcode") to C flag
 	isPassthrough := C.int(0)
-	if streamMode == "passthrough" {
+	if streamMode == proto.StreamMode_passthrough {
 		isPassthrough = C.int(1)
+	}
+
+	// Map Protobuf ContainerFormat to C PassthroughContainerType
+	var containerType C.PassthroughContainerType = C.CONTAINER_FMP4
+	if req.GetContainer() == proto.PassthroughContainerFormat_CONTAINER_WEBM {
+		containerType = C.CONTAINER_WEBM
 	}
 
 	// 2. Allocate C contexts (we keep explicit frees for early error paths)
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
 	decCtx.is_passthrough = isPassthrough
+	decCtx.container_type = containerType
 
 	cPath := C.CString(filePath)
 	defer C.free(unsafe.Pointer(cPath))
