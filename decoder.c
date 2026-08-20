@@ -525,9 +525,9 @@ int init_passthrough_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_c
       return ret;
     }
 
-    // Configure fMP4 fragment flags required for MSE compatibility
+    // Configure fMP4 fragment flags required for MSE compatibility and delayed moov writing
     av_opt_set((*out_fmt_ctx)->priv_data, "movflags",
-               "empty_moov+default_base_moof+frag_keyframe+separate_moof", 0);
+               "empty_moov+default_base_moof+frag_keyframe+separate_moof+delay_moov+negative_cts_offsets+omit_tfhd_offset", 0);
   }
 
   // FORCE SHIFT NEGATIVE PTS/DTS TO ZERO
@@ -1376,7 +1376,14 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
   }
 
   // Write initial container header segment (fMP4 moov header OR WebM EBML header)
-  ret = avformat_write_header(out_fmt_ctx, NULL);
+  if (container_type == CONTAINER_FMP4)
+  {
+    ret = write_fmp4_header(out_fmt_ctx);
+  }
+  else
+  {
+    ret = avformat_write_header(out_fmt_ctx, NULL);
+  }
   if (ret < 0)
   {
     LOG_FFMPEG_ERR("C-MUX", "[PASSTHROUGH] Failed to write initial container header", ret);
@@ -1404,6 +1411,9 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
   // Track previous stream DTS to enforce strict monotonicity for downstream MSE containers
   int64_t last_video_dts = AV_NOPTS_VALUE;
   int64_t last_audio_dts = AV_NOPTS_VALUE;
+
+  // Baseline tracker for origin normalization
+  int64_t first_video_dts = AV_NOPTS_VALUE;
 
   LOG_INFO("C-MUX", "Entering zero-copy passthrough streaming loop (Container Type: %d, Hybrid Audio Transcode: %d)", container_type, audio_needs_transcode);
 
@@ -1438,6 +1448,20 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         // Flushes internal demuxer packet queues so pre-seek packets
         // do not leak into the new container segment.
         avformat_flush(dec_ctx->fmt_ctx);
+
+        first_video_dts = AV_NOPTS_VALUE;
+        if (audio_fifo)
+        {
+          av_audio_fifo_reset(audio_fifo);
+        }
+        audio_pts_counter = -1;
+
+        int stream_idx = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
+        if (stream_idx >= 0)
+        {
+          int64_t target_pts_ticks = av_rescale_q(target_ms * 1000LL, AV_TIME_BASE_Q,
+                                                  dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
+        }
 
         if (audio_needs_transcode)
         {
@@ -1528,7 +1552,8 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
 
         if (out_fmt_ctx)
         {
-          if (avformat_write_header(out_fmt_ctx, NULL) < 0)
+          int hdr_ret = (container_type == CONTAINER_FMP4) ? write_fmp4_header(out_fmt_ctx) : avformat_write_header(out_fmt_ctx, NULL);
+          if (hdr_ret < 0)
           {
             LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to write container header after seek");
           }
@@ -1545,6 +1570,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         // Reset DTS state trackers for the new post-seek segment timeline
         last_video_dts = AV_NOPTS_VALUE;
         last_audio_dts = AV_NOPTS_VALUE;
+        first_video_dts = AV_NOPTS_VALUE;
 
         extern void set_session_eof(uintptr_t token, int is_eof);
         set_session_eof(tx_ctx.go_user_token, 0);
@@ -1649,13 +1675,19 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
       if (audio_pts_counter == -1 && pkt->pts != AV_NOPTS_VALUE)
       {
         AVStream *in_audio_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
-        double pkt_pts_sec = pkt->pts * av_q2d(in_audio_stream->time_base);
+        int64_t pts_val = pkt->pts;
 
-        // Clamp negative audio pre-roll timestamps to 0.0s to match video timestamp shift
-        if (pkt_pts_sec < 0.0)
+        // Subtract first_video_dts baseline to align audio with shifted video timeline (0.0s)
+        if (first_video_dts != AV_NOPTS_VALUE && dec_ctx->video_stream_idx >= 0)
         {
-          pkt_pts_sec = 0.0;
+          AVStream *v_st = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+          int64_t a_base_dts = av_rescale_q(first_video_dts, v_st->time_base, in_audio_stream->time_base);
+          pts_val -= a_base_dts;
         }
+
+        double pkt_pts_sec = pts_val * av_q2d(in_audio_stream->time_base);
+        if (pkt_pts_sec < 0.0)
+          pkt_pts_sec = 0.0;
         audio_pts_counter = (int64_t)(pkt_pts_sec * 48000.0);
       }
 
@@ -1724,6 +1756,32 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
       continue;
     }
 
+    // Force audio FIFO conversion pass before processing video frames
+    if (pkt->stream_index == dec_ctx->video_stream_idx && audio_needs_transcode && audio_fifo && aac_enc_ctx)
+    {
+      while (av_audio_fifo_size(audio_fifo) >= aac_enc_ctx->frame_size)
+      {
+        if (av_audio_fifo_read(audio_fifo, (void **)enc_audio_frame->data, aac_enc_ctx->frame_size) >= 0)
+        {
+          if (audio_pts_counter == -1)
+            audio_pts_counter = 0;
+          enc_audio_frame->pts = audio_pts_counter;
+          audio_pts_counter += aac_enc_ctx->frame_size;
+
+          if (avcodec_send_frame(aac_enc_ctx, enc_audio_frame) >= 0)
+          {
+            while (avcodec_receive_packet(aac_enc_ctx, enc_audio_pkt) >= 0)
+            {
+              av_packet_rescale_ts(enc_audio_pkt, aac_enc_ctx->time_base, out_fmt_ctx->streams[out_audio_idx]->time_base);
+              enc_audio_pkt->stream_index = out_audio_idx;
+              av_interleaved_write_frame(out_fmt_ctx, enc_audio_pkt);
+              av_packet_unref(enc_audio_pkt);
+            }
+          }
+        }
+      }
+    }
+
     // Determine target output stream index for zero-copy passthrough streams
     int target_out_idx = -1;
     AVStream *in_stream = NULL;
@@ -1787,6 +1845,34 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
 
       if (!interrupted)
       {
+        // Establish initial DTS baseline on first video frame after start/seek
+        if (pkt->stream_index == dec_ctx->video_stream_idx && first_video_dts == AV_NOPTS_VALUE)
+        {
+          first_video_dts = (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts : ((pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : 0);
+        }
+
+        // Shift timestamp baseline to zero relative to initial post-seek/start video DTS
+        if (first_video_dts != AV_NOPTS_VALUE)
+        {
+          if (pkt->stream_index == dec_ctx->video_stream_idx)
+          {
+            if (pkt->pts != AV_NOPTS_VALUE)
+              pkt->pts -= first_video_dts;
+            if (pkt->dts != AV_NOPTS_VALUE)
+              pkt->dts -= first_video_dts;
+          }
+          else if (pkt->stream_index == dec_ctx->audio_stream_idx && !audio_needs_transcode)
+          {
+            // Convert video baseline DTS to audio timebase for passthrough audio alignment
+            AVStream *v_st = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
+            int64_t a_base_dts = av_rescale_q(first_video_dts, v_st->time_base, in_stream->time_base);
+            if (pkt->pts != AV_NOPTS_VALUE)
+              pkt->pts -= a_base_dts;
+            if (pkt->dts != AV_NOPTS_VALUE)
+              pkt->dts -= a_base_dts;
+          }
+        }
+
         // Rescale timestamps from input demuxer timebase to output stream timebase
         av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
         pkt->stream_index = target_out_idx;
@@ -1801,6 +1887,12 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
             pkt->dts = *last_dts_ptr + 1;
           else
             pkt->dts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : 0;
+        }
+
+        // Prevent negative DTS values after rescaling
+        if (pkt->dts < 0)
+        {
+          pkt->dts = 0;
         }
 
         // Fix B-frame out-of-order DTS from MKV demuxer
@@ -1903,6 +1995,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
   int out_audio_idx = -1;
   int audio_needs_transcode = 0;
+  int wait_for_video_keyframe = 0;
   AVCodecContext *aac_enc_ctx = NULL;
   SwrContext *audio_swr_ctx = NULL;
   AVAudioFifo *fifo = NULL;
@@ -2217,6 +2310,20 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       {
         LOG_INFO("C-SEEK", "Executing backward seek to ms: %lld", (long long)target_ms);
 
+        wait_for_video_keyframe = (dec_ctx->video_stream_idx >= 0) ? 1 : 0;
+
+        // Reset audio FIFO and flush trapped decoder frames immediately
+        if (fifo)
+        {
+          av_audio_fifo_reset(fifo);
+        }
+        audio_pts_counter = -1;
+
+        if (stream_idx >= 0)
+        {
+          int64_t target_pts_ticks = av_rescale_q(target_ms * 1000LL, AV_TIME_BASE_Q, dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
+        }
+
         // Flush video decoders
         if (dec_ctx->video_dec_ctx)
           avcodec_flush_buffers(dec_ctx->video_dec_ctx);
@@ -2475,9 +2582,57 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       LOG_DEBUG("C-READ", "stream=%d pts=%lld", pkt->stream_index, (long long)pkt->pts);
     }
 
+    if (wait_for_video_keyframe && dec_ctx->video_stream_idx >= 0)
+    {
+      if (pkt->stream_index == dec_ctx->video_stream_idx)
+      {
+        if (pkt->flags & AV_PKT_FLAG_KEY)
+        {
+          wait_for_video_keyframe = 0; // Keyframe found; open the pipeline
+        }
+        else
+        {
+          av_packet_unref(pkt);
+          continue; // Drop lead-in non-keyframe video packets
+        }
+      }
+      else
+      {
+        av_packet_unref(pkt);
+        continue; // Drop lead-in audio packets prior to the keyframe
+      }
+    }
+
     // VIDEO PATH
     if (pkt->stream_index == dec_ctx->video_stream_idx && out_video_idx >= 0)
     {
+      // Interleaving guard: Force audio FIFO conversion pass before writing video frames
+      if (audio_needs_transcode && fifo && aac_enc_ctx)
+      {
+        // Flush queued audio FIFO samples to keep A/V DTS strictly interleaved in fMP4 fragments
+        while (av_audio_fifo_size(fifo) >= aac_enc_ctx->frame_size)
+        {
+          if (av_audio_fifo_read(fifo, (void **)enc_frame->data, aac_enc_ctx->frame_size) >= 0)
+          {
+            if (audio_pts_counter == -1)
+              audio_pts_counter = 0;
+            enc_frame->pts = audio_pts_counter;
+            audio_pts_counter += aac_enc_ctx->frame_size;
+
+            if (avcodec_send_frame(aac_enc_ctx, enc_frame) >= 0)
+            {
+              while (avcodec_receive_packet(aac_enc_ctx, enc_pkt) >= 0)
+              {
+                av_packet_rescale_ts(enc_pkt, aac_enc_ctx->time_base, out_fmt_ctx->streams[out_audio_idx]->time_base);
+                enc_pkt->stream_index = out_audio_idx;
+                av_interleaved_write_frame(out_fmt_ctx, enc_pkt);
+                av_packet_unref(enc_pkt);
+              }
+            }
+          }
+        }
+      }
+
       if (!need_video_reencode)
       {
         // Passthrough (original path)
