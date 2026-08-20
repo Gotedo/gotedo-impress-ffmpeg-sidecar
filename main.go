@@ -380,6 +380,16 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	// 5. Start the C pipeline goroutine
 	pipelineErrChan := make(chan int, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				stack := make([]byte, 4096)
+				n := runtime.Stack(stack, false)
+				log.Println(fmt.Sprintf("[%s] PANIC recovered in goroutine: %v\n%s", r, stack[:n]))
+
+				// Stop playback
+				unregisterPlayback(targetID)
+			}
+		}()
 		ret := C.run_streaming_mux_and_play(decCtx, C.uintptr_t(handle))
 		pipelineErrChan <- int(ret)
 	}()

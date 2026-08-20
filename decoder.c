@@ -1688,7 +1688,35 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         double pkt_pts_sec = pts_val * av_q2d(in_audio_stream->time_base);
         if (pkt_pts_sec < 0.0)
           pkt_pts_sec = 0.0;
-        audio_pts_counter = (int64_t)(pkt_pts_sec * 48000.0);
+
+        // Pre-pad lead-in audio gap with silent PCM FLTP samples to anchor audio start to 0.0s
+        int silence_samples = (int)(pkt_pts_sec * 48000.0);
+        if (silence_samples > 0)
+        {
+          LOG_INFO("C-AUDIO", "[HYBRID MUX] Pre-padding audio gap with %d silent samples (%.3f sec)",
+                   silence_samples, pkt_pts_sec);
+
+          // Zero out planar Float32 channel buffers (IEEE 754 float 0.0f = 0x00)
+          memset(resample_buf[0], 0, 8192 * sizeof(float));
+          memset(resample_buf[1], 0, 8192 * sizeof(float));
+
+          int samples_remaining = silence_samples;
+          while (samples_remaining > 0)
+          {
+            int chunk = (samples_remaining > 8192) ? 8192 : samples_remaining;
+            int realloc_ret = av_audio_fifo_realloc(audio_fifo, av_audio_fifo_size(audio_fifo) + chunk);
+            if (realloc_ret < 0)
+            {
+              LOG_FFMPEG_ERR("C-AUDIO", "[HYBRID MUX] Failed to reallocate audio FIFO for silence padding", realloc_ret);
+              break;
+            }
+            av_audio_fifo_write(audio_fifo, (void **)resample_buf, chunk);
+            samples_remaining -= chunk;
+          }
+        }
+
+        // Force baseline counter to begin strictly at PTS = 0
+        audio_pts_counter = 0;
       }
 
       if (avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt) >= 0)
@@ -2078,11 +2106,31 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       out_stream->codecpar->codec_tag = 0;
       out_video_idx = out_stream->index;
 
-      // Colour-space converter (any decoder output -> YUV420P)
+      // Determine valid software pixel formats for input/output to avoid HWACCEL format errors
+      enum AVPixelFormat init_src_fmt = dec_ctx->video_dec_ctx->pix_fmt;
+      if (dec_ctx->video_dec_ctx->sw_pix_fmt != AV_PIX_FMT_NONE)
+      {
+        init_src_fmt = dec_ctx->video_dec_ctx->sw_pix_fmt;
+      }
+      else
+      {
+        const AVPixFmtDescriptor *src_desc = av_pix_fmt_desc_get(init_src_fmt);
+        if (src_desc && (src_desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+          init_src_fmt = AV_PIX_FMT_YUV420P;
+      }
+
+      enum AVPixelFormat init_dst_fmt = h264_enc_ctx->pix_fmt;
+      const AVPixFmtDescriptor *dst_desc = av_pix_fmt_desc_get(init_dst_fmt);
+      if (dst_desc && (dst_desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+      {
+        init_dst_fmt = (h264_enc_ctx->sw_pix_fmt != AV_PIX_FMT_NONE) ? h264_enc_ctx->sw_pix_fmt : AV_PIX_FMT_NV12;
+      }
+
+      // Colour-space converter (any decoder output -> target software pixel format)
       sws_ctx = sws_getContext(
           dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
-          dec_ctx->video_dec_ctx->pix_fmt,
-          h264_enc_ctx->width, h264_enc_ctx->height, AV_PIX_FMT_YUV420P,
+          init_src_fmt,
+          h264_enc_ctx->width, h264_enc_ctx->height, init_dst_fmt,
           SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
       if (!sws_ctx)
@@ -2105,7 +2153,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         ret = AVERROR(ENOMEM);
         goto cleanup;
       }
-      enc_video_frame->format = AV_PIX_FMT_YUV420P;
+      enc_video_frame->format = init_dst_fmt;
       enc_video_frame->width = h264_enc_ctx->width;
       enc_video_frame->height = h264_enc_ctx->height;
 
@@ -2734,17 +2782,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           {
             AVFrame *sw_frame = frame;
 
-            // Check if zero-copy GPU pipeline is active (macOS VideoToolbox)
-            bool is_direct_gpu_pass = (h264_enc_ctx->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX &&
-                                       frame->format == AV_PIX_FMT_VIDEOTOOLBOX);
+            // Check if zero-copy GPU hardware acceleration pipeline is active (cross-platform matching)
+            const AVPixFmtDescriptor *frame_desc = av_pix_fmt_desc_get(frame->format);
+            bool is_hw_frame = (frame_desc && (frame_desc->flags & AV_PIX_FMT_FLAG_HWACCEL));
+            bool is_direct_gpu_pass = (is_hw_frame && frame->format == h264_enc_ctx->pix_fmt);
 
             if (!is_direct_gpu_pass)
             {
               // 1. Generic Hardware Surface Check:
               // Transfer GPU hardware surface frames (VideoToolbox / D3D11 / VAAPI / CUDA)
               // into CPU system memory so sws_scale can access valid pixel memory pointers.
-              const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
-              if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+              if (is_hw_frame)
               {
                 AVFrame *cpu_frame = av_frame_alloc();
                 if (cpu_frame)
@@ -2824,8 +2872,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
             if (is_direct_gpu_pass)
             {
-              // ZERO-COPY GPU PATH: Pass native VideoToolbox surface directly.
-              // VideoToolbox automatically performs GPU-accelerated downscaling from 8K to 1080p.
+              // ZERO-COPY GPU PATH: Pass native hardware surface directly.
+              // Hardware encoder automatically performs GPU-accelerated scaling and encoding.
               frame_to_encode = frame;
               frame_to_encode->pts = av_rescale_q(frame->pts,
                                                   in_stream->time_base,
@@ -2833,13 +2881,36 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             }
             else
             {
+              // Resolve software destination pixel format for encoder
+              enum AVPixelFormat dst_pix_fmt = h264_enc_ctx->pix_fmt;
+              const AVPixFmtDescriptor *enc_desc = av_pix_fmt_desc_get(dst_pix_fmt);
+              if (enc_desc && (enc_desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+              {
+                dst_pix_fmt = (h264_enc_ctx->sw_pix_fmt != AV_PIX_FMT_NONE) ? h264_enc_ctx->sw_pix_fmt : AV_PIX_FMT_NV12;
+                // Synchronize encoder context pixel format when operating on software fallback frames
+                h264_enc_ctx->pix_fmt = dst_pix_fmt;
+              }
+
+              // Ensure enc_video_frame buffer matches dst_pix_fmt
+              if (enc_video_frame->format != dst_pix_fmt)
+              {
+                av_frame_unref(enc_video_frame);
+                enc_video_frame->format = dst_pix_fmt;
+                enc_video_frame->width = h264_enc_ctx->width;
+                enc_video_frame->height = h264_enc_ctx->height;
+                if (av_frame_get_buffer(enc_video_frame, 32) < 0)
+                {
+                  LOG_ERROR("C-MUX", "Failed to re-allocate buffer for enc_video_frame");
+                }
+              }
+
               // 2. Dynamic Scale Context Management with Direct Color Conversion:
               // Reuses or updates sws_ctx based on sw_frame's ACTUAL pixel format (e.g. NV12/P010LE).
               // Prevents "bad src image pointers" errors when scaling transferred GPU frames.
               sws_ctx = sws_getCachedContext(
                   sws_ctx,
                   sw_frame->width, sw_frame->height, sw_frame->format,
-                  h264_enc_ctx->width, h264_enc_ctx->height, AV_PIX_FMT_YUV420P,
+                  h264_enc_ctx->width, h264_enc_ctx->height, dst_pix_fmt,
                   SWS_FAST_BILINEAR, NULL, NULL, NULL);
 
               if (sws_ctx)
@@ -2947,13 +3018,41 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       else if (aac_enc_ctx && fifo)
       {
         // CRITICAL FIX: Perfect A/V Sync Check
-        // If the counter is -1 (startup or post-seek), align the AAC encoder's base timeline
-        // strictly to the exact PTS of the demuxed audio packet.
+        // Pre-pad lead-in audio gap with silent PCM FLTP samples to anchor audio start to 0.0s
         if (audio_pts_counter == -1 && pkt->pts != AV_NOPTS_VALUE)
         {
           AVStream *in_audio_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
           double pkt_pts_sec = pkt->pts * av_q2d(in_audio_stream->time_base);
-          audio_pts_counter = (int64_t)(pkt_pts_sec * 48000.0);
+          if (pkt_pts_sec < 0.0)
+            pkt_pts_sec = 0.0;
+
+          int silence_samples = (int)(pkt_pts_sec * 48000.0);
+          if (silence_samples > 0)
+          {
+            LOG_INFO("C-AUDIO", "[FULL MUX] Pre-padding audio gap with %d silent samples (%.3f sec)",
+                     silence_samples, pkt_pts_sec);
+
+            // Zero out planar Float32 channel buffers (IEEE 754 float 0.0f = 0x00)
+            memset(resample_buf[0], 0, 8192 * sizeof(float));
+            memset(resample_buf[1], 0, 8192 * sizeof(float));
+
+            int samples_remaining = silence_samples;
+            while (samples_remaining > 0)
+            {
+              int chunk = (samples_remaining > 8192) ? 8192 : samples_remaining;
+              int realloc_ret = av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + chunk);
+              if (realloc_ret < 0)
+              {
+                LOG_FFMPEG_ERR("C-AUDIO", "[FULL MUX] Failed to reallocate audio FIFO for silence padding", realloc_ret);
+                break;
+              }
+              av_audio_fifo_write(fifo, (void **)resample_buf, chunk);
+              samples_remaining -= chunk;
+            }
+          }
+
+          // Force baseline counter to begin strictly at PTS = 0
+          audio_pts_counter = 0;
         }
 
         if (avcodec_send_packet(dec_ctx->audio_dec_ctx, pkt) >= 0)
