@@ -123,6 +123,11 @@ tasks:
       - |
         if [ "{{.IS_TEST}}" = "true" ]; then
           echo ">>> Running integration tests for {{.GOOS}}/{{.GOARCH}}..."
+          {{if eq OS "windows"}}
+          CC="{{.WINDOWS_MINGW_BIN}}/gcc.exe" \
+          CXX="{{.WINDOWS_MINGW_BIN}}/g++.exe" \
+          PATH="{{.WINDOWS_MINGW_BIN}};$PATH" \
+          {{end}}
           CGO_ENABLED=1 \
           CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" \
           CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
@@ -131,13 +136,18 @@ tasks:
           go test -v -race -count=1 ./ -run TestIntegration_
         else
           echo "Building sidecar for {{.GOOS}}/{{.GOARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}..."
+          {{if eq OS "windows"}}
+          CC="{{.WINDOWS_MINGW_BIN}}/gcc.exe" \
+          CXX="{{.WINDOWS_MINGW_BIN}}/g++.exe" \
+          PATH="{{.WINDOWS_MINGW_BIN}};$PATH" \
+          {{end}}
           CGO_ENABLED=1 \
           CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include {{if eq .RELEASE "true"}}-DPRODUCTION{{end}}" \
           CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
           GOOS={{.GOOS}} \
           GOARCH={{.GOARCH}} \
           go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
-          
+
           {{if eq .GOOS "darwin"}}
           echo ">>> Patching compiled binary dyld paths for macOS..."
           install_name_tool -change "libz.1.dylib" "/usr/lib/libz.1.dylib" "{{.OUTFILE}}"
@@ -161,6 +171,25 @@ tasks:
       OUTFILE: '{{.OUT_DIR}}/{{.RESOLVED_FILE_NAME}}{{if and (eq .GOOS "windows") (not (hasSuffix ".exe" .RESOLVED_FILE_NAME))}}.exe{{end}}'
       IS_TEST: '{{.IS_TEST | default "false"}}'
       RELEASE: '{{.RELEASE}}'
+      WINDOWS_MINGW_BIN:
+        sh: |
+          if [ "{{OS}}" != "windows" ]; then
+            exit 0
+          fi
+          set -- \
+            "${USERPROFILE}/scoop/apps/mingw/current/bin/gcc.exe" \
+            "${USERPROFILE}/scoop/apps/gcc/current/bin/gcc.exe" \
+            "C:/msys64/mingw64/bin/gcc.exe" \
+            "C:/mingw64/bin/gcc.exe" \
+            "C:/ProgramData/mingw64/mingw64/bin/gcc.exe"
+          for p in "$@"; do
+            if [ -f "$p" ]; then
+              echo "${p%/*}"
+              exit 0
+            fi
+          done
+          echo "MinGW gcc.exe not found (need posix-seh gcc, not LLVM clang)" >&2
+          exit 1
 
   # Native Platform Tasks
   build:native:darwin:
@@ -201,8 +230,13 @@ tasks:
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
       LDFLAGS_EXTRA: >-
         -lavformat -lavcodec -lavutil -lswresample -lswscale
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
-        -lws2_32 -lbcrypt -lmfplat -lmfuuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame
+        -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv
+        -lass -lharfbuzz -lfreetype -lpng16 -liconv -lbz2 -llzma
+        -lstdc++
+        -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32
+        -lmfplat -lmfuuid -lstrmiids -luuid
+        -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
     cmds:
       - task: build_base
         vars:
@@ -332,46 +366,91 @@ tasks:
           ffmpeg-builder {{.TARGET_OS}} {{.TARGET_ARCH}} sidecar
 
   install:proto_plugins:
-    desc: "Checks and installs Go gRPC plugins locally to ./bin. It unsets GOOS and GOARCH to avoid failure during cross-compilation. The proto plugins will always be installed using the HOST's GOOS and GOARCH."
+    desc: "Installs host-native protoc Go plugins into this Taskfile's bin/"
     run: once
     internal: true
     cmds:
-      - mkdir -p ./bin
+      - cmd: powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force -Path '{{joinPath .TASKFILE_DIR "bin"}}' | Out-Null"
+        platforms: [windows]
+        ignore_error: true
+      - cmd: mkdir -p '{{joinPath .TASKFILE_DIR "bin"}}'
+        platforms: [linux, darwin]
       - |
-        if [ ! -f "./bin/protoc-gen-go.exe" ] && [ ! -f "./bin/protoc-gen-go" ]; then
-          echo "Installing protoc-gen-go..."
-          GOBIN="$(pwd)/bin" GOOS="" GOARCH="" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-        fi
+        GOBIN="{{joinPath .TASKFILE_DIR "bin"}}" GOOS= GOARCH= \
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
       - |
-        if [ ! -f "./bin/protoc-gen-go-grpc.exe" ] && [ ! -f "./bin/protoc-gen-go-grpc" ]; then
-          echo "Installing protoc-gen-go-grpc..."
-          GOBIN="$(pwd)/bin" GOOS="" GOARCH="" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-        fi
+        GOBIN="{{joinPath .TASKFILE_DIR "bin"}}" GOOS= GOARCH= \
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+    dir: '{{.TASKFILE_DIR}}'
+    status:
+      - test -f '{{joinPath .TASKFILE_DIR "bin" (print "protoc-gen-go" exeExt)}}'
+      - test -f '{{joinPath .TASKFILE_DIR "bin" (print "protoc-gen-go-grpc" exeExt)}}'
 
   generate:proto:
     desc: "Generates gRPC Go stubs from stream.proto"
     run: once
     deps:
       - task: install:proto_plugins
+    vars:
+      EXE_EXT: '{{if eq OS "windows"}}.exe{{else}}{{end}}'
+      PROTOC_GEN_GO: '{{joinPath .TASKFILE_DIR "bin" (print "protoc-gen-go" .EXE_EXT)}}'
+      PROTOC_GEN_GO_GRPC: '{{joinPath .TASKFILE_DIR "bin" (print "protoc-gen-go-grpc" .EXE_EXT)}}'
+      PROTO_FILE: '{{joinPath .TASKFILE_DIR "proto" "stream.proto"}}'
+      # Windows only: directory that contains protoc.exe
+      WINDOWS_PROTOC_DIR:
+        sh: |
+          if [ "{{OS}}" != "windows" ]; then
+            exit 0
+          fi
+          powershell.exe -NoProfile -Command "& {
+            \$ErrorActionPreference = 'SilentlyContinue'
+            \$candidates = [System.Collections.Generic.List[string]]::new()
+            \$candidates.Add((Join-Path '{{.TASKFILE_DIR}}' 'bin\protoc.exe'))
+            \$candidates.Add((Join-Path \$env:LOCALAPPDATA 'Microsoft\WinGet\Links\protoc.exe'))
+            Get-ChildItem (Join-Path \$env:LOCALAPPDATA 'Microsoft\WinGet\Packages') -Directory -Filter 'Google.Protobuf*' |
+              ForEach-Object { \$candidates.Add((Join-Path \$_.FullName 'bin\protoc.exe')) }
+            \$candidates.Add('C:\ProgramData\chocolatey\bin\protoc.exe')
+            \$candidates.Add((Join-Path \$env:USERPROFILE 'scoop\shims\protoc.exe'))
+            \$candidates.Add((Join-Path \$env:USERPROFILE 'scoop\apps\protobuf\current\bin\protoc.exe'))
+            foreach (\$p in \$candidates) {
+              if (\$p -and (Test-Path -LiteralPath \$p)) {
+                Write-Output (Split-Path -Parent \$p)
+                exit 0
+              }
+            }
+            \$cmd = Get-Command protoc.exe
+            if (\$cmd -and \$cmd.Source) {
+              Write-Output (Split-Path -Parent \$cmd.Source)
+              exit 0
+            }
+            Write-Error 'protoc.exe not found. Install with: winget install Google.Protobuf'
+            exit 1
+          }"
+    env:
+      PATH: '{{if and (eq OS "windows") .WINDOWS_PROTOC_DIR}}{{.WINDOWS_PROTOC_DIR}};{{end}}{{env "PATH"}}'
     cmds:
-      - |
-        if ! command -v protoc &> /dev/null; then
-          echo "Error: protoc is not installed.\n\nOn MacOS, run: `brew install protobuf`\n\nOn Windows, run: `winget install protobuf`"
-          exit 1
-        fi
-        protoc \
-          --proto_path="{{.TASKFILE_DIR}}" \
-          --plugin=protoc-gen-go="{{.TASKFILE_DIR}}/bin/protoc-gen-go{{.EXE_EXT}}" \
-          --plugin=protoc-gen-go-grpc="{{.TASKFILE_DIR}}/bin/protoc-gen-go-grpc{{.EXE_EXT}}" \
-          --go_out="{{.TASKFILE_DIR}}" --go_opt=paths=source_relative \
-          --go-grpc_out="{{.TASKFILE_DIR}}" --go-grpc_opt=paths=source_relative \
-          "{{.TASKFILE_DIR}}/proto/stream.proto"
-      - cmd: cd "{{.TASKFILE_DIR}}" && go mod tidy
+      - cmd: |
+          PATH="{{.WINDOWS_PROTOC_DIR}};$PATH" protoc.exe \
+            --proto_path="{{.TASKFILE_DIR}}" \
+            --plugin=protoc-gen-go="{{.PROTOC_GEN_GO}}" \
+            --plugin=protoc-gen-go-grpc="{{.PROTOC_GEN_GO_GRPC}}" \
+            --go_out="{{.TASKFILE_DIR}}" --go_opt=paths=source_relative \
+            --go-grpc_out="{{.TASKFILE_DIR}}" --go-grpc_opt=paths=source_relative \
+            "{{.PROTO_FILE}}"
+        platforms: [windows]
+      - cmd: |
+          protoc \
+            --proto_path="{{.TASKFILE_DIR}}" \
+            --plugin=protoc-gen-go="{{.PROTOC_GEN_GO}}" \
+            --plugin=protoc-gen-go-grpc="{{.PROTOC_GEN_GO_GRPC}}" \
+            --go_out="{{.TASKFILE_DIR}}" --go_opt=paths=source_relative \
+            --go-grpc_out="{{.TASKFILE_DIR}}" --go-grpc_opt=paths=source_relative \
+            "{{.PROTO_FILE}}"
+        platforms: [linux, darwin]
+      - cmd: go mod tidy
+        dir: '{{.TASKFILE_DIR}}'
     sources:
       - '{{.TASKFILE_DIR}}/proto/stream.proto'
     generates:
       - '{{.TASKFILE_DIR}}/proto/stream.pb.go'
       - '{{.TASKFILE_DIR}}/proto/stream_grpc.pb.go'
-    vars:
-      # Automatically appends .exe only when executing on Windows
-      EXE_EXT: '{{if eq OS "windows"}}.exe{{else}}{{end}}'
