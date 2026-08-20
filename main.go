@@ -651,6 +651,8 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 			}
 			// Unpause the session
 			C.set_dec_ctx_paused(sess.DecCtx, C.int(0))
+			// A user resume must not stay stuck behind an old throttle.
+			C.set_dec_ctx_backpressure_paused(sess.DecCtx, C.int(0))
 		}
 		log.Printf("[SIDECAR] RESUMED target: %s", targetID)
 
@@ -688,6 +690,26 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 		return &proto.ControlResponse{
 			Success: true,
 			Message: fmt.Sprintf("Seek performed at %d: File: %s", seekMs, sess.FilePath),
+		}, nil
+
+	case proto.ControlRequest_BACKPRESSURE_PAUSE:
+		if sess.DecCtx != nil {
+			C.set_dec_ctx_backpressure_paused(sess.DecCtx, C.int(1))
+		}
+		log.Printf("[SIDECAR] BACKPRESSURE paused target: %s", targetID)
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "backpressure pause",
+		}, nil
+
+	case proto.ControlRequest_BACKPRESSURE_RESUME:
+		if sess.DecCtx != nil {
+			C.set_dec_ctx_backpressure_paused(sess.DecCtx, C.int(0))
+		}
+		log.Printf("[SIDECAR] BACKPRESSURE resumed target: %s", targetID)
+		return &proto.ControlResponse{
+			Success: true,
+			Message: "backpressure resume",
 		}, nil
 
 	default:

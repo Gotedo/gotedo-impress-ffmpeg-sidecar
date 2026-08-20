@@ -80,6 +80,8 @@ message ControlRequest {
         PAUSE = 1;
         SEEK = 2;
         STOP = 3;
+        BACKPRESSURE_PAUSE = 4;
+        BACKPRESSURE_RESUME = 5;
     }
     Action action = 2;
     float seek_seconds = 3; // Only used if action == SEEK

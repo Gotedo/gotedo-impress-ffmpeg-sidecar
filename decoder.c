@@ -482,11 +482,15 @@ void free_demux_dec_context(DemuxDecContext *ctx)
 static int write_to_memory_cb(void *opaque, const uint8_t *buf, int buf_size)
 {
   TranscodeContext *ctx = (TranscodeContext *)opaque;
-  if (ctx && ctx->go_callback)
-  {
-    // Pass the integer token back to Go
+  if (!ctx)
+    return buf_size;
+
+  if (__atomic_load_n(&ctx->suppress_output, __ATOMIC_ACQUIRE))
+    return buf_size;
+
+  if (ctx->go_callback)
     ctx->go_callback((uint8_t *)buf, buf_size, ctx->go_user_token);
-  }
+
   return buf_size;
 }
 
@@ -540,7 +544,7 @@ int init_passthrough_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_c
 
     // Configure fMP4 fragment flags required for MSE compatibility and delayed moov writing
     av_opt_set((*out_fmt_ctx)->priv_data, "movflags",
-               "empty_moov+default_base_moof+frag_keyframe+separate_moof+delay_moov+negative_cts_offsets+omit_tfhd_offset", 0);
+               "empty_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
   }
 
   // FORCE SHIFT NEGATIVE PTS/DTS TO ZERO
@@ -607,7 +611,7 @@ int write_fmp4_header(AVFormatContext *out_fmt_ctx)
   AVDictionary *opts = NULL;
 
   // Ensure FFmpeg fMP4 muxer explicitly handles negative CTS offsets
-  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset+negative_cts_offsets+delay_moov", 0);
+  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
   if (ret < 0)
   {
     return ret;
@@ -1258,6 +1262,8 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
 
   tx_ctx.go_user_token = go_token;
   tx_ctx.go_callback = goStreamWriteCallback;
+  tx_ctx.current_pts = 0.0;
+  __atomic_store_n(&tx_ctx.suppress_output, 0, __ATOMIC_RELEASE);
 
   // 1. Initialize in-memory passthrough muxer context (fMP4 or WebM)
   ret = init_passthrough_muxer(&out_fmt_ctx, &tx_ctx, container_type);
@@ -1462,18 +1468,9 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         // do not leak into the new container segment.
         avformat_flush(dec_ctx->fmt_ctx);
 
-        first_video_dts = AV_NOPTS_VALUE;
         if (audio_fifo)
         {
           av_audio_fifo_reset(audio_fifo);
-        }
-        audio_pts_counter = -1;
-
-        int stream_idx = dec_ctx->video_stream_idx >= 0 ? dec_ctx->video_stream_idx : -1;
-        if (stream_idx >= 0)
-        {
-          int64_t target_pts_ticks = av_rescale_q(target_ms * 1000LL, AV_TIME_BASE_Q,
-                                                  dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
         }
 
         if (audio_needs_transcode)
@@ -1504,9 +1501,12 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         {
           av_audio_fifo_reset(audio_fifo);
         }
-        audio_pts_counter = -1;
 
-        // Re-initialize passthrough muxer context to reset DTS timeline for the browser
+        // Keep the original media clock. AAC encoder time_base is 1/48000.
+        audio_pts_counter = target_ms * 48;
+
+        // Re-initialize passthrough muxer context to reset DTS trackers.
+        // The new ftyp/moov must not be forwarded to MSE (SourceBuffer is already initialized).
         if (out_fmt_ctx)
         {
           free_fmp4_muxer(out_fmt_ctx);
@@ -1565,11 +1565,18 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
 
         if (out_fmt_ctx)
         {
+          __atomic_store_n(&tx_ctx.suppress_output, 1, __ATOMIC_RELEASE);
+
           int hdr_ret = (container_type == CONTAINER_FMP4) ? write_fmp4_header(out_fmt_ctx) : avformat_write_header(out_fmt_ctx, NULL);
           if (hdr_ret < 0)
           {
             LOG_ERROR("C-SEEK", "[PASSTHROUGH] Failed to write container header after seek");
           }
+
+          if (out_fmt_ctx->pb)
+            avio_flush(out_fmt_ctx->pb);
+
+          __atomic_store_n(&tx_ctx.suppress_output, 0, __ATOMIC_RELEASE);
         }
 
         stream_start_time_us = av_gettime_relative() - (target_ms * 1000LL);
@@ -1579,16 +1586,19 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         wait_for_video_keyframe = (dec_ctx->video_stream_idx >= 0) ? 1 : 0;
         eof_reached = 0;
         trailer_written = 0;
+        __atomic_store_n(&dec_ctx->backpressure_paused, 0, __ATOMIC_RELEASE);
 
-        // Reset DTS state trackers for the new post-seek segment timeline
+        // Reset DTS state trackers for the new muxer session.
+        // first_video_dts = 0 skips the start-of-file "rebase to origin" path
+        // so post-seek packets keep their absolute timestamps.
         last_video_dts = AV_NOPTS_VALUE;
         last_audio_dts = AV_NOPTS_VALUE;
-        first_video_dts = AV_NOPTS_VALUE;
+        first_video_dts = 0;
 
         extern void set_session_eof(uintptr_t token, int is_eof);
         set_session_eof(tx_ctx.go_user_token, 0);
 
-        LOG_INFO("C-SEEK", "[PASSTHROUGH] Seek to %lld ms succeeded.", (long long)target_ms);
+        LOG_INFO("C-SEEK", "[PASSTHROUGH] Seek to %lld ms succeeded (absolute PTS preserved).", (long long)target_ms);
       }
       else
       {
@@ -1600,7 +1610,10 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
     }
 
     // Handle pausing
-    if (__atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+    int user_paused = __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE);
+    int bp_paused = __atomic_load_n(&dec_ctx->backpressure_paused, __ATOMIC_ACQUIRE);
+
+    if (bp_paused || (user_paused && !just_seeked))
     {
       if (current_pause_start_us == 0)
         current_pause_start_us = av_gettime_relative();
@@ -1685,20 +1698,11 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
     // HYBRID AUDIO TRANSCODE PATH
     if (pkt->stream_index == dec_ctx->audio_stream_idx && audio_needs_transcode && aac_enc_ctx && audio_fifo)
     {
-      if (audio_pts_counter == -1 && pkt->pts != AV_NOPTS_VALUE)
+      // Start-of-file only. After seek, audio_pts_counter is already at target*48.
+      if (audio_pts_counter < 0 && pkt->pts != AV_NOPTS_VALUE)
       {
         AVStream *in_audio_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
-        int64_t pts_val = pkt->pts;
-
-        // Subtract first_video_dts baseline to align audio with shifted video timeline (0.0s)
-        if (first_video_dts != AV_NOPTS_VALUE && dec_ctx->video_stream_idx >= 0)
-        {
-          AVStream *v_st = dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx];
-          int64_t a_base_dts = av_rescale_q(first_video_dts, v_st->time_base, in_audio_stream->time_base);
-          pts_val -= a_base_dts;
-        }
-
-        double pkt_pts_sec = pts_val * av_q2d(in_audio_stream->time_base);
+        double pkt_pts_sec = pkt->pts * av_q2d(in_audio_stream->time_base);
         if (pkt_pts_sec < 0.0)
           pkt_pts_sec = 0.0;
 
@@ -1766,7 +1770,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
               break;
             }
 
-            if (audio_pts_counter == -1)
+            if (audio_pts_counter < 0)
               audio_pts_counter = 0;
             enc_audio_frame->pts = audio_pts_counter;
             audio_pts_counter += aac_enc_ctx->frame_size;
@@ -1804,7 +1808,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
       {
         if (av_audio_fifo_read(audio_fifo, (void **)enc_audio_frame->data, aac_enc_ctx->frame_size) >= 0)
         {
-          if (audio_pts_counter == -1)
+          if (audio_pts_counter < 0)
             audio_pts_counter = 0;
           enc_audio_frame->pts = audio_pts_counter;
           audio_pts_counter += aac_enc_ctx->frame_size;
@@ -2047,6 +2051,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
   tx_ctx.go_user_token = go_token;
   tx_ctx.go_callback = goStreamWriteCallback;
+  tx_ctx.current_pts = 0.0;
+  __atomic_store_n(&tx_ctx.suppress_output, 0, __ATOMIC_RELEASE);
 
   // Initialize in-memory fMP4 muxer
   ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
@@ -2378,12 +2384,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         {
           av_audio_fifo_reset(fifo);
         }
-        audio_pts_counter = -1;
-
-        if (stream_idx >= 0)
-        {
-          int64_t target_pts_ticks = av_rescale_q(target_ms * 1000LL, AV_TIME_BASE_Q, dec_ctx->fmt_ctx->streams[stream_idx]->time_base);
-        }
 
         // Flush video decoders
         if (dec_ctx->video_dec_ctx)
@@ -2435,15 +2435,13 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
               }
             }
           }
-
-          // Reset audio PTS exactly to the target time
-          // CRITICAL FIX: Set to -1 to trigger auto-sync on the very first incoming audio packet
-          audio_pts_counter = -1;
         }
 
-        // CRITICAL FIX: Recreate the fMP4 Muxer Context
-        // This wipes the internal DTS trackers, preventing the "non monotonically increasing" crash.
-        // It outputs a fresh `moov` header to the browser, safely resetting the MSE engine timeline.
+        // Keep the original media clock. AAC time_base is 1/48000.
+        audio_pts_counter = target_ms * 48;
+
+        // Recreate the fMP4 muxer to reset FFmpeg DTS trackers.
+        // The new ftyp/moov must not be forwarded to MSE (SourceBuffer is already initialized).
         if (out_fmt_ctx)
         {
           free_fmp4_muxer(out_fmt_ctx);
@@ -2455,13 +2453,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           LOG_ERROR("C-SEEK", "Failed to re-initialize fMP4 muxer after seek");
         }
 
-        // Ensure shifted timestamps after seek
         if (out_fmt_ctx)
         {
           av_opt_set(out_fmt_ctx, "avoid_negative_ts", "make_non_negative", 0);
         }
 
-        // Reset the trailer flag for the new timeline
+        // Reset the trailer flag for the new muxer session
         trailer_written = 0;
 
         // Re-map the video stream into the new muxer
@@ -2516,13 +2513,21 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           }
         }
 
-        // Write the new initialization segment downstream
+        // Write header to satisfy the new muxer, but swallow it so MSE does not
+        // receive a second init segment.
         if (out_fmt_ctx)
         {
+          __atomic_store_n(&tx_ctx.suppress_output, 1, __ATOMIC_RELEASE);
+
           if (write_fmp4_header(out_fmt_ctx) < 0)
           {
             LOG_ERROR("C-SEEK", "Failed to write fMP4 header after seek");
           }
+
+          if (out_fmt_ctx->pb)
+            avio_flush(out_fmt_ctx->pb);
+
+          __atomic_store_n(&tx_ctx.suppress_output, 0, __ATOMIC_RELEASE);
         }
 
         // CRITICAL: Reset wall-clock baseline so the throttle aligns with the new seek position
@@ -2534,8 +2539,9 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         pipeline_flushed = 0; // Reset flush flag on seek
         // Reset Go-side EOF state for new timeline
         set_session_eof(tx_ctx.go_user_token, 0);
+        __atomic_store_n(&dec_ctx->backpressure_paused, 0, __ATOMIC_RELEASE);
 
-        LOG_INFO("C-SEEK", "Seek to %lld ms succeeded. Resetting PTS counters.", (long long)target_ms);
+        LOG_INFO("C-SEEK", "Seek to %lld ms succeeded (absolute PTS preserved).", (long long)target_ms);
       }
       else
       {
@@ -2547,7 +2553,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       continue;
     }
 
-    if (__atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE))
+    int user_paused = __atomic_load_n(&dec_ctx->paused, __ATOMIC_ACQUIRE);
+    int bp_paused = __atomic_load_n(&dec_ctx->backpressure_paused, __ATOMIC_ACQUIRE);
+
+    if (bp_paused || (user_paused && !just_seeked))
     {
       // Track exactly how long we are paused so we don't burst data when resumed
       if (current_pause_start_us == 0)
@@ -2675,7 +2684,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         {
           if (av_audio_fifo_read(fifo, (void **)enc_frame->data, aac_enc_ctx->frame_size) >= 0)
           {
-            if (audio_pts_counter == -1)
+            if (audio_pts_counter < 0)
               audio_pts_counter = 0;
             enc_frame->pts = audio_pts_counter;
             audio_pts_counter += aac_enc_ctx->frame_size;
@@ -3031,8 +3040,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       else if (aac_enc_ctx && fifo)
       {
         // CRITICAL FIX: Perfect A/V Sync Check
-        // Pre-pad lead-in audio gap with silent PCM FLTP samples to anchor audio start to 0.0s
-        if (audio_pts_counter == -1 && pkt->pts != AV_NOPTS_VALUE)
+        // Start-of-file only. After seek, audio_pts_counter is already at target*48.
+        if (audio_pts_counter < 0 && pkt->pts != AV_NOPTS_VALUE)
         {
           AVStream *in_audio_stream = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx];
           double pkt_pts_sec = pkt->pts * av_q2d(in_audio_stream->time_base);
@@ -3109,7 +3118,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 break; // Exit FIFO processing loop for this frame cycle
               }
 
-              if (audio_pts_counter == -1)
+              if (audio_pts_counter < 0)
                 audio_pts_counter = 0;
               enc_frame->pts = audio_pts_counter;
               audio_pts_counter += aac_enc_ctx->frame_size;
@@ -3183,6 +3192,7 @@ cleanup:
 }
 
 // Small helpers to set control flags from Go in a clean way
+
 void set_dec_ctx_paused(DemuxDecContext *ctx, int paused)
 {
   if (ctx)
@@ -3206,4 +3216,10 @@ void request_stop_on_dec_ctx(DemuxDecContext *ctx)
   {
     __atomic_store_n(&ctx->stop_requested, 1, __ATOMIC_RELEASE);
   }
+}
+
+void set_dec_ctx_backpressure_paused(DemuxDecContext *ctx, int paused)
+{
+  if (ctx)
+    __atomic_store_n(&ctx->backpressure_paused, paused, __ATOMIC_RELEASE);
 }

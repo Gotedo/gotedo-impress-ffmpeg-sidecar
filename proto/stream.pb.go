@@ -116,10 +116,12 @@ func (StreamMode) EnumDescriptor() ([]byte, []int) {
 type ControlRequest_Action int32
 
 const (
-	ControlRequest_PLAY  ControlRequest_Action = 0
-	ControlRequest_PAUSE ControlRequest_Action = 1
-	ControlRequest_SEEK  ControlRequest_Action = 2
-	ControlRequest_STOP  ControlRequest_Action = 3
+	ControlRequest_PLAY                ControlRequest_Action = 0
+	ControlRequest_PAUSE               ControlRequest_Action = 1
+	ControlRequest_SEEK                ControlRequest_Action = 2
+	ControlRequest_STOP                ControlRequest_Action = 3
+	ControlRequest_BACKPRESSURE_PAUSE  ControlRequest_Action = 4
+	ControlRequest_BACKPRESSURE_RESUME ControlRequest_Action = 5
 )
 
 // Enum value maps for ControlRequest_Action.
@@ -129,12 +131,16 @@ var (
 		1: "PAUSE",
 		2: "SEEK",
 		3: "STOP",
+		4: "BACKPRESSURE_PAUSE",
+		5: "BACKPRESSURE_RESUME",
 	}
 	ControlRequest_Action_value = map[string]int32{
-		"PLAY":  0,
-		"PAUSE": 1,
-		"SEEK":  2,
-		"STOP":  3,
+		"PLAY":                0,
+		"PAUSE":               1,
+		"SEEK":                2,
+		"STOP":                3,
+		"BACKPRESSURE_PAUSE":  4,
+		"BACKPRESSURE_RESUME": 5,
 	}
 )
 
@@ -1320,16 +1326,18 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x19\n" +
 	"\bdelay_ms\x18\x02 \x01(\x05R\adelayMs\"-\n" +
 	"\x0fLatencyResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"\xba\x01\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"\xeb\x01\n" +
 	"\x0eControlRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x125\n" +
 	"\x06action\x18\x02 \x01(\x0e2\x1d.ffmpeg.ControlRequest.ActionR\x06action\x12!\n" +
-	"\fseek_seconds\x18\x03 \x01(\x02R\vseekSeconds\"1\n" +
+	"\fseek_seconds\x18\x03 \x01(\x02R\vseekSeconds\"b\n" +
 	"\x06Action\x12\b\n" +
 	"\x04PLAY\x10\x00\x12\t\n" +
 	"\x05PAUSE\x10\x01\x12\b\n" +
 	"\x04SEEK\x10\x02\x12\b\n" +
-	"\x04STOP\x10\x03\"E\n" +
+	"\x04STOP\x10\x03\x12\x16\n" +
+	"\x12BACKPRESSURE_PAUSE\x10\x04\x12\x17\n" +
+	"\x13BACKPRESSURE_RESUME\x10\x05\"E\n" +
 	"\x0fControlResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"\x10\n" +

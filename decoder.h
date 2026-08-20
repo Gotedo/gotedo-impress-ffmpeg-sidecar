@@ -139,11 +139,12 @@ typedef struct DemuxDecContext
   // without races on av_read_frame / av_seek_frame.
   // Decision: Use volatile + atomic operations for simple flags.
   // For seek_target we accept a small race window because seeking is infrequent.
-  volatile int paused;             // 1 = pipeline should stop pushing new data
-  volatile int64_t seek_target_ms; // Target time when seek_requested is set
-  volatile int seek_requested;     // Set to 1 by Go to request a seek
-  volatile int stop_requested;     // Clean exit signal from Go
-  volatile int eof_flushed;        // Indicates if EOF is reached and pipeline flushed; 1 = Flushed
+  volatile int paused;              // 1 = user pause; pipeline should stop pushing new data
+  volatile int backpressure_paused; // 1 = MSE runway too full; throttle remux
+  volatile int64_t seek_target_ms;  // Target time when seek_requested is set
+  volatile int seek_requested;      // Set to 1 by Go to request a seek
+  volatile int stop_requested;      // Clean exit signal from Go
+  volatile int eof_flushed;         // Indicates if EOF is reached and pipeline flushed; 1 = Flushed
 } DemuxDecContext;
 
 typedef struct TranscodeContext
@@ -152,6 +153,8 @@ typedef struct TranscodeContext
   // Holds the current frame's PTS context dynamically
   double current_pts;
   void (*go_callback)(uint8_t *buf, int buf_size, uintptr_t user_token);
+  // 1 = swallow muxer bytes (used to hide a rebuilt ftyp/moov after seek)
+  volatile int suppress_output;
 } TranscodeContext;
 
 // Struct mapping exactly to our proto/Go expectations
@@ -271,6 +274,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token);
 
 // Control flag setters (called from Go to signal the streaming loop)
 void set_dec_ctx_paused(DemuxDecContext *ctx, int paused);
+void set_dec_ctx_backpressure_paused(DemuxDecContext *ctx, int paused);
 void request_seek_on_dec_ctx(DemuxDecContext *ctx, int64_t seek_ms);
 void request_stop_on_dec_ctx(DemuxDecContext *ctx);
 
