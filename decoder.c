@@ -324,13 +324,26 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     // --- HARDWARE ACCELERATION INITIALIZATION ---
     enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
 
+    // Check if codec is unsupported by GPU hardware frameworks (VideoToolbox / D3D11VA / VAAPI)
+    bool is_legacy_unsupported_hw_codec = (video_codec->id == AV_CODEC_ID_MPEG4 ||
+                                           video_codec->id == AV_CODEC_ID_MPEG2VIDEO ||
+                                           video_codec->id == AV_CODEC_ID_MSMPEG4V3);
+
+    if (is_legacy_unsupported_hw_codec)
+    {
+      LOG_INFO("C-DEC", "[HWACCEL] Codec %s is unsupported by hardware frameworks. Forcing software decoder.",
+               avcodec_get_name(video_codec->id));
+    }
+    else
+    {
 #if defined(__APPLE__)
-    hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+      hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
 #elif defined(_WIN32)
-    hw_type = AV_HWDEVICE_TYPE_D3D11VA;
+      hw_type = AV_HWDEVICE_TYPE_D3D11VA;
 #elif defined(__linux__)
-    hw_type = AV_HWDEVICE_TYPE_VAAPI;
+      hw_type = AV_HWDEVICE_TYPE_VAAPI;
 #endif
+    }
 
     // UNCONDITIONAL LOG: Verifies preprocessor macro resolution
     LOG_INFO("C-DEC", "Resolved target hw_type enum: %d (%s)",
@@ -1265,7 +1278,7 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
   {
     AVCodecParameters *a_par = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar;
 
-    if (a_par->codec_id != AV_CODEC_ID_AAC && a_par->codec_id != AV_CODEC_ID_MP3)
+    if (a_par->codec_id != AV_CODEC_ID_AAC && a_par->codec_id != AV_CODEC_ID_OPUS)
     {
       audio_needs_transcode = 1;
       LOG_INFO("C-MUX", "[PASSTHROUGH] Non-MSE audio codec detected (%s). Enabling AAC audio transcode bridge.",
@@ -2178,7 +2191,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   if (dec_ctx->audio_stream_idx >= 0)
   {
     AVCodecParameters *a_par = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar;
-    audio_needs_transcode = (a_par->codec_id != AV_CODEC_ID_AAC && a_par->codec_id != AV_CODEC_ID_MP3);
+    audio_needs_transcode = (a_par->codec_id != AV_CODEC_ID_AAC && a_par->codec_id != AV_CODEC_ID_OPUS);
 
     if (!audio_needs_transcode)
     {
