@@ -910,8 +910,9 @@ build_dep() {
                 ${extra_flags}
 
             # Resolve "Clock skew detected" errors by normalizing timestamps
-            # This ensures no file is "from the future" relative to the container clock.
-            find "${src_dir}" -exec touch -t $(date +%Y%m%d%H%M.%S) {} + 2>/dev/null || true
+            # Ninja aborts if any generated file is newer than the wall clock.
+            # Docker/host clocks often disagree by tens of milliseconds.
+            find "${src_dir}" "${BUILD_DIR}" -exec touch -d '5 seconds ago' {} + 2>/dev/null || true
 
             meson compile -C "${BUILD_DIR}" -j $(nproc) -l $(nproc)
             meson install -C "${BUILD_DIR}"
