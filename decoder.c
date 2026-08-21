@@ -5,9 +5,153 @@
 #include "_cgo_export.h"
 
 /**
+ * Apply low-latency options when the encoder implements them.
+ * av_opt_set returns an error for unknown keys; that is ignored so the
+ * same helper works for libx264, Media Foundation, NVENC, AMF, VAAPI, etc.
+ */
+static void apply_low_latency_encoder_opts(AVCodecContext *enc)
+{
+  void *priv = enc ? enc->priv_data : NULL;
+  if (!priv)
+    return;
+
+  av_opt_set(priv, "tune", "zerolatency", 0);
+  av_opt_set(priv, "profile", "main", 0);
+  av_opt_set_int(priv, "realtime", 1, 0);
+  av_opt_set_int(priv, "async_depth", 1, 0);
+  av_opt_set(priv, "delay", "0", 0);
+
+  /* libx264 uses named presets; NVENC uses p1–p7. Try software first. */
+  if (av_opt_set(priv, "preset", "ultrafast", 0) < 0)
+    av_opt_set(priv, "preset", "p4", 0);
+}
+
+/**
+ * Choose an encoder input format from the formats this codec actually
+ * accepts. FFmpeg 8 deprecates AVCodec.pix_fmts; this uses
+ * avcodec_get_supported_config() instead.
+ *
+ * Prefer the decoder's HW surface (zero-copy). Otherwise NV12, then yuv420p.
+ */
+static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecContext *dec_ctx)
+{
+  const enum AVPixelFormat *fmts = NULL;
+  int ret = avcodec_get_supported_config(enc, NULL, AV_CODEC_CONFIG_PIX_FORMAT, 0,
+                                         (const void **)&fmts, NULL);
+  if (ret < 0 || !fmts)
+    return AV_PIX_FMT_YUV420P;
+
+  if (dec_ctx && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
+  {
+    for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
+    {
+      if (fmts[i] == dec_ctx->hw_pix_fmt)
+        return dec_ctx->hw_pix_fmt;
+    }
+  }
+
+  for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
+  {
+    if (fmts[i] == AV_PIX_FMT_NV12)
+      return AV_PIX_FMT_NV12;
+  }
+  for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
+  {
+    if (fmts[i] == AV_PIX_FMT_YUV420P)
+      return AV_PIX_FMT_YUV420P;
+  }
+  return fmts[0];
+}
+
+/**
+ * Allocate, configure, and open one encoder. On any failure the context is
+ * freed and *out_enc is left untouched.
+ */
+static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
+                                 int width, int height, AVCodecContext **out_enc)
+{
+  AVCodecContext *enc = avcodec_alloc_context3(codec);
+  if (!enc)
+    return AVERROR(ENOMEM);
+
+  enc->width = width;
+  enc->height = height;
+  enc->pix_fmt = pick_encoder_pix_fmt(enc, dec_ctx);
+  enc->time_base = (AVRational){1, 90000};
+  enc->framerate = av_guess_frame_rate(
+      dec_ctx->fmt_ctx,
+      dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx],
+      NULL);
+  if (enc->framerate.num == 0)
+    enc->framerate = (AVRational){25, 1};
+
+  enc->gop_size = 48;
+  enc->max_b_frames = 0;                     // Low latency
+  enc->bit_rate = 4000000;                   // Balanced bitrate for smooth 1080p streaming
+  enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
+
+  /* Share the decoder device only when the encoder can consume that surface.
+   * av_buffer_ref adds a ref; the decoder keeps its own. */
+  if (dec_ctx->video_dec_ctx->hw_device_ctx &&
+      enc->pix_fmt == dec_ctx->hw_pix_fmt)
+  {
+    enc->hw_device_ctx = av_buffer_ref(dec_ctx->video_dec_ctx->hw_device_ctx);
+    if (!enc->hw_device_ctx)
+    {
+      avcodec_free_context(&enc);
+      return AVERROR(ENOMEM);
+    }
+  }
+
+  apply_low_latency_encoder_opts(enc);
+
+  int ret = avcodec_open2(enc, codec, NULL);
+  if (ret < 0)
+  {
+    avcodec_free_context(&enc);
+    return ret;
+  }
+
+  *out_enc = enc;
+  return 0;
+}
+
+/**
+ * Map an AVFrame / AVCodecContext color matrix to a libswscale coefficient set.
+ *
+ * Using the same SWS_CS_DEFAULT table on both ends makes swscale treat the
+ * convert as "matrix differs" for BT.2020 sources and insert
+ * YUV → RGB → YUV. That is what stalled 4K HDR on Windows.
+ *
+ * Destination for this pipeline is always BT.709 (8-bit H.264 for MSE).
+ */
+static int sws_coeff_id_from_colorspace(enum AVColorSpace spc)
+{
+  switch (spc)
+  {
+  case AVCOL_SPC_BT709:
+    return SWS_CS_ITU709;
+  case AVCOL_SPC_BT470BG:
+  case AVCOL_SPC_SMPTE170M:
+    return SWS_CS_ITU601;
+#ifdef SWS_CS_BT2020
+  case AVCOL_SPC_BT2020_NCL:
+  case AVCOL_SPC_BT2020_CL:
+    return SWS_CS_BT2020;
+#endif
+  default:
+    return SWS_CS_ITU709;
+  }
+}
+
+/**
  * Allocates, configures, and opens an H.264 video encoder context.
  * Automatically downscales 4K/UHD source videos to 1080p to ensure
  * real-time software encoding performance.
+ *
+ * Tries compiled-in hardware encoders first. A candidate is used only when
+ * avcodec_find_encoder_by_name finds it and avcodec_open2 succeeds on this
+ * GPU. libx264 is the last resort.
  *
  * @param dec_ctx       Pointer to the active DemuxDecContext.
  * @param out_enc_ctx   Pointer to receive the newly allocated AVCodecContext.
@@ -19,32 +163,16 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
   if (!dec_ctx || !dec_ctx->video_dec_ctx)
     return AVERROR(EINVAL);
 
-  // Attempt to find platform hardware encoders first, fallback to standard H.264
-  const AVCodec *h264_codec = NULL;
-
-#if defined(__APPLE__)
-  h264_codec = avcodec_find_encoder_by_name("h264_videotoolbox");
-#elif defined(_WIN32)
-  h264_codec = avcodec_find_encoder_by_name("h264_nvenc");
-  if (!h264_codec)
-    h264_codec = avcodec_find_encoder_by_name("h264_qsv");
-#endif
-
-  if (!h264_codec)
-  {
-    h264_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-  }
-
-  if (!h264_codec)
-  {
-    return AVERROR_ENCODER_NOT_FOUND;
-  }
-
-  AVCodecContext *enc_ctx = avcodec_alloc_context3(h264_codec);
-  if (!enc_ctx)
-  {
-    return AVERROR(ENOMEM);
-  }
+  static const char *const candidates[] = {
+      "h264_videotoolbox",
+      "h264_mf",
+      "h264_nvenc",
+      "h264_amf",
+      "h264_vaapi",
+      "h264_qsv",
+      "h264_d3d12va",
+      "libx264",
+      NULL};
 
   int src_width = dec_ctx->video_dec_ctx->width;
   int src_height = dec_ctx->video_dec_ctx->height;
@@ -77,56 +205,33 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
              src_width, src_height, target_width, target_height);
   }
 
-  enc_ctx->width = target_width;
-  enc_ctx->height = target_height;
-
-  // Dynamically select pixel format based on active hardware encoder
-  if (strcmp(h264_codec->name, "h264_videotoolbox") == 0 &&
-      dec_ctx->video_dec_ctx->hw_device_ctx != NULL)
+  int last_err = AVERROR_ENCODER_NOT_FOUND;
+  for (int i = 0; candidates[i]; i++)
   {
-    // VideoToolbox accepts native GPU pixel buffers and handles hardware scaling on Apple Silicon
-    enc_ctx->pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX;
-  }
-  else
-  {
-    // Universal YUV420P fallback for libx264, h264_nvenc, and h264_qsv
-    enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-  }
+    const AVCodec *codec = avcodec_find_encoder_by_name(candidates[i]);
+    if (!codec)
+      continue;
 
-  enc_ctx->time_base = (AVRational){1, 90000};
-  enc_ctx->framerate = av_guess_frame_rate(
-      dec_ctx->fmt_ctx,
-      dec_ctx->fmt_ctx->streams[dec_ctx->video_stream_idx],
-      NULL);
-  if (enc_ctx->framerate.num == 0)
-    enc_ctx->framerate = (AVRational){25, 1};
+    AVCodecContext *enc = NULL;
+    int ret = try_open_h264_encoder(dec_ctx, codec, target_width, target_height, &enc);
+    if (ret < 0)
+    {
+      LOG_WARN("C-ENC", "Encoder %s unavailable (%d); trying next candidate",
+               candidates[i], ret);
+      last_err = ret;
+      continue;
+    }
 
-  enc_ctx->gop_size = 48;
-  enc_ctx->max_b_frames = 0;                     // Low latency
-  enc_ctx->bit_rate = 4000000;                   // Balanced bitrate for smooth 1080p streaming
-  enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
-
-  // Configure codec-specific private options safely depending on selected encoder
-  if (strcmp(h264_codec->name, "libx264") == 0)
-  {
-    av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
-    av_opt_set(enc_ctx->priv_data, "preset", "ultrafast", 0);
-    av_opt_set(enc_ctx->priv_data, "tune", "zerolatency", 0);
-  }
-  else if (strcmp(h264_codec->name, "h264_videotoolbox") == 0)
-  {
-    av_opt_set_int(enc_ctx->priv_data, "realtime", 1, 0);
+    LOG_INFO("C-ENC", "Using encoder %s pix_fmt=%s %dx%d",
+             codec->name,
+             av_get_pix_fmt_name(enc->pix_fmt),
+             enc->width,
+             enc->height);
+    *out_enc_ctx = enc;
+    return 0;
   }
 
-  int ret = avcodec_open2(enc_ctx, h264_codec, NULL);
-  if (ret < 0)
-  {
-    avcodec_free_context(&enc_ctx);
-    return ret;
-  }
-
-  *out_enc_ctx = enc_ctx;
-  return 0;
+  return last_err;
 }
 
 /**
@@ -186,23 +291,46 @@ int init_audio_resampler(DemuxDecContext *ctx)
 
 /**
  * Callback to select hardware-accelerated pixel formats dynamically.
+ *
+ * FFmpeg invokes this from avcodec_open2 / the first decode. The decoder
+ * proposes a list; we must return one entry from that list.
+ *
+ * We prefer the surface format recorded when the HW device was created
+ * (ctx->hw_pix_fmt). That is the only OS-agnostic way to accept
+ * videotoolbox, d3d11, d3d12, vaapi, cuda, qsv, etc. without naming them.
+ *
+ * avctx->opaque is the DemuxDecContext that owns this decoder. It is not
+ * allocated here and must not be freed here.
  */
-static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
+static enum AVPixelFormat get_hw_format(AVCodecContext *avctx, const enum AVPixelFormat *pix_fmts)
 {
+  DemuxDecContext *ctx = avctx ? (DemuxDecContext *)avctx->opaque : NULL;
   const enum AVPixelFormat *p;
+  enum AVPixelFormat first_hw = AV_PIX_FMT_NONE;
+
   for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++)
   {
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
     LOG_INFO("C-DEC", "Decoder proposed pixel format: %s (%d)", av_get_pix_fmt_name(*p), *p);
 
-    if (*p == AV_PIX_FMT_VIDEOTOOLBOX ||
-        *p == AV_PIX_FMT_D3D11 ||
-        *p == AV_PIX_FMT_VAAPI ||
-        *p == AV_PIX_FMT_CUDA)
+    if (ctx && *p == ctx->hw_pix_fmt)
     {
       LOG_INFO("C-DEC", "Matched Hardware Pixel Format: %s", av_get_pix_fmt_name(*p));
       return *p;
     }
+
+    if (first_hw == AV_PIX_FMT_NONE && desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+      first_hw = *p;
   }
+
+  if (first_hw != AV_PIX_FMT_NONE)
+  {
+    LOG_INFO("C-DEC", "Matched Hardware Pixel Format: %s", av_get_pix_fmt_name(first_hw));
+    if (ctx)
+      ctx->hw_pix_fmt = first_hw;
+    return first_hw;
+  }
+
   LOG_WARN("C-DEC", "No matching hardware pixel format found. Falling back to software format.");
   return *pix_fmts;
 }
@@ -234,6 +362,8 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   ctx->video_dec_ctx = NULL;
   ctx->audio_dec_ctx = NULL;
   ctx->swr_ctx = NULL;
+  // Do not set it again in the passthrough short-circuit or the fail: path. AV_PIX_FMT_NONE is not a heap object.
+  ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
 
   // CAUTION: Disabled to avoid overriding the values set in Go
   // ctx->is_passthrough = 0;
@@ -322,8 +452,6 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     }
 
     // --- HARDWARE ACCELERATION INITIALIZATION ---
-    enum AVHWDeviceType hw_type = AV_HWDEVICE_TYPE_NONE;
-
     // Check if codec is unsupported by GPU hardware frameworks (VideoToolbox / D3D11VA / VAAPI)
     bool is_legacy_unsupported_hw_codec = (video_codec->id == AV_CODEC_ID_MPEG4 ||
                                            video_codec->id == AV_CODEC_ID_MPEG2VIDEO ||
@@ -336,32 +464,52 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     }
     else
     {
-#if defined(__APPLE__)
-      hw_type = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
-#elif defined(_WIN32)
-      hw_type = AV_HWDEVICE_TYPE_D3D11VA;
-#elif defined(__linux__)
-      hw_type = AV_HWDEVICE_TYPE_VAAPI;
-#endif
-    }
+      /* Try device types in a stable, OS-neutral order. A type is used only
+       * when this codec advertises HW_DEVICE_CTX for it and
+       * av_hwdevice_ctx_create succeeds on this machine. */
+      static const enum AVHWDeviceType preferred[] = {
+          AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+          AV_HWDEVICE_TYPE_D3D11VA,
+          AV_HWDEVICE_TYPE_D3D12VA,
+          AV_HWDEVICE_TYPE_CUDA,
+          AV_HWDEVICE_TYPE_VAAPI,
+          AV_HWDEVICE_TYPE_QSV,
+          AV_HWDEVICE_TYPE_DXVA2,
+          AV_HWDEVICE_TYPE_VULKAN,
+          AV_HWDEVICE_TYPE_NONE};
 
-    // UNCONDITIONAL LOG: Verifies preprocessor macro resolution
-    LOG_INFO("C-DEC", "Resolved target hw_type enum: %d (%s)",
-             hw_type, hw_type != AV_HWDEVICE_TYPE_NONE ? av_hwdevice_get_type_name(hw_type) : "NONE");
-
-    if (hw_type != AV_HWDEVICE_TYPE_NONE)
-    {
-      int hw_ret = av_hwdevice_ctx_create(&ctx->video_dec_ctx->hw_device_ctx, hw_type, NULL, NULL, 0);
-      if (hw_ret < 0)
+      for (int p = 0; preferred[p] != AV_HWDEVICE_TYPE_NONE; p++)
       {
-        LOG_WARN("C-DEC", "Failed to create hardware device context. Falling back to software decoding.");
+        const AVCodecHWConfig *match = NULL;
+        for (int i = 0;; i++)
+        {
+          const AVCodecHWConfig *config = avcodec_get_hw_config(video_codec, i);
+          if (!config)
+            break;
+          if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+              config->device_type == preferred[p])
+          {
+            match = config;
+            break;
+          }
+        }
+        if (!match)
+          continue;
 
-        // Multi-threaded fallback for software decoding
-        ctx->video_dec_ctx->thread_count = 0;
-        ctx->video_dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-      }
-      else
-      {
+        AVBufferRef *hw_device_ctx = NULL;
+        int hw_ret = av_hwdevice_ctx_create(&hw_device_ctx, match->device_type, NULL, NULL, 0);
+        if (hw_ret < 0)
+        {
+          LOG_WARN("C-DEC", "Failed to create hardware device context (%s). Trying next.",
+                   av_hwdevice_get_type_name(match->device_type));
+          continue;
+        }
+
+        /* Transfer ownership of the ref to the decoder context.
+         * avcodec_free_context releases it. Do not unref hw_device_ctx after this. */
+        ctx->video_dec_ctx->hw_device_ctx = hw_device_ctx;
+        ctx->video_dec_ctx->opaque = ctx;
+        ctx->hw_pix_fmt = match->pix_fmt;
         ctx->video_dec_ctx->get_format = get_hw_format;
 
         // CRITICAL FIX: Hardware decoders require single-threaded context configuration in FFmpeg.
@@ -369,11 +517,16 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
         ctx->video_dec_ctx->thread_count = 1;
         ctx->video_dec_ctx->thread_type = 0;
 
-        LOG_INFO("C-DEC", "Successfully initialized hardware acceleration type: %d", hw_type);
+        LOG_INFO("C-DEC", "Successfully initialized hardware acceleration type: %d (%s)",
+                 match->device_type, av_hwdevice_get_type_name(match->device_type));
+        break;
       }
     }
-    else
+
+    if (!ctx->video_dec_ctx->hw_device_ctx)
     {
+      LOG_INFO("C-DEC", "No usable hardware decoder device; using software decode");
+
       // Multi-threaded configuration for platforms without hardware acceleration
       ctx->video_dec_ctx->thread_count = 0;
       ctx->video_dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
@@ -1064,8 +1217,8 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   }
 
   int src_range = (dec_ctx->color_range == AVCOL_RANGE_JPEG);
-  const int *src_inv_table = sws_getCoefficients(dec_ctx->colorspace);
-  const int *dst_inv_table = sws_getCoefficients(AVCOL_SPC_BT709);
+  const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->colorspace));
+  const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
   sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
 
   AVFrame *scaled_frame = av_frame_alloc();
@@ -2161,8 +2314,8 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       // Configure explicit color matrix mapping (crucial for HDR / BT.2020 -> BT.709 conversion)
       int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
-      const int *src_inv_table = sws_getCoefficients(dec_ctx->video_dec_ctx->colorspace);
-      const int *dst_inv_table = sws_getCoefficients(AVCOL_SPC_BT709);
+      const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
+      const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
       sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
 
       enc_video_frame = av_frame_alloc();
@@ -2937,15 +3090,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
               if (sws_ctx)
               {
-                // CRITICAL FIX: Standardize coefficients to prevent sws_scale from
-                // inserting a slow intermediate YUV -> RGB -> YUV conversion pass.
+                /* Source matrix from the decoder; destination is BT.709 for
+                 * 8-bit H.264. Distinct tables avoid the RGB intermediate. */
                 int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
-                int dst_range = 0; // MPEG range
-                const int *table = sws_getCoefficients(SWS_CS_DEFAULT);
+                int dst_range = 0; // MPEG / limited range
+                const int *src_table = sws_getCoefficients(
+                    sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
+                const int *dst_table = sws_getCoefficients(SWS_CS_ITU709);
 
                 sws_setColorspaceDetails(sws_ctx,
-                                         table, src_range,
-                                         table, dst_range,
+                                         src_table, src_range,
+                                         dst_table, dst_range,
                                          0, 1 << 16, 1 << 16);
               }
 

@@ -13,6 +13,7 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/log.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <miniaudio.h>
 #include <string.h>
@@ -120,6 +121,11 @@ typedef struct DemuxDecContext
   AVCodecContext *video_dec_ctx;
   int is_passthrough;                      // 1 = Zero-Copy Remux, 0 = Transcode
   PassthroughContainerType container_type; // CONTAINER_FMP4 (0) or CONTAINER_WEBM (1)
+
+  // Pixel format of the bound HW decoder surface (e.g. d3d11, videotoolbox).
+  // AV_PIX_FMT_NONE when decoding in software or before a device is created.
+  // Owned as a value only — no extra allocation or free is required.
+  enum AVPixelFormat hw_pix_fmt;
 
   // Audio Decoder State
   int audio_stream_idx;
