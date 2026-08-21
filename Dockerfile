@@ -3,76 +3,76 @@
 FROM rust:1.93.1-slim-bookworm
 
 RUN echo 'Acquire::HTTP::Proxy "http://host.docker.internal:3142";' >> /etc/apt/apt.conf.d/01proxy \
-    && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
+  && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
 
 # Install prerequisites to fetch external secure repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget ca-certificates gnupg \
-    && rm -rf /var/lib/apt/lists/*
+  wget ca-certificates gnupg \
+  && rm -rf /var/lib/apt/lists/*
 
 # Add the official LLVM 20 repository key and source lists
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
-    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
-    echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
+  echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
+  echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
 
 # -----------------------------------------------------------------------------
 # Base packages + FFmpeg-specific build tools
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    # Cross compilers & toolchains (Linux & Windows)
-    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-    gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-    mingw-w64 \
-    # Native Base Utilities
-    git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
-    bison flex gperf gettext libglib2.0-dev file binfmt-support \
-    # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
-    clang-20 \
-    lld-20 \
-    llvm-20 \
-    llvm-20-linker-tools \
-    llvm-20-dev \
-    libclang-rt-20-dev \
-    # Windows Execution Compatibility
-    wine wine64 libwine \
-    # FFmpeg-specific Assemblers & Build Tools
-    nasm yasm ccache autoconf automake libtool texinfo \
-    libfreetype6-dev libharfbuzz-dev \
-    # Debugging Tools
-    nano vim \
-    && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y --no-install-recommends \
+  # Cross compilers & toolchains (Linux & Windows)
+  gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+  gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+  mingw-w64 \
+  # Native Base Utilities
+  git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
+  bison flex gperf gettext libglib2.0-dev file binfmt-support \
+  # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
+  clang-20 \
+  lld-20 \
+  llvm-20 \
+  llvm-20-linker-tools \
+  llvm-20-dev \
+  libclang-rt-20-dev \
+  # Windows Execution Compatibility
+  wine wine64 libwine \
+  # FFmpeg-specific Assemblers & Build Tools
+  nasm yasm ccache autoconf automake libtool texinfo \
+  libfreetype6-dev libharfbuzz-dev \
+  # Debugging Tools
+  nano vim \
+  && rm -rf /var/lib/apt/lists/*
 
 # Install Go Toolchain for Sidecar Compilation
 ARG GO_VERSION=1.26.0
 RUN ARCH_SUFFIX=$(dpkg --print-architecture) && \
-    curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH_SUFFIX}.tar.gz" | tar -C /usr/local -xz
+  curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH_SUFFIX}.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Generate Global LLVM 20 System Symlinks (Overriding default LLVM 14)
 RUN ln -sf /usr/bin/clang-20 /usr/bin/clang && \
-    ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
-    ln -sf /usr/bin/lld-20 /usr/bin/lld && \
-    ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
-    ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
-    ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
-    ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
-    ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
-    ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
+  ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
+  ln -sf /usr/bin/lld-20 /usr/bin/lld && \
+  ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
+  ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
+  ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
+  ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
+  ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
+  ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
 
 # Install Meson (needed for dav1d, harfbuzz, etc.)
 RUN pip3 install meson --break-system-packages
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
 
 # LLVM tool symlinks
 RUN ln -s /usr/bin/llvm-install-name-tool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-install-name-tool && \
-    ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
-    ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
+  ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
+  ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
 
 # -----------------------------------------------------------------------------
 # Cache & Install LLVM-Mingw (Windows Toolchain) - identical caching pattern
@@ -126,9 +126,9 @@ EOF
 
 # Install patchelf for Linux relocatable SDK patching
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y patchelf \
-    && rm -rf /var/lib/apt/lists/*
+  --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt-get update && apt-get install -y patchelf \
+  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Cache & Build Apple compiler-rt (builtins) for macOS cross-compilation
@@ -295,7 +295,7 @@ EOF
 
 # Install gas-preprocessor for macOS assembly optimization parsing
 RUN curl -L https://github.com/FFmpeg/gas-preprocessor/raw/master/gas-preprocessor.pl -o /usr/local/bin/gas-preprocessor.pl && \
-    chmod +x /usr/local/bin/gas-preprocessor.pl
+  chmod +x /usr/local/bin/gas-preprocessor.pl
 
 # -----------------------------------------------------------------------------
 # The main builder script
@@ -335,6 +335,8 @@ LIBOGG_VERSION="1.3.5"
 BZIP2_VERSION="1.0.8"
 XZ_VERSION="5.8.3"
 MINIAUDIO_VERSION="0.11.25"
+NV_CODEC_HEADERS_VERSION="13.1.15.0"
+AMF_VERSION="1.5.2"
 
 AUTO_CONF_FLAGS="--enable-static --disable-shared"
 CMAKE_CONF_FLAGS="-DBUILD_SHARED_LIBS=OFF -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_INSTALL_LIBDIR=lib"
@@ -345,6 +347,8 @@ LLVM_MINGW_PATH="/opt/llvm-mingw/$(uname -m)"
 export PATH="$LLVM_MINGW_PATH/bin:${PATH}"
 FFMPEG_OS_FLAGS=""
 EXTRA_FFMPEG_FLAGS=""
+FFMPEG_ENCODERS="libx264,libx265,libvpx-vp9,libaom-av1,png,mjpeg,libwebp,tiff"
+FFMPEG_FILTERS="scale,format,fps,thumbnail,colorspace,ass,hwupload,hwdownload"
 
 OS=${1:-linux}
 ARCH=${2:-amd64}
@@ -400,6 +404,14 @@ case "${OS}-${ARCH}" in
         CXXFLAGS="-Wno-unused-command-line-argument"
         LDFLAGS="-Wno-unused-command-line-argument"
         PLATFORM_LIBS="-lws2_32 -lstdc++"
+        FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_mf,h264_d3d12va,hevc_mf,hevc_d3d12va"
+        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_d3d11,format_d3d11"
+        FFMPEG_OS_FLAGS="--enable-d3d11va --enable-d3d12va --enable-dxva2"
+
+        if [ "$ARCH" = "amd64" ]; then
+            FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
+            FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
+        fi
         PROPERTIES="
 needs_exe_wrapper = true
 has_function_printf = true
@@ -429,6 +441,15 @@ growing_stack = false
         LDFLAGS="-target $TGT -fuse-ld=lld -lm"
         PLATFORM_LIBS="-lstdc++ -lm"
         PROPERTIES=""
+        FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_vaapi,hevc_vaapi"
+        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_vaapi"
+        FFMPEG_OS_FLAGS="--enable-vaapi"
+
+        if [ "$ARCH" = "amd64" ]; then
+            FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
+            FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda"
+            FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
+        fi
         ;;
     darwin-amd64 | darwin-arm64)
         if [ "$ARCH" = "amd64" ]; then
@@ -443,7 +464,9 @@ growing_stack = false
         MESON_SYSTEM="darwin"
         TRIPLE="${MESON_ARCH}-apple-darwin"
         LDFLAGS=""
-        FFMPEG_OS_FLAGS="--enable-videotoolbox --enable-audiotoolbox ${EXTRA_FFMPEG_FLAGS}"
+        FFMPEG_OS_FLAGS="--enable-videotoolbox --enable-audiotoolbox --enable-securetransport ${EXTRA_FFMPEG_FLAGS}"
+        FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_videotoolbox,hevc_videotoolbox"
+        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_vt"
 
         # Darwin Linker Wrapper
         mkdir -p /tmp/darwin-tools
@@ -792,7 +815,7 @@ EOF
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
 ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
-BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}"
+BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
 if [ -f "/output/build.checksum" ]; then
@@ -1258,6 +1281,29 @@ EOF
             make -C "${src_dir}" install
           fi
           ;;
+        header-tree)
+          # extra_flags = "src/subdir dest/subdir" relative to src_dir / sysroot/include
+          local src_rel="${extra_flags%% *}"
+          local dest_rel="${extra_flags#* }"
+          local from="${src_dir}/${src_rel}"
+          local to="${sysroot}/include/${dest_rel}"
+          if [ ! -d "${from}" ]; then
+              echo "ERROR: header tree not found: ${from}"
+              exit 1
+          fi
+          mkdir -p "${to}"
+          cp -R "${from}/." "${to}/"
+          echo ">>> Copied ${from} -> ${to}"
+          ;;
+        make-install)
+          make -C "${src_dir}" PREFIX="${sysroot}" all
+          make -C "${src_dir}" PREFIX="${sysroot}" install
+          if [[ "$name" == "nv-codec-headers" && ! -f "${sysroot}/lib/pkgconfig/ffnvcodec.pc" ]]; then
+            echo "ERROR: make install did not write ${sysroot}/lib/pkgconfig/ffnvcodec.pc"
+            ls -la "${src_dir}"
+            exit 1
+          fi
+          ;;
         *)
             echo "Unsupported build_type: ${build_type}"; exit 1 ;;
     esac
@@ -1267,6 +1313,22 @@ EOF
 # Build all dependencies (order matters for pkg-config)
 # -----------------------------------------------------------------------------
 echo ">>> Building dependencies into ${sysroot}..."
+
+if [[ "$OS" != "darwin" ]]; then
+  # Only available on Windows AMD64 or Linux
+  if [[ "$OS" != "windows" || "$ARCH" == "amd64" ]]; then
+    build_dep "nv-codec-headers" \
+      "https://github.com/FFmpeg/nv-codec-headers/releases/download/n${NV_CODEC_HEADERS_VERSION}/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz" \
+      "${NV_CODEC_HEADERS_VERSION}" \
+      "make-install"
+
+    build_dep "AMF" \
+      "https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v${AMF_VERSION}/AMF-headers-v${AMF_VERSION}.tar.gz" \
+      "headers-v${AMF_VERSION}" \
+      "header-tree" \
+      "AMF AMF"
+  fi
+fi
 
 build_dep "miniaudio" \
     "https://github.com/mackron/miniaudio/archive/refs/tags/${MINIAUDIO_VERSION}.tar.gz" \
@@ -1423,6 +1485,7 @@ export CPLUS_INCLUDE_PATH="${sysroot}/include:${CPLUS_INCLUDE_PATH}"
 FFMPEG_CFLAGS="${CFLAGS}"
 FFMPEG_LDFLAGS="${LDFLAGS}"
 
+
 # Prepare LDFLAGS dynamically based on OS
 # Note: macOS & Linux use -rpath. Windows does not support it, so we exclude it there.
 if [[ "$OS" == "windows" ]]; then
@@ -1553,9 +1616,9 @@ fi
     --disable-rpath \
     --enable-demuxer=mp4,mov,mkv,webm,avi,flv,ts,matroska,ogg,ass,ssa \
     --enable-muxer=mp4,mov,webm,image2 \
-    --enable-encoder=libx264,libx265,libvpx-vp9,libaom-av1,png,mjpeg,libwebp,tiff \
+    --enable-encoder="${FFMPEG_ENCODERS}" \
+    --enable-filter=${FFMPEG_FILTERS} \
     --enable-decoder=h264,hevc,vp9,av1,aac,opus,mp3,png,jpeg,webp,tiff,ass,ssa \
-    --enable-filter=scale,format,fps,thumbnail,colorspace,ass \
     --enable-parser=h264,hevc,vp9,av1,aac,opus \
     --disable-doc \
     --disable-htmlpages \
