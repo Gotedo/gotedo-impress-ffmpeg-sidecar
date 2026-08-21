@@ -294,10 +294,12 @@ tasks:
   build:
     desc: "Builds the sidecar for a specific platform (e.g., task build -- OS=linux ARCH=amd64)"
     vars:
-      OS: '{{.OS | default "darwin"}}'
-      ARCH: '{{.ARCH | default "darwin"}}'
-      TARGET_OS: '{{.OS | default "darwin"}}'
-      TARGET_ARCH: '{{.ARCH | default "arm64"}}'
+      TARGET_OS: '{{.TARGET_OS | default .GOOS | default "darwin"}}'
+      TARGET_ARCH: '{{.TARGET_ARCH | default .GOARCH | default "arm64"}}'
+      HOST_OS:
+        sh: go env GOHOSTOS
+      HOST_ARCH:
+        sh: go env GOHOSTARCH
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
       # Evaluated via root absolute pathing to enforce strict boundaries
       OUT_DIR: '{{if .OUT_DIR}}{{print .ROOT_DIR "/" .OUT_DIR | clean}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
@@ -326,7 +328,7 @@ tasks:
           RELEASE: '{{.RELEASE}}'
     preconditions:
       # Cross-platform directory & contents check (works on macOS, Linux, and Windows PowerShell/cmd)
-      - sh: '{{if eq OS "windows"}}powershell -Command "if (!(Test-Path ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'')) { exit 1 }; if ((Get-ChildItem ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'').Count -eq 0) { exit 1 }"{{else}}[ -d "{{.FFMPEG_LIB_ARCH_DIR}}/lib" ] && [ "$(ls -A "{{.FFMPEG_LIB_ARCH_DIR}}/lib" 2>/dev/null)" ]{{end}}'
+      - sh: '{{if eq .HOST_OS "windows"}}powershell -Command "if (!(Test-Path ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'')) { exit 1 }; if ((Get-ChildItem ''{{.FFMPEG_LIB_ARCH_DIR}}/lib'').Count -eq 0) { exit 1 }"{{else}}[ -d "{{.FFMPEG_LIB_ARCH_DIR}}/lib" ] && [ "$(ls -A "{{.FFMPEG_LIB_ARCH_DIR}}/lib" 2>/dev/null)" ]{{end}}'
         msg: "FFmpeg static dependencies are missing or empty at '{{.FFMPEG_LIB_ARCH_DIR}}'. Please run 'task build:ffmpeg' first."
 
   build:docker:
