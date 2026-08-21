@@ -31,7 +31,10 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
  * accepts. FFmpeg 8 deprecates AVCodec.pix_fmts; this uses
  * avcodec_get_supported_config() instead.
  *
- * Prefer the decoder's HW surface (zero-copy). Otherwise NV12, then yuv420p.
+ * Prefer the decoder's HW surface only when the encoder size already
+ * matches (true zero-copy). A 4K D3D11 frame must not be handed to a
+ * 1080p encoder — that produced green frames and 1 MB NALs.
+ * Otherwise NV12, then yuv420p.
  */
 static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecContext *dec_ctx)
 {
@@ -41,7 +44,12 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
   if (ret < 0 || !fmts)
     return AV_PIX_FMT_YUV420P;
 
-  if (dec_ctx && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
+  int same_size = dec_ctx &&
+                  dec_ctx->video_dec_ctx &&
+                  enc->width == dec_ctx->video_dec_ctx->width &&
+                  enc->height == dec_ctx->video_dec_ctx->height;
+
+  if (same_size && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
   {
     for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
     {
@@ -2960,7 +2968,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             // Check if zero-copy GPU hardware acceleration pipeline is active (cross-platform matching)
             const AVPixFmtDescriptor *frame_desc = av_pix_fmt_desc_get(frame->format);
             bool is_hw_frame = (frame_desc && (frame_desc->flags & AV_PIX_FMT_FLAG_HWACCEL));
-            bool is_direct_gpu_pass = (is_hw_frame && frame->format == h264_enc_ctx->pix_fmt);
+            bool is_direct_gpu_pass = (is_hw_frame &&
+                                       frame->format == h264_enc_ctx->pix_fmt &&
+                                       frame->width == h264_enc_ctx->width &&
+                                       frame->height == h264_enc_ctx->height);
 
             if (!is_direct_gpu_pass)
             {
