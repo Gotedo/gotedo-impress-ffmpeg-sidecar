@@ -21,6 +21,8 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
   av_opt_set_int(priv, "realtime", 1, 0);
   av_opt_set_int(priv, "async_depth", 1, 0);
   av_opt_set(priv, "delay", "0", 0);
+  av_opt_set_int(priv, "bf", 0, 0);       // reinforce no B-frames
+  av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks (ignored if unsupported)
 
   /* libx264 uses named presets; NVENC uses p1–p7. Try software first. */
   if (av_opt_set(priv, "preset", "ultrafast", 0) < 0)
@@ -44,11 +46,6 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
   /* QSV */
   av_opt_set(priv, "look_ahead", "0", 0);        /* low latency */
   av_opt_set_int(priv, "global_quality", 19, 0); /* ICQ-style */
-
-  /* Generic */
-  av_opt_set(priv, "quality", "high", 0);
-  av_opt_set_int(priv, "bf", 0, 0);       // reinforce no B-frames
-  av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks (ignored if unsupported)
 }
 
 /**
@@ -57,9 +54,9 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
  * avcodec_get_supported_config() instead.
  *
  * Prefer the decoder's HW surface only when the encoder size already
- * matches (true zero-copy). A 4K D3D11 frame must not be handed to a
- * 1080p encoder — that produced green frames and 1 MB NALs.
- * Otherwise NV12, then yuv420p.
+ * matches (true zero-copy) AND the encoder can actually consume it.
+ * h264_mf is known to produce garbage when given D3D11 surfaces, so it
+ * is forced onto system-memory formats (NV12 / yuv420p).
  */
 static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecContext *dec_ctx)
 {
@@ -69,7 +66,13 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
   if (ret < 0 || !fmts)
     return AV_PIX_FMT_YUV420P;
 
-  int same_size = dec_ctx &&
+  /* h264_mf cannot reliably consume D3D11 / D3D12 surfaces.
+   * Always feed it system memory. */
+  const char *codec_name = (enc->codec) ? enc->codec->name : NULL;
+  bool force_software = (codec_name && strcmp(codec_name, "h264_mf") == 0);
+
+  int same_size = !force_software &&
+                  dec_ctx &&
                   dec_ctx->video_dec_ctx &&
                   enc->width == dec_ctx->video_dec_ctx->width &&
                   enc->height == dec_ctx->video_dec_ctx->height;
@@ -83,6 +86,7 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
     }
   }
 
+  /* Prefer NV12, then yuv420p (safe software formats) */
   for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
   {
     if (fmts[i] == AV_PIX_FMT_NV12)
@@ -135,15 +139,18 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
   enc->max_b_frames = 0;                     // Low latency
   enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
 
+  /* Always signal BT.709 SDR in the bitstream.
+   * This is required so players treat the fMP4 as standard SDR. */
+  enc->color_primaries = AVCOL_PRI_BT709;
+  enc->color_trc = AVCOL_TRC_BT709;
+  enc->colorspace = AVCOL_SPC_BT709;
+  enc->color_range = AVCOL_RANGE_MPEG;
+
   /* Dynamic high-quality bitrate fallback.
    * Used by encoders that do not support CRF/CQ/CQP (e.g. h264_mf).
    * Quality-first formula based on pixels × fps.
    */
   {
-    double fps = av_q2d(enc->framerate);
-    if (fps < 1.0)
-      fps = 30.0;
-
     double megapixels = (double)(width * height) / 1000000.0;
     int target_bps;
 
@@ -175,9 +182,11 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
              target_bps / 1000, width, height, fps);
   }
 
-  /* Share the decoder device only when the encoder can consume that surface.
-   * av_buffer_ref adds a ref; the decoder keeps its own. */
-  if (dec_ctx->video_dec_ctx->hw_device_ctx &&
+  /* Share the decoder device ONLY when the encoder can actually consume
+   * that surface. Never attach a D3D11 device to h264_mf. */
+  bool is_mf = (strcmp(codec->name, "h264_mf") == 0);
+  if (!is_mf &&
+      dec_ctx->video_dec_ctx->hw_device_ctx &&
       enc->pix_fmt == dec_ctx->hw_pix_fmt)
   {
     enc->hw_device_ctx = av_buffer_ref(dec_ctx->video_dec_ctx->hw_device_ctx);
@@ -187,13 +196,6 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
       return AVERROR(ENOMEM);
     }
   }
-
-  /* Always signal BT.709 SDR in the bitstream.
-   * This is required so players treat the fMP4 as standard SDR. */
-  enc->color_primaries = AVCOL_PRI_BT709;
-  enc->color_trc = AVCOL_TRC_BT709;
-  enc->colorspace = AVCOL_SPC_BT709;
-  enc->color_range = AVCOL_RANGE_MPEG;
 
   apply_low_latency_encoder_opts(enc);
 
@@ -264,8 +266,8 @@ static bool is_hdr_source(const AVCodecContext *dec)
  *   1. Try native resolution
  *   2. Fall back to 1440p → 1080p → 720p only when no encoder
  *      can open at the higher size.
- * This keeps 4K/8K when a capable encoder is present and only
- * downscales by the minimum amount required for real-time operation.
+ * Weak encoders (h264_mf, libx264) are never offered native/1440p –
+ * they cannot sustain real-time 4K.
  *
  * Tries compiled-in hardware encoders first (quality-first portable order).
  * A candidate is used only when avcodec_find_encoder_by_name finds it and
@@ -373,6 +375,17 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
         continue;
       }
 
+      /* Weak encoders cannot sustain real-time 4K / 1440p.
+       * Skip high resolutions for them. */
+      bool is_weak = (strcmp(candidates[i], "h264_mf") == 0 ||
+                      strcmp(candidates[i], "libx264") == 0);
+      if (is_weak && (target_width > 1920 || target_height > 1080))
+      {
+        LOG_INFO("C-ENC", "  Skipping %s at %dx%d (weak encoder, needs ≤1080p)",
+                 candidates[i], target_width, target_height);
+        continue;
+      }
+
       AVCodecContext *enc = NULL;
       int ret = try_open_h264_encoder(dec_ctx, codec, target_width, target_height, &enc);
       if (ret < 0)
@@ -397,8 +410,7 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
       LOG_INFO("C-ENC", "Selected encoder: %s  pix_fmt=%s  %dx%d",
                codec->name,
                av_get_pix_fmt_name(enc->pix_fmt),
-               enc->width,
-               enc->height);
+               enc->width, enc->height);
 
       /* Final configuration summary – one clear line for operators */
       LOG_INFO("C-ENC", "FINAL: encoder=%s  %dx%d  pix_fmt=%s  bitrate=%lld kbps  gop=%d  max_b=%d",
