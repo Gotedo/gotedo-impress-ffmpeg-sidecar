@@ -5,7 +5,7 @@
 #include "_cgo_export.h"
 
 /**
- * Apply low-latency options when the encoder implements them.
+ * Apply low-latency + high-quality options when the encoder implements them.
  * av_opt_set returns an error for unknown keys; that is ignored so the
  * same helper works for libx264, Media Foundation, NVENC, AMF, VAAPI, etc.
  */
@@ -15,6 +15,7 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
   if (!priv)
     return;
 
+  /* ---- Low-latency common options ---- */
   av_opt_set(priv, "tune", "zerolatency", 0);
   av_opt_set(priv, "profile", "main", 0);
   av_opt_set_int(priv, "realtime", 1, 0);
@@ -23,7 +24,31 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
 
   /* libx264 uses named presets; NVENC uses p1–p7. Try software first. */
   if (av_opt_set(priv, "preset", "ultrafast", 0) < 0)
-    av_opt_set(priv, "preset", "p4", 0);
+    av_opt_set(priv, "preset", "p4", 0); /* NVENC balanced quality */
+
+  /* ---- Quality-based rate control (preferred) ---- */
+  /* libx264 / x264rgb */
+  av_opt_set(priv, "crf", "19", 0); /* high quality, still real-time capable */
+
+  /* NVENC */
+  av_opt_set(priv, "rc", "constqp", 0);
+  av_opt_set_int(priv, "qp", 19, 0);
+  av_opt_set(priv, "rc", "vbr", 0); /* fallback if constqp rejected */
+  av_opt_set_int(priv, "cq", 19, 0);
+
+  /* AMF */
+  av_opt_set(priv, "rc", "cqp", 0);
+  av_opt_set_int(priv, "qp_i", 18, 0);
+  av_opt_set_int(priv, "qp_p", 20, 0);
+
+  /* QSV */
+  av_opt_set(priv, "look_ahead", "0", 0);        /* low latency */
+  av_opt_set_int(priv, "global_quality", 19, 0); /* ICQ-style */
+
+  /* Generic */
+  av_opt_set(priv, "quality", "high", 0);
+  av_opt_set_int(priv, "bf", 0, 0);       // reinforce no B-frames
+  av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks (ignored if unsupported)
 }
 
 /**
@@ -93,10 +118,62 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
   if (enc->framerate.num == 0)
     enc->framerate = (AVRational){25, 1};
 
-  enc->gop_size = 48;
+  /* ~1 second GOP, clamped to sensible limits.
+   * Shorter GOPs improve seek responsiveness; longer ones help compression.
+   */
+  double fps = av_q2d(enc->framerate);
+  if (fps < 1.0)
+    fps = 30.0;
+
+  int gop = (int)(fps + 0.5); // ≈ 1 second
+  if (gop < 30)
+    gop = 30;
+  if (gop > 120)
+    gop = 120;
+
+  enc->gop_size = gop;
   enc->max_b_frames = 0;                     // Low latency
-  enc->bit_rate = 4000000;                   // Balanced bitrate for smooth 1080p streaming
   enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; // Required for fMP4 / MSE
+
+  /* Dynamic high-quality bitrate fallback.
+   * Used by encoders that do not support CRF/CQ/CQP (e.g. h264_mf).
+   * Quality-first formula based on pixels × fps.
+   */
+  {
+    double fps = av_q2d(enc->framerate);
+    if (fps < 1.0)
+      fps = 30.0;
+
+    double megapixels = (double)(width * height) / 1000000.0;
+    int target_bps;
+
+    if (width >= 3840)
+    {                                                          /* 4K / 8K */
+      target_bps = (int)(megapixels * fps * 0.13 * 1000000.0); /* ~20-35 Mbps */
+    }
+    else if (width >= 2560)
+    { /* 1440p */
+      target_bps = (int)(megapixels * fps * 0.11 * 1000000.0);
+    }
+    else if (width >= 1920)
+    {                                                          /* 1080p */
+      target_bps = (int)(megapixels * fps * 0.10 * 1000000.0); /* ~8-14 Mbps */
+    }
+    else
+    {
+      target_bps = (int)(megapixels * fps * 0.09 * 1000000.0);
+    }
+
+    /* Sane clamps */
+    if (target_bps < 3000000)
+      target_bps = 3000000;
+    if (target_bps > 45000000)
+      target_bps = 45000000;
+
+    enc->bit_rate = target_bps;
+    LOG_INFO("C-ENC", "Dynamic bitrate fallback: %d kbps for %dx%d @ %.2f fps",
+             target_bps / 1000, width, height, fps);
+  }
 
   /* Share the decoder device only when the encoder can consume that surface.
    * av_buffer_ref adds a ref; the decoder keeps its own. */
@@ -110,6 +187,13 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
       return AVERROR(ENOMEM);
     }
   }
+
+  /* Always signal BT.709 SDR in the bitstream.
+   * This is required so players treat the fMP4 as standard SDR. */
+  enc->color_primaries = AVCOL_PRI_BT709;
+  enc->color_trc = AVCOL_TRC_BT709;
+  enc->colorspace = AVCOL_SPC_BT709;
+  enc->color_range = AVCOL_RANGE_MPEG;
 
   apply_low_latency_encoder_opts(enc);
 
@@ -153,13 +237,39 @@ static int sws_coeff_id_from_colorspace(enum AVColorSpace spc)
 }
 
 /**
+ * Returns true when the source should be treated as HDR.
+ * Used to select higher-quality scaling and correct output tags.
+ */
+static bool is_hdr_source(const AVCodecContext *dec)
+{
+  if (!dec)
+    return false;
+
+  /* Transfer characteristics */
+  if (dec->color_trc == AVCOL_TRC_SMPTE2084 ||  /* PQ */
+      dec->color_trc == AVCOL_TRC_ARIB_STD_B67) /* HLG */
+    return true;
+
+  /* Primaries (BT.2020 is a strong signal even if TRC is missing) */
+  if (dec->color_primaries == AVCOL_PRI_BT2020)
+    return true;
+
+  return false;
+}
+
+/**
  * Allocates, configures, and opens an H.264 video encoder context.
- * Automatically downscales 4K/UHD source videos to 1080p to ensure
- * real-time software encoding performance.
  *
- * Tries compiled-in hardware encoders first. A candidate is used only when
- * avcodec_find_encoder_by_name finds it and avcodec_open2 succeeds on this
- * GPU. libx264 is the last resort.
+ * Quality-first resolution policy:
+ *   1. Try native resolution
+ *   2. Fall back to 1440p → 1080p → 720p only when no encoder
+ *      can open at the higher size.
+ * This keeps 4K/8K when a capable encoder is present and only
+ * downscales by the minimum amount required for real-time operation.
+ *
+ * Tries compiled-in hardware encoders first (quality-first portable order).
+ * A candidate is used only when avcodec_find_encoder_by_name finds it and
+ * avcodec_open2 succeeds on this GPU. libx264 is the last resort.
  *
  * @param dec_ctx       Pointer to the active DemuxDecContext.
  * @param out_enc_ctx   Pointer to receive the newly allocated AVCodecContext.
@@ -171,74 +281,140 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
   if (!dec_ctx || !dec_ctx->video_dec_ctx)
     return AVERROR(EINVAL);
 
+  /* Quality-first portable order.
+   * Never hard-code preference for a particular machine.
+   * We try to open each encoder at the target resolution;
+   * first success wins.
+   */
   static const char *const candidates[] = {
-      "h264_videotoolbox",
-      "h264_mf",
-      "h264_nvenc",
-      "h264_amf",
-      "h264_vaapi",
-      "h264_qsv",
-      "h264_d3d12va",
-      "libx264",
+      "h264_nvenc",        // Best quality + latency (NVIDIA Turing+)
+      "h264_amf",          // AMD
+      "h264_qsv",          // Intel Quick Sync
+      "h264_videotoolbox", // Apple
+      "h264_d3d12va",      // Modern Windows HW path
+      "h264_mf",           // Windows Media Foundation (fallback)
+      "libx264",           // Software last resort
       NULL};
 
-  int src_width = dec_ctx->video_dec_ctx->width;
-  int src_height = dec_ctx->video_dec_ctx->height;
+  const int src_width = dec_ctx->video_dec_ctx->width;
+  const int src_height = dec_ctx->video_dec_ctx->height;
+  const float aspect = (float)src_width / (float)src_height;
 
-  // Downscale 4K / UHD sources to 1080p max for real-time CPU encoding performance
-  int target_width = src_width;
-  int target_height = src_height;
+  /* Resolution ladder – highest quality first.
+   * Only lower steps are added when native exceeds them.
+   */
+  typedef struct
+  {
+    int w, h;
+    const char *label;
+  } ResCandidate;
 
+  ResCandidate resolutions[4];
+  int res_count = 0;
+
+  /* 1. Native */
+  resolutions[res_count++] = (ResCandidate){src_width, src_height, "native"};
+
+  /* 2. 1440p if native is larger */
+  if (src_width > 2560 || src_height > 1440)
+  {
+    int w = 2560;
+    int h = (int)(2560.0f / aspect);
+    w &= ~1;
+    h &= ~1;
+    resolutions[res_count++] = (ResCandidate){w, h, "1440p"};
+  }
+
+  /* 3. 1080p if still larger */
   if (src_width > 1920 || src_height > 1080)
   {
-    float aspect = (float)src_width / (float)src_height;
-
-    // Scale based on whichever dimension exceeds its limit more aggressively
+    int w, h;
     if ((float)src_width / 1920.0f > (float)src_height / 1080.0f)
     {
-      target_width = 1920;
-      target_height = (int)(1920.0f / aspect);
+      w = 1920;
+      h = (int)(1920.0f / aspect);
     }
     else
     {
-      target_height = 1080;
-      target_width = (int)(1080.0f * aspect);
+      h = 1080;
+      w = (int)(1080.0f * aspect);
     }
+    w &= ~1;
+    h &= ~1;
+    resolutions[res_count++] = (ResCandidate){w, h, "1080p"};
+  }
 
-    // Ensure both dimensions are even numbers for YUV420P compatibility
-    target_width &= ~1;
-    target_height &= ~1;
-
-    LOG_INFO("C-ENC", "Downscaling video from %dx%d to %dx%d for real-time streaming",
-             src_width, src_height, target_width, target_height);
+  /* 4. 720p last resort */
+  if (src_width > 1280 || src_height > 720)
+  {
+    int w = 1280;
+    int h = (int)(1280.0f / aspect);
+    w &= ~1;
+    h &= ~1;
+    resolutions[res_count++] = (ResCandidate){w, h, "720p"};
   }
 
   int last_err = AVERROR_ENCODER_NOT_FOUND;
-  for (int i = 0; candidates[i]; i++)
+
+  for (int r = 0; r < res_count; r++)
   {
-    const AVCodec *codec = avcodec_find_encoder_by_name(candidates[i]);
-    if (!codec)
-      continue;
+    const int target_width = resolutions[r].w;
+    const int target_height = resolutions[r].h;
 
-    AVCodecContext *enc = NULL;
-    int ret = try_open_h264_encoder(dec_ctx, codec, target_width, target_height, &enc);
-    if (ret < 0)
+    LOG_INFO("C-ENC", "Trying resolution %s (%dx%d) ...",
+             resolutions[r].label, target_width, target_height);
+
+    for (int i = 0; candidates[i]; i++)
     {
-      LOG_WARN("C-ENC", "Encoder %s unavailable (%d); trying next candidate",
-               candidates[i], ret);
-      last_err = ret;
-      continue;
-    }
+      const AVCodec *codec = avcodec_find_encoder_by_name(candidates[i]);
+      if (!codec)
+      {
+        LOG_INFO("C-ENC", "  Encoder %s not present in this FFmpeg build", candidates[i]);
+        continue;
+      }
 
-    LOG_INFO("C-ENC", "Using encoder %s pix_fmt=%s %dx%d",
-             codec->name,
-             av_get_pix_fmt_name(enc->pix_fmt),
-             enc->width,
-             enc->height);
-    *out_enc_ctx = enc;
-    return 0;
+      AVCodecContext *enc = NULL;
+      int ret = try_open_h264_encoder(dec_ctx, codec, target_width, target_height, &enc);
+      if (ret < 0)
+      {
+        LOG_WARN("C-ENC", "  Encoder %s failed to open at %dx%d (%d); trying next",
+                 candidates[i], target_width, target_height, ret);
+        last_err = ret;
+        continue;
+      }
+
+      /* Success */
+      if (target_width != src_width || target_height != src_height)
+      {
+        LOG_INFO("C-ENC", "Downscaling from %dx%d → %dx%d (%s) for real-time capability",
+                 src_width, src_height, target_width, target_height, resolutions[r].label);
+      }
+      else
+      {
+        LOG_INFO("C-ENC", "Using native resolution %dx%d", src_width, src_height);
+      }
+
+      LOG_INFO("C-ENC", "Selected encoder: %s  pix_fmt=%s  %dx%d",
+               codec->name,
+               av_get_pix_fmt_name(enc->pix_fmt),
+               enc->width,
+               enc->height);
+
+      /* Final configuration summary – one clear line for operators */
+      LOG_INFO("C-ENC", "FINAL: encoder=%s  %dx%d  pix_fmt=%s  bitrate=%lld kbps  gop=%d  max_b=%d",
+               codec->name,
+               enc->width, enc->height,
+               av_get_pix_fmt_name(enc->pix_fmt),
+               (long long)(enc->bit_rate / 1000),
+               enc->gop_size,
+               enc->max_b_frames);
+
+      *out_enc_ctx = enc;
+      return 0;
+    }
   }
 
+  LOG_ERROR("C-ENC", "No usable H.264 encoder found at any resolution (last error %d)", last_err);
   return last_err;
 }
 
@@ -377,8 +553,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   // ctx->is_passthrough = 0;
   // ctx->container_type = CONTAINER_FMP4; // Default safe fallback
 
-  // Enable verbose FFmpeg internal logging
-  av_log_set_level(AV_LOG_VERBOSE);
+  av_log_set_level(AV_LOG_INFO); // or AV_LOG_WARNING for production
 
   // 1. Open the media file container and extract initial stream parameters
   ret = avformat_open_input(&ctx->fmt_ctx, input_path, NULL, NULL);
@@ -833,7 +1008,7 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices)
 #if defined(__APPLE__) && (defined(MA_HAS_COREAUDIO) || defined(MA_SUPPORT_COREAUDIO) || defined(MINIAUDIO_H))
     // On macOS, extract the native CoreAudio AudioDeviceID from miniaudio's device ID union.
     // This provides a valid integer string (e.g. "74") required by CoreAudio's SetDefaultOutputDevice.
-    uint32_t native_id = (uint32_t)pPlaybackDeviceInfos[i].id.coreaudio;
+    uint32_t native_id = (uint32_t)(uintptr_t)pPlaybackDeviceInfos[i].id.coreaudio;
     snprintf(devices[count].id, sizeof(devices[count].id), "%u", native_id);
 #else
     // On non-Apple platforms where the browser manages audio output via HTMLMediaElement.setSinkId(),
@@ -2262,7 +2437,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       ret = init_h264_encoder(dec_ctx, &h264_enc_ctx);
       if (ret < 0)
       {
-        LOG_FFMPEG_ERR("C-MUX", "Failed to initialize H.264 encoder", ret);
+        LOG_FFMPEG_ERR("C-MUX", "Failed to initialize H.264 encoder – no usable encoder/resolution combination", ret);
         free_fmp4_muxer(out_fmt_ctx);
         return ret;
       }
@@ -2307,11 +2482,22 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
 
       // Colour-space converter (any decoder output -> target software pixel format)
+      // Prefer higher quality when source is HDR or we are significantly downscaling.
+      int sws_flags = SWS_FAST_BILINEAR;
+      bool hdr = is_hdr_source(dec_ctx->video_dec_ctx);
+
+      if (hdr ||
+          dec_ctx->video_dec_ctx->width > h264_enc_ctx->width * 1.5 ||
+          dec_ctx->video_dec_ctx->height > h264_enc_ctx->height * 1.5)
+      {
+        sws_flags = SWS_BICUBIC;
+      }
+
       sws_ctx = sws_getContext(
           dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
           init_src_fmt,
           h264_enc_ctx->width, h264_enc_ctx->height, init_dst_fmt,
-          SWS_FAST_BILINEAR, NULL, NULL, NULL);
+          sws_flags, NULL, NULL, NULL);
 
       if (!sws_ctx)
       {
@@ -2325,6 +2511,13 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
       const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
       sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
+
+      if (hdr)
+      {
+        LOG_INFO("C-ENC", "HDR source detected at init (primaries/trc). "
+                          "Using higher-quality scaler + BT.2020→BT.709 matrix. "
+                          "Full PQ/HLG tone-map requires zscale/libplacebo (future).");
+      }
 
       enc_video_frame = av_frame_alloc();
       if (!enc_video_frame)
@@ -2973,6 +3166,27 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                        frame->width == h264_enc_ctx->width &&
                                        frame->height == h264_enc_ctx->height);
 
+            // One-time path logging
+            static int logged_zerocopy = 0;
+            static int logged_swpath = 0;
+
+            if (is_direct_gpu_pass)
+            {
+              if (!logged_zerocopy)
+              {
+                LOG_INFO("C-ENC", "Zero-copy HW surface path active (encoder accepts decoder surface)");
+                logged_zerocopy = 1;
+              }
+            }
+            else
+            {
+              if (!logged_swpath)
+              {
+                LOG_INFO("C-ENC", "Software path active (HW transfer + sws_scale required)");
+                logged_swpath = 1;
+              }
+            }
+
             if (!is_direct_gpu_pass)
             {
               // 1. Generic Hardware Surface Check:
@@ -3090,14 +3304,23 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 }
               }
 
-              // 2. Dynamic Scale Context Management with Direct Color Conversion:
-              // Reuses or updates sws_ctx based on sw_frame's ACTUAL pixel format (e.g. NV12/P010LE).
-              // Prevents "bad src image pointers" errors when scaling transferred GPU frames.
+              // 2. Dynamic Scale Context Management with Direct Color Conversion
+              // Prefer higher quality when source is HDR or we are downscaling a lot.
+              int sws_flags = SWS_FAST_BILINEAR;
+              bool hdr = is_hdr_source(dec_ctx->video_dec_ctx);
+
+              if (hdr ||
+                  sw_frame->width > h264_enc_ctx->width * 1.5 ||
+                  sw_frame->height > h264_enc_ctx->height * 1.5)
+              {
+                sws_flags = SWS_BICUBIC; /* better quality for HDR / large downscales */
+              }
+
               sws_ctx = sws_getCachedContext(
                   sws_ctx,
                   sw_frame->width, sw_frame->height, sw_frame->format,
                   h264_enc_ctx->width, h264_enc_ctx->height, dst_pix_fmt,
-                  SWS_FAST_BILINEAR, NULL, NULL, NULL);
+                  sws_flags, NULL, NULL, NULL);
 
               if (sws_ctx)
               {
@@ -3105,6 +3328,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                  * 8-bit H.264. Distinct tables avoid the RGB intermediate. */
                 int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
                 int dst_range = 0; // MPEG / limited range
+
                 const int *src_table = sws_getCoefficients(
                     sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
                 const int *dst_table = sws_getCoefficients(SWS_CS_ITU709);
@@ -3113,6 +3337,13 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                          src_table, src_range,
                                          dst_table, dst_range,
                                          0, 1 << 16, 1 << 16);
+
+                if (hdr)
+                {
+                  LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
+                                    "Applying BT.2020→BT.709 matrix + higher-quality scaler. "
+                                    "Full PQ/HLG tone-map requires zscale/libplacebo (future).");
+                }
               }
 
               // Colour conversion + encode
