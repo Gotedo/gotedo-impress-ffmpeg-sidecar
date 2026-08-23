@@ -337,6 +337,7 @@ XZ_VERSION="5.8.3"
 MINIAUDIO_VERSION="0.11.25"
 NV_CODEC_HEADERS_VERSION="13.1.15.0"
 AMF_VERSION="1.5.2"
+ZIMG_VERSION="3.0.6"
 
 AUTO_CONF_FLAGS="--enable-static --disable-shared"
 CMAKE_CONF_FLAGS="-DBUILD_SHARED_LIBS=OFF -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_INSTALL_LIBDIR=lib"
@@ -345,7 +346,7 @@ MESON_CONF_FLAGS="--default-library=static"
 SDK_PATH="/opt/macos-sdk"
 LLVM_MINGW_PATH="/opt/llvm-mingw/$(uname -m)"
 export PATH="$LLVM_MINGW_PATH/bin:${PATH}"
-FFMPEG_OS_FLAGS=""
+FFMPEG_OS_FLAGS="--enable-libzimg"
 EXTRA_FFMPEG_FLAGS=""
 FFMPEG_ENCODERS="libx264,libx265,libvpx-vp9,libaom-av1,png,mjpeg,libwebp,tiff"
 FFMPEG_FILTERS="scale,format,fps,thumbnail,colorspace,ass,hwupload,hwdownload"
@@ -405,11 +406,13 @@ case "${OS}-${ARCH}" in
         LDFLAGS="-Wno-unused-command-line-argument"
         PLATFORM_LIBS="-lws2_32 -lstdc++"
         FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_mf,h264_d3d12va,hevc_mf,hevc_d3d12va"
-        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_d3d11,format_d3d11"
-        FFMPEG_OS_FLAGS="--enable-d3d11va --enable-d3d12va --enable-dxva2"
+        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_d3d11,format_d3d11,zscale,tonemap"
+        FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-d3d11va --enable-d3d12va --enable-dxva2"
 
         if [ "$ARCH" = "amd64" ]; then
+            # NVIDIA + AMD (headers only; uses driver at runtime on the target PC)
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
+            FMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
         fi
         PROPERTIES="
@@ -442,8 +445,8 @@ growing_stack = false
         PLATFORM_LIBS="-lstdc++ -lm"
         PROPERTIES=""
         FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_vaapi,hevc_vaapi"
-        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_vaapi"
-        FFMPEG_OS_FLAGS="--enable-vaapi"
+        FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_vaapi,zscale,tonemap"
+        FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-vaapi"
 
         if [ "$ARCH" = "amd64" ]; then
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
@@ -464,7 +467,7 @@ growing_stack = false
         MESON_SYSTEM="darwin"
         TRIPLE="${MESON_ARCH}-apple-darwin"
         LDFLAGS=""
-        FFMPEG_OS_FLAGS="--enable-videotoolbox --enable-audiotoolbox --enable-securetransport ${EXTRA_FFMPEG_FLAGS}"
+        FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-videotoolbox --enable-audiotoolbox --enable-securetransport ${EXTRA_FFMPEG_FLAGS}"
         FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_videotoolbox,hevc_videotoolbox"
         FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_vt"
 
@@ -815,7 +818,7 @@ EOF
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
 ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
-BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}"
+BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}|${ZIMG_VERSION}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
 if [ -f "/output/build.checksum" ]; then
@@ -993,6 +996,10 @@ EOF
                 EXTRA_AUTOTOOLS_CFLAGS="-DPCRE2_STATIC"
                 EXTRA_AUTOTOOLS_CXXFLAGS="-DPCRE2_STATIC"
             fi
+
+            # Normalize Windows header casing for case-sensitive Linux filesystems
+            find "${src_dir}" -type f \( -name "*.cpp" -o -name "*.h" -o -name "*.c" -o -name "*.hpp" \) \
+                -exec sed -i 's/#include <Windows\.h>/#include <windows\.h>/g' {} +
           fi
 
           # Cross-platform Libtool Sanitation
@@ -1036,6 +1043,17 @@ EOF
             # Only inject the Darwin wrapper when targeting macOS
             LOCAL_CC="${LOCAL_CC} -B/tmp/darwin-tools --ld-path=/tmp/darwin-tools/ld"
             LOCAL_CXX="${LOCAL_CXX} -B/tmp/darwin-tools --ld-path=/tmp/darwin-tools/ld"
+          fi
+
+          # Pre-generate ./configure if missing (specifically for zimg)
+          if [[ ! -f "${src_dir}/configure" && "$name" == "zimg" ]]; then
+            echo ">>> Generating configure script for ${name}..."
+            (cd "${src_dir}" && \
+              if [ -f "./autogen.sh" ]; then
+                sh ./autogen.sh
+              else
+                autoreconf -fiv
+              fi)
           fi
 
           # =====================================================
@@ -1314,6 +1332,10 @@ EOF
 # Build all dependencies (order matters for pkg-config)
 # -----------------------------------------------------------------------------
 echo ">>> Building dependencies into ${sysroot}..."
+
+build_dep "zimg" \
+  "https://github.com/sekrit-twc/zimg/archive/refs/tags/release-${ZIMG_VERSION}.tar.gz" \
+  "release-${ZIMG_VERSION}" "autotools" "--disable-shared --enable-static" ".tar.gz" "tar -xzf"
 
 if [[ "$OS" != "darwin" ]]; then
   # Only available on Windows AMD64 or Linux
