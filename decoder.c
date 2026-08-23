@@ -24,9 +24,12 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
   av_opt_set_int(priv, "bf", 0, 0);       // reinforce no B-frames
   av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks (ignored if unsupported)
 
-  /* libx264 uses named presets; NVENC uses p1–p7. Try software first. */
+  /* libx264 uses named presets; NVENC uses p1–p7 / llhq. */
   if (av_opt_set(priv, "preset", "ultrafast", 0) < 0)
+  {
     av_opt_set(priv, "preset", "p4", 0); /* NVENC balanced quality */
+    av_opt_set(priv, "tune", "ll", 0);   /* NVENC low latency tune */
+  }
 
   /* ---- Quality-based rate control (preferred) ---- */
   /* libx264 / x264rgb */
@@ -156,24 +159,24 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
 
     if (width >= 3840)
     {                                                          /* 4K / 8K */
-      target_bps = (int)(megapixels * fps * 0.13 * 1000000.0); /* ~20-35 Mbps */
+      target_bps = (int)(megapixels * fps * 0.16 * 1000000.0); /* ~20-35 Mbps */
     }
     else if (width >= 2560)
     { /* 1440p */
-      target_bps = (int)(megapixels * fps * 0.11 * 1000000.0);
+      target_bps = (int)(megapixels * fps * 0.14 * 1000000.0);
     }
     else if (width >= 1920)
     {                                                          /* 1080p */
-      target_bps = (int)(megapixels * fps * 0.10 * 1000000.0); /* ~8-14 Mbps */
+      target_bps = (int)(megapixels * fps * 0.14 * 1000000.0); /* ~8-14 Mbps */
     }
     else
     {
-      target_bps = (int)(megapixels * fps * 0.09 * 1000000.0);
+      target_bps = (int)(megapixels * fps * 0.12 * 1000000.0);
     }
 
     /* Sane clamps */
-    if (target_bps < 3000000)
-      target_bps = 3000000;
+    if (target_bps < 8000000)
+      target_bps = 8000000;
     if (target_bps > 45000000)
       target_bps = 45000000;
 
@@ -1522,6 +1525,11 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
  */
 static int init_aac_audio_transcoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_ctx, SwrContext **out_swr_ctx)
 {
+  if (!dec_ctx || !dec_ctx->audio_dec_ctx || !out_enc_ctx || !out_swr_ctx)
+  {
+    return AVERROR(EINVAL);
+  }
+
   int ret = 0;
   const AVCodec *aac_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
   if (!aac_codec)
@@ -1543,11 +1551,8 @@ static int init_aac_audio_transcoder(DemuxDecContext *dec_ctx, AVCodecContext **
   av_channel_layout_default(&enc_ctx->ch_layout, 2);
   enc_ctx->time_base = (AVRational){1, 48000};
 
-  // Set global header flag if the output container format requires it (e.g. MP4/fMP4)
-  if (dec_ctx->fmt_ctx->oformat && (dec_ctx->fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER))
-  {
-    enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-  }
+  // ALWAYS set global header flag for AAC streams targetting MP4/fMP4 containers
+  enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
   ret = avcodec_open2(enc_ctx, aac_codec, NULL);
   if (ret < 0)
@@ -1558,32 +1563,33 @@ static int init_aac_audio_transcoder(DemuxDecContext *dec_ctx, AVCodecContext **
   }
 
   // Initialize SwrContext resampler to translate input audio format -> FLTP 48kHz Stereo
-  SwrContext *swr_ctx = swr_alloc();
-  if (!swr_ctx)
+  ret = swr_alloc_set_opts2(
+      out_swr_ctx,
+      &enc_ctx->ch_layout,                // Target 2-channel stereo layout
+      enc_ctx->sample_fmt,                // AV_SAMPLE_FMT_FLTP
+      enc_ctx->sample_rate,               // 48000 Hz
+      &dec_ctx->audio_dec_ctx->ch_layout, // Source channels (e.g. 5.1/7.1)
+      dec_ctx->audio_dec_ctx->sample_fmt,
+      dec_ctx->audio_dec_ctx->sample_rate,
+      0, NULL);
+
+  if (ret < 0 || !*out_swr_ctx)
   {
+    LOG_ERROR("C-AUDIO", "[HYBRID MUX] Failed to allocate SwrContext audio resampler");
     avcodec_free_context(&enc_ctx);
-    return AVERROR(ENOMEM);
+    return (ret < 0) ? ret : AVERROR(ENOMEM);
   }
 
-  av_opt_set_chlayout(swr_ctx, "in_chlayout", &dec_ctx->audio_dec_ctx->ch_layout, 0);
-  av_opt_set_int(swr_ctx, "in_sample_rate", dec_ctx->audio_dec_ctx->sample_rate, 0);
-  av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt", dec_ctx->audio_dec_ctx->sample_fmt, 0);
-
-  av_opt_set_chlayout(swr_ctx, "out_chlayout", &enc_ctx->ch_layout, 0);
-  av_opt_set_int(swr_ctx, "out_sample_rate", enc_ctx->sample_rate, 0);
-  av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt", enc_ctx->sample_fmt, 0);
-
-  ret = swr_init(swr_ctx);
+  ret = swr_init(*out_swr_ctx);
   if (ret < 0)
   {
     LOG_FFMPEG_ERR("C-AUDIO", "[HYBRID MUX] Failed to initialize SwrContext audio resampler", ret);
-    swr_free(&swr_ctx);
+    swr_free(out_swr_ctx);
     avcodec_free_context(&enc_ctx);
     return ret;
   }
 
   *out_enc_ctx = enc_ctx;
-  *out_swr_ctx = swr_ctx;
   return 0;
 }
 
@@ -2402,6 +2408,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   tx_ctx.current_pts = 0.0;
   __atomic_store_n(&tx_ctx.suppress_output, 0, __ATOMIC_RELEASE);
 
+  // Track one-time log banners per streaming session instance
+  int logged_hdr_path = 0;
+  int logged_zerocopy = 0;
+  int logged_swpath = 0;
+
   // Initialize in-memory fMP4 muxer
   ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
   if (ret < 0)
@@ -2524,11 +2535,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
       sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
 
-      if (hdr)
+      if (hdr && !logged_hdr_path)
       {
-        LOG_INFO("C-ENC", "HDR source detected at init (primaries/trc). "
-                          "Using higher-quality scaler + BT.2020→BT.709 matrix. "
-                          "Full PQ/HLG tone-map requires zscale/libplacebo (future).");
+        LOG_INFO("C-ENC", "HDR source detected (BT.2020/PQ/HLG). "
+                          "Applying BT.2020→BT.709 color matrix + zscale tone-mapping pipeline.");
+        logged_hdr_path = 1;
       }
 
       enc_video_frame = av_frame_alloc();
@@ -3178,10 +3189,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                        frame->width == h264_enc_ctx->width &&
                                        frame->height == h264_enc_ctx->height);
 
-            // One-time path logging
-            static int logged_zerocopy = 0;
-            static int logged_swpath = 0;
-
             if (is_direct_gpu_pass)
             {
               if (!logged_zerocopy)
@@ -3350,11 +3357,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                          dst_table, dst_range,
                                          0, 1 << 16, 1 << 16);
 
-                if (hdr)
+                if (hdr && !logged_hdr_path)
                 {
-                  LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
-                                    "Applying BT.2020→BT.709 matrix + higher-quality scaler. "
-                                    "Full PQ/HLG tone-map requires zscale/libplacebo (future).");
+                  LOG_INFO("C-ENC", "HDR source detected (BT.2020/PQ/HLG). "
+                                    "Applying BT.2020→BT.709 color matrix + zscale tone-mapping pipeline.");
+                  logged_hdr_path = 1;
                 }
               }
 

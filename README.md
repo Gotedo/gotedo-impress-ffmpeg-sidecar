@@ -329,7 +329,14 @@ cd gotedo-impress-ffmpeg-sidecar
 go mod tidy
 
 # 3. Compile and install 'go-task' into the local repository
+
+```bash
 GOBIN="$(pwd)/bin" go install github.com/go-task/task/v3/cmd/task@latest
+```
+
+```powershell
+$env:GOBIN = "$PWD\bin"; go install github.com/go-task/task/v3/cmd/task@latest
+```
 
 ```
 
