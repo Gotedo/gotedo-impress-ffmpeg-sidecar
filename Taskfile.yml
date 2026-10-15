@@ -41,6 +41,12 @@ tasks:
   create-ffmpeg-builder:
     desc: Set up a dedicated buildx container builder instance
     internal: true
+    # The builder image is independent of the mounted source tree. Reusing an
+    # existing image avoids exporting the full LLVM/Go toolchain on every
+    # cross-build. Use `task --force build` after changing Dockerfile/toolchain
+    # instructions when an image refresh is intentional.
+    status:
+      - docker image inspect ffmpeg-builder > /dev/null 2>&1
     cmds:
       - cmd: powershell -NoProfile -Command "if (-not (docker buildx ls | Select-String 'ffmpeg-builder')) { docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap } else { docker buildx use ffmpeg-builder }"
         platforms: [windows]
@@ -59,7 +65,6 @@ tasks:
           --build-arg BUILDKIT_INLINE_CACHE=1 \
           --build-arg APT_PROXY="{{.APT_PROXY}}" \
           --cache-from=type=local,src="{{.TASKFILE_DIR | toSlash}}/build_cache/buildx" \
-          --cache-to=type=local,dest="{{.TASKFILE_DIR | toSlash}}/build_cache/buildx",mode=max \
           --cache-to=type=inline \
           -t ffmpeg-builder \
           -f "{{.TASKFILE_DIR | toSlash}}/Dockerfile" \
@@ -128,6 +133,13 @@ tasks:
     dir: '{{.TASKFILE_DIR}}' # Force compilation directory to always be here
     cmds:
       - |
+        {{if and (eq OS "windows") (eq .GOOS "windows")}}
+        # LLVM-MinGW packages do not always ship the x64 crypt32 import
+        # library, while the Windows FFmpeg archive may contain schannel
+        # objects that require it. Generate a local import library once from
+        # the signed system DLL so same-host native builds remain self-hosted.
+        powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '{{.TASKFILE_DIR}}/build_cache/native_windows/{{.GOARCH}}/lib' | Out-Null; if (!(Test-Path '{{.TASKFILE_DIR}}/build_cache/native_windows/{{.GOARCH}}/lib/libcrypt32.a')) { Push-Location '{{.TASKFILE_DIR}}/build_cache/native_windows/{{.GOARCH}}/lib'; & '{{.WINDOWS_MINGW_BIN}}/gendef.exe' 'C:/Windows/System32/crypt32.dll'; & '{{.WINDOWS_MINGW_BIN}}/dlltool.exe' -d crypt32.def -l libcrypt32.a -m i386:x86-64; Pop-Location }"
+        {{end}}
         if [ "{{.IS_TEST}}" = "true" ]; then
           echo ">>> Running integration tests for {{.GOOS}}/{{.GOARCH}}..."
           {{if eq OS "windows"}}
@@ -184,19 +196,18 @@ tasks:
             exit 0
           fi
           set -- \
-            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/*/bin/gcc.exe \
-            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/bin/gcc.exe \
-            "${USERPROFILE}/scoop/apps/llvm-mingw/current/bin/gcc.exe" \
-            "C:/llvm-mingw/bin/gcc.exe" \
+            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/*/bin \
+            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/bin \
+            "${USERPROFILE}/scoop/apps/llvm-mingw/current/bin" \
+            "C:/llvm-mingw/bin" \
             "${USERPROFILE}/scoop/apps/mingw/current/bin" \
-            "${USERPROFILE}/scoop/apps/mingw/current/bin/gcc.exe" \
-            "${USERPROFILE}/scoop/apps/gcc/current/bin/gcc.exe" \
-            "C:/msys64/mingw64/bin/gcc.exe" \
-            "C:/mingw64/bin/gcc.exe" \
-            "C:/ProgramData/mingw64/mingw64/bin/gcc.exe"
+            "${USERPROFILE}/scoop/apps/gcc/current/bin" \
+            "C:/msys64/mingw64/bin" \
+            "C:/mingw64/bin" \
+            "C:/ProgramData/mingw64/mingw64/bin"
           for p in "$@"; do
-            if [ -f "$p" ]; then
-              echo "${p%/*}"
+            if [ -f "$p/gcc.exe" ]; then
+              echo "$p"
               exit 0
             fi
           done
@@ -241,11 +252,12 @@ tasks:
       # Windows requires Winsock and threading libraries
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
       LDFLAGS_EXTRA: >-
+        -L{{.TASKFILE_DIR}}/build_cache/native_windows/{{.GOARCH}}/lib
         -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame
         -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv
-        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon
-        -lc++
+        -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon
+        -lc++ -lpthread
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32
         -lmfplat -lmfuuid -lstrmiids -luuid
         -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
@@ -312,13 +324,16 @@ tasks:
         sh: go env GOHOSTOS
       HOST_ARCH:
         sh: go env GOHOSTARCH
+      NATIVE: '{{.NATIVE | default "false"}}'
       DEFAULT_OUT_DIR: '{{.TASKFILE_DIR}}/bin'
       # Evaluated via root absolute pathing to enforce strict boundaries
       OUT_DIR: '{{if .OUT_DIR}}{{print .ROOT_DIR "/" .OUT_DIR | clean}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
       DEFAULT_OUT_FILE_NAME: 'sidecar_{{.TARGET_OS}}_{{.TARGET_ARCH}}'
       OUT_FILE_NAME: '{{.OUT_FILE_NAME | default .DEFAULT_OUT_FILE_NAME}}'
-      # Dynamically choose the target task name based on whether it matches the host OS/Arch
-      TARGET_TASK: '{{if and (eq .TARGET_OS OS) (eq .TARGET_ARCH ARCH)}}build:native:{{.TARGET_OS}}{{else}}build:docker{{end}}'
+      # Use native compilation whenever target and host really match. This is
+      # deliberately based on Go's host values rather than Task's OS/ARCH
+      # built-ins, which may be overridden while testing cross-build routing.
+      TARGET_TASK: '{{if or (eq .NATIVE "true") (and (eq .TARGET_OS .HOST_OS) (eq .TARGET_ARCH .HOST_ARCH))}}build:native:{{.TARGET_OS}}{{else}}build:docker{{end}}'
       DEFAULT_FFMPEG_LIB_DIR: '{{$.TASKFILE_DIR}}/dist'
       FFMPEG_LIB_DIR: '{{if .FFMPEG_LIB_DIR}}{{print .ROOT_DIR "/" .FFMPEG_LIB_DIR | clean}}{{else}}{{.DEFAULT_FFMPEG_LIB_DIR}}{{end}}'
       FFMPEG_LIB_ARCH_DIR: '{{.FFMPEG_LIB_DIR}}/{{.TARGET_OS}}/{{.TARGET_ARCH}}'

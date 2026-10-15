@@ -131,6 +131,9 @@ typedef struct DemuxDecContext
   // AV_PIX_FMT_NONE when decoding in software or before a device is created.
   // Owned as a value only — no extra allocation or free is required.
   enum AVPixelFormat hw_pix_fmt;
+  // Device backing hw_pix_fmt. This preserves decoder/encoder hardware
+  // pairing (for example CUDA -> NVENC and D3D12VA -> h264_d3d12va).
+  enum AVHWDeviceType hw_device_type;
 
   // Audio Decoder State
   int audio_stream_idx;
