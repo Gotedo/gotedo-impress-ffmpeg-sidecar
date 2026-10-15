@@ -669,6 +669,176 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
   return last_err;
 }
 
+static void copy_playback_probe_text(char *dst, size_t dst_size, const char *src)
+{
+  if (!dst || dst_size == 0)
+    return;
+  if (!src)
+    src = "";
+  snprintf(dst, dst_size, "%s", src);
+}
+
+static bool is_hardware_encoder_name(const char *name)
+{
+  if (!name)
+    return false;
+
+  return strcmp(name, "h264_nvenc") == 0 ||
+         strcmp(name, "h264_amf") == 0 ||
+         strcmp(name, "h264_d3d12va") == 0 ||
+         strcmp(name, "h264_qsv") == 0 ||
+         strcmp(name, "h264_vaapi") == 0 ||
+         strcmp(name, "h264_videotoolbox") == 0;
+}
+
+static int probe_one_hardware_video_frame(DemuxDecContext *ctx)
+{
+  if (!ctx || !ctx->fmt_ctx || !ctx->video_dec_ctx || ctx->video_stream_idx < 0)
+    return 0;
+
+  AVPacket *packet = av_packet_alloc();
+  AVFrame *frame = av_frame_alloc();
+  if (!packet || !frame)
+  {
+    av_packet_free(&packet);
+    av_frame_free(&frame);
+    return 0;
+  }
+
+  int hardware_frame = 0;
+  int packets_checked = 0;
+  while (packets_checked++ < 128 && av_read_frame(ctx->fmt_ctx, packet) >= 0)
+  {
+    if (packet->stream_index == ctx->video_stream_idx)
+    {
+      int send_ret = avcodec_send_packet(ctx->video_dec_ctx, packet);
+      if (send_ret >= 0 || send_ret == AVERROR(EAGAIN))
+      {
+        for (;;)
+        {
+          int receive_ret = avcodec_receive_frame(ctx->video_dec_ctx, frame);
+          if (receive_ret == AVERROR(EAGAIN) || receive_ret == AVERROR_EOF)
+            break;
+          if (receive_ret < 0)
+            break;
+
+          const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get((enum AVPixelFormat)frame->format);
+          if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+            hardware_frame = 1;
+          av_frame_unref(frame);
+          break;
+        }
+      }
+    }
+
+    av_packet_unref(packet);
+    if (hardware_frame)
+      break;
+  }
+
+  av_packet_free(&packet);
+  av_frame_free(&frame);
+  return hardware_frame;
+}
+
+int probe_playback_support(const char *file_path, CPlaybackSupport *support)
+{
+  if (!file_path || !support)
+    return AVERROR(EINVAL);
+
+  memset(support, 0, sizeof(*support));
+  copy_playback_probe_text(support->failure_code, sizeof(support->failure_code), "unknown");
+
+  DemuxDecContext dec_ctx;
+  memset(&dec_ctx, 0, sizeof(dec_ctx));
+  dec_ctx.is_passthrough = 0;
+  dec_ctx.hw_pix_fmt = AV_PIX_FMT_NONE;
+  dec_ctx.hw_device_type = AV_HWDEVICE_TYPE_NONE;
+
+  int ret = open_input_and_decoders(&dec_ctx, file_path);
+  if (ret < 0)
+  {
+    copy_playback_probe_text(support->failure_code, sizeof(support->failure_code), "decoder_open_failed");
+    copy_playback_probe_text(support->reason, sizeof(support->reason),
+                             "The media decoder could not be initialized for this file.");
+    free_demux_dec_context(&dec_ctx);
+    return ret;
+  }
+
+  int attempted_hw_device = dec_ctx.hw_device_type != AV_HWDEVICE_TYPE_NONE;
+  int decoded_hw_frame = attempted_hw_device ? probe_one_hardware_video_frame(&dec_ctx) : 0;
+  support->hardware_decode_supported = decoded_hw_frame;
+  support->decoder_device_type = dec_ctx.hw_device_type;
+  support->decoder_frame_format = dec_ctx.hw_pix_fmt;
+
+  if (decoded_hw_frame)
+    copy_playback_probe_text(support->decoder_backend, sizeof(support->decoder_backend),
+                             av_hwdevice_get_type_name(dec_ctx.hw_device_type));
+  else
+    copy_playback_probe_text(support->decoder_backend, sizeof(support->decoder_backend), "software");
+
+  AVCodecContext *encoder = NULL;
+  int encoder_ret = init_h264_encoder(&dec_ctx, &encoder);
+  if (encoder_ret >= 0 && encoder)
+  {
+    const char *encoder_name = encoder->codec ? encoder->codec->name : "unknown";
+    bool hardware_encoder = is_hardware_encoder_name(encoder_name);
+    bool same_dimensions = encoder->width == dec_ctx.video_dec_ctx->width &&
+                           encoder->height == dec_ctx.video_dec_ctx->height;
+    bool zero_copy = decoded_hw_frame && hardware_encoder && same_dimensions &&
+                     encoder->hw_frames_ctx && encoder->pix_fmt == dec_ctx.hw_pix_fmt;
+
+    support->hardware_encode_supported = hardware_encoder;
+    support->zero_copy_supported = zero_copy;
+    support->native_gpu_supported = zero_copy;
+    support->cpu_fallback_available = !zero_copy;
+    support->encoder_width = encoder->width;
+    support->encoder_height = encoder->height;
+    copy_playback_probe_text(support->encoder_backend, sizeof(support->encoder_backend), encoder_name);
+
+    if (zero_copy)
+    {
+      copy_playback_probe_text(support->failure_code, sizeof(support->failure_code), "");
+      copy_playback_probe_text(support->reason, sizeof(support->reason),
+                               "Native GPU decode and encode are available for this media file.");
+    }
+    else if (!decoded_hw_frame)
+    {
+      copy_playback_probe_text(support->failure_code, sizeof(support->failure_code),
+                               "gpu_decode_capability");
+      copy_playback_probe_text(support->reason, sizeof(support->reason),
+                               "The selected GPU decoder could not produce a hardware frame for this media format.");
+    }
+    else if (!hardware_encoder)
+    {
+      copy_playback_probe_text(support->failure_code, sizeof(support->failure_code),
+                               "gpu_encode_unavailable");
+      copy_playback_probe_text(support->reason, sizeof(support->reason),
+                               "Hardware decoding is available, but no compatible GPU H.264 encoder could be opened.");
+    }
+    else
+    {
+      copy_playback_probe_text(support->failure_code, sizeof(support->failure_code),
+                               "zero_copy_unavailable");
+      copy_playback_probe_text(support->reason, sizeof(support->reason),
+                               "GPU decode and encode are available, but they cannot share a native surface for this stream.");
+    }
+
+    avcodec_free_context(&encoder);
+  }
+  else
+  {
+    support->cpu_fallback_available = 0;
+    copy_playback_probe_text(support->failure_code, sizeof(support->failure_code),
+                             "no_h264_encoder");
+    copy_playback_probe_text(support->reason, sizeof(support->reason),
+                             "No H.264 encoder is available for browser-compatible playback.");
+  }
+
+  free_demux_dec_context(&dec_ctx);
+  return 0;
+}
+
 /**
  * Initializes the audio resampler context (SwrContext).
  *

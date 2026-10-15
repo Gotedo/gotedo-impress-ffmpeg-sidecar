@@ -24,6 +24,9 @@ service FFmpegService {
     // Probe metadata properties directly via static analysis
     rpc GetMediaProperties(MetadataRequest) returns (MetadataResponse);
 
+    // Probe the actual decoder/encoder path without starting playback.
+    rpc GetPlaybackSupport(PlaybackSupportRequest) returns (PlaybackSupportResponse);
+
     // Extract a standalone compressed frame at a specific offset
     rpc GetVideoScreenshot(ScreenshotRequest) returns (ScreenshotResponse);
 
@@ -47,6 +50,12 @@ message StreamRequest {
     string audio_device_id = 3;
     StreamMode stream_mode = 4; // passthrough or transcode
     PassthroughContainerFormat container = 5;   // CONTAINER_FMP4 or CONTAINER_WEBM
+    ProcessingPolicy processing_policy = 6; // GPU required unless CPU fallback is explicitly allowed
+}
+
+enum ProcessingPolicy {
+    PROCESSING_GPU_REQUIRED = 0;
+    PROCESSING_ALLOW_CPU = 1;
 }
 
 message StreamResponse {
@@ -106,6 +115,35 @@ message DevicesResponse {
 
 message MetadataRequest {
     string file_path = 1;
+}
+
+message PlaybackSupportRequest {
+    string file_path = 1;
+}
+
+enum PlaybackSupportStatus {
+    PLAYBACK_SUPPORT_UNKNOWN = 0;
+    PLAYBACK_SUPPORT_NATIVE_GPU = 1;
+    PLAYBACK_SUPPORT_GPU_ASSISTED = 2;
+    PLAYBACK_SUPPORT_CPU_FALLBACK = 3;
+    PLAYBACK_SUPPORT_UNAVAILABLE = 4;
+}
+
+message PlaybackSupportResponse {
+    PlaybackSupportStatus status = 1;
+    bool native_gpu_supported = 2;
+    bool hardware_decode_supported = 3;
+    bool hardware_encode_supported = 4;
+    bool zero_copy_supported = 5;
+    bool cpu_fallback_available = 6;
+    string operating_system = 7;
+    string architecture = 8;
+    string decoder_backend = 9;
+    string encoder_backend = 10;
+    string failure_code = 11;
+    string reason = 12;
+    string recommendation = 13;
+    string cpu_warning = 14;
 }
 
 message MetadataResponse {

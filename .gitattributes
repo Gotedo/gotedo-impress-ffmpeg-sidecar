@@ -1,0 +1,1 @@
+assets/(HDR[[:space:]]HEVC[[:space:]]10-bit[[:space:]]BT.2020[[:space:]]24fps)[[:space:]]Exodus[[:space:]]Sample.mp4 filter=lfs diff=lfs merge=lfs -text
