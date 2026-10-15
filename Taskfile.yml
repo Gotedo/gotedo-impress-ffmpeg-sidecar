@@ -145,8 +145,9 @@ tasks:
           {{if eq OS "windows"}}
           CC="{{.WINDOWS_MINGW_BIN}}/gcc.exe" \
           CXX="{{.WINDOWS_MINGW_BIN}}/g++.exe" \
-          PATH="{{.WINDOWS_MINGW_BIN}};$PATH" \
+          PATH="{{.WINDOWS_MINGW_BIN}};{{.FFMPEG_SRC_DIR}}/bin;$PATH" \
           {{end}}
+          GOCACHE="{{.TASKFILE_DIR}}/build_cache/go_build_cache/{{.GOOS}}/{{.GOARCH}}" \
           CGO_ENABLED=1 \
           CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" \
           CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
@@ -182,7 +183,11 @@ tasks:
       FFMPEG_SRC_BASE: '{{.FFMPEG_LIB_DIR | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
       # Match the dynamic build directory to the target platform, not the host machine
       FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
-      LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}} {{.FFMPEG_SRC_DIR}}/lib/libz.a'
+      # Keep the compression library as a normal linker flag. Appending the
+      # resolved archive path made Go reject Windows integration-test flags
+      # when FFMPEG_LIB_DIR was supplied as a relative path (..\\..\\libs).
+      # The FFmpeg lib directory is already first in the search path above.
+      LDFLAGS_EXTRA: '{{.LDFLAGS_EXTRA}} -lz'
 
       # Safe filename resolver with defensive extension appending
       DEFAULT_FILE_NAME: 'sidecar_{{.GOOS}}_{{.GOARCH}}'

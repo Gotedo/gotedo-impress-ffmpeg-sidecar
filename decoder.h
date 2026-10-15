@@ -238,6 +238,7 @@ typedef struct
   int32_t hardware_encode_supported;
   int32_t zero_copy_supported;
   int32_t cpu_fallback_available;
+  int32_t encoder_frame_tested;
   int32_t decoder_device_type;
   int32_t decoder_frame_format;
   int32_t encoder_width;

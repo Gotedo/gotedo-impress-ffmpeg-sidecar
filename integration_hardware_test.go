@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/gotedo/gotedo-impress-ffmpeg-sidecar/proto"
@@ -407,6 +409,94 @@ func TestIntegration_PlaybackSupportPreflight(t *testing.T) {
 	t.Logf("[SUPPORT REPORT] status=%s native_gpu=%t decoder=%s encoder=%s failure=%s recommendation=%s",
 		resp.GetStatus().String(), resp.GetNativeGpuSupported(), resp.GetDecoderBackend(),
 		resp.GetEncoderBackend(), resp.GetFailureCode(), resp.GetRecommendation())
+}
+
+// TestE2E_PlaybackSupportPolicyAndFirstChunk verifies the complete contract:
+// support probing validates a real encoder frame, GPU-required playback fails
+// closed when no verified GPU path exists, and an explicitly permitted fallback
+// still delivers a browser-consumable fragment.
+func TestIntegration_E2E_PlaybackSupportPolicyAndFirstChunk(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelProbe()
+	capabilities, err := client.GetPlaybackSupport(probeCtx, &proto.PlaybackSupportRequest{
+		FilePath: mediaPath,
+	})
+	if err != nil {
+		t.Fatalf("End-to-end playback support query failed: %v", err)
+	}
+
+	if capabilities.GetStatus() == proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_UNKNOWN {
+		t.Fatal("End-to-end playback support query returned UNKNOWN")
+	}
+	if capabilities.GetEncoderBackend() != "" && !capabilities.GetEncoderFrameTested() {
+		t.Fatal("Encoder backend was reported without a successful real-frame probe")
+	}
+	if capabilities.GetEncoderFrameTested() &&
+		(capabilities.GetEncoderWidth() <= 0 || capabilities.GetEncoderHeight() <= 0) {
+		t.Fatalf("Real-frame probe did not report a valid encoder size: %dx%d",
+			capabilities.GetEncoderWidth(), capabilities.GetEncoderHeight())
+	}
+
+	verifiedGPUPath := capabilities.GetNativeGpuSupported() ||
+		(capabilities.GetHardwareDecodeSupported() &&
+			capabilities.GetHardwareEncodeSupported() &&
+			capabilities.GetEncoderFrameTested())
+
+	if !verifiedGPUPath {
+		gpuCtx, cancelGPU := context.WithTimeout(context.Background(), 10*time.Second)
+		gpuStream, gpuErr := client.StartStream(gpuCtx, &proto.StreamRequest{
+			TargetId:         "e2e-gpu-required",
+			FilePath:         mediaPath,
+			StreamMode:       proto.StreamMode_transcode,
+			Container:        proto.PassthroughContainerFormat_CONTAINER_FMP4,
+			ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_GPU_REQUIRED,
+		})
+		if gpuErr == nil {
+			_, gpuErr = gpuStream.Recv()
+		}
+		cancelGPU()
+		if status.Code(gpuErr) != codes.FailedPrecondition {
+			t.Fatalf("GPU-required stream should fail closed without a verified GPU path; got %v", gpuErr)
+		}
+	}
+
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStream()
+	stream, err := client.StartStream(streamCtx, &proto.StreamRequest{
+		TargetId:         "e2e-first-fragment",
+		FilePath:         mediaPath,
+		StreamMode:       proto.StreamMode_transcode,
+		Container:        proto.PassthroughContainerFormat_CONTAINER_FMP4,
+		ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_ALLOW_CPU,
+	})
+	if err != nil {
+		t.Fatalf("Explicitly permitted fallback stream failed to start: %v", err)
+	}
+
+	// The initialization and audio-only fragments are small.  Requiring a
+	// substantially larger fragment ensures the test reaches a real encoded
+	// video access unit, exercising the live hardware-frame transfer,
+	// downscale, and H.264 encode path.
+	const minimumMediaFragmentBytes = 4096
+	for {
+		fragment, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("Explicitly permitted fallback stream did not deliver a fragment: %v", recvErr)
+		}
+		if len(fragment.GetFmp4Chunk()) >= minimumMediaFragmentBytes {
+			t.Logf("[E2E REPORT] Video-sized fMP4 fragment received: %d bytes; status=%s decoder=%s encoder=%s size=%dx%d",
+				len(fragment.GetFmp4Chunk()), capabilities.GetStatus().String(),
+				capabilities.GetDecoderBackend(), capabilities.GetEncoderBackend(),
+				capabilities.GetEncoderWidth(), capabilities.GetEncoderHeight())
+			return
+		}
+	}
 }
 
 // -------------------------------------------------------------------------
