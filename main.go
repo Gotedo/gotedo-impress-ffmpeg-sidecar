@@ -40,10 +40,21 @@ type ChunkPayload struct {
 // SessionContext tracks the state isolated to a single active playback monitor
 type SessionContext struct {
 	StreamChan      chan ChunkPayload
+	Done            chan struct{}
+	doneOnce        sync.Once
 	CurrentPTS      float64
 	IsEOF           int32 // int32 for atomic operations
 	Mu              sync.Mutex
 	playbackSession *PlaybackSession
+}
+
+// stop unblocks a C write callback when its gRPC client disconnects.  The
+// callback normally blocks on StreamChan to apply real backpressure, so it
+// needs an explicit escape path before its cgo.Handle is deleted.
+func (s *SessionContext) stop() {
+	if s != nil && s.Done != nil {
+		s.doneOnce.Do(func() { close(s.Done) })
+	}
 }
 
 // Per-target playback session registry (enables safe concurrent playbacks)
@@ -116,6 +127,9 @@ func unregisterPlayback(targetID string) {
 	playbacksMu.Unlock()
 
 	// 1. CRITICAL FIX: Signal the C streaming loop to terminate cleanly
+	if sess.SessionCtx != nil {
+		sess.SessionCtx.stop()
+	}
 	if sess.DecCtx != nil {
 		C.request_stop_on_dec_ctx(sess.DecCtx)
 	}
@@ -194,10 +208,14 @@ func goStreamWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	pts := session.CurrentPTS
 	session.Mu.Unlock()
 
-	// Push data cleanly into this monitor's private channel array
-	// Stream the chunk alongside the current active time context
-	// Allow the channel to block the C thread to establish backpressure.
-	session.StreamChan <- ChunkPayload{Data: data, PTS: pts}
+	// Preserve every fMP4 byte. A bounded channel intentionally blocks the C
+	// producer when gRPC/WebSocket/MSE is behind; dropping an arbitrary AVIO
+	// chunk corrupts a fragment and creates an unrecoverable playback gap.
+	select {
+	case session.StreamChan <- ChunkPayload{Data: data, PTS: pts}:
+	case <-session.Done:
+		return
+	}
 }
 
 //export set_session_eof
@@ -350,9 +368,12 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	}
 
 	// 1. Create isolated Go session context + cgo handle
-	// PERFORMANCE FIX: Increased buffer from 100 to 10000 for high-bitrate 4K fMP4 streams
+	// A small bounded queue is deliberate: it propagates pressure from the
+	// browser through gRPC to FFmpeg instead of accumulating hundreds of MiB
+	// or dropping partial fMP4 data.
 	sessionCtx := &SessionContext{
-		StreamChan: make(chan ChunkPayload, 10000),
+		StreamChan: make(chan ChunkPayload, 64),
+		Done:       make(chan struct{}),
 	}
 
 	// Wrap this private instance in a localized runtime Cgo handle

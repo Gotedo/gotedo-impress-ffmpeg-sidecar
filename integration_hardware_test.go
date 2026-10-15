@@ -405,6 +405,10 @@ func TestIntegration_PlaybackSupportPreflight(t *testing.T) {
 	if resp.GetStatus() == proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_UNKNOWN {
 		t.Fatal("Playback support preflight returned an unknown status")
 	}
+	if resp.GetEncoderFrameTested() && resp.GetEncoderHeight() < 1080 {
+		t.Fatalf("4K projection fallback must not select below 1080p; got %dx%d",
+			resp.GetEncoderWidth(), resp.GetEncoderHeight())
+	}
 
 	t.Logf("[SUPPORT REPORT] status=%s native_gpu=%t decoder=%s encoder=%s failure=%s recommendation=%s",
 		resp.GetStatus().String(), resp.GetNativeGpuSupported(), resp.GetDecoderBackend(),
@@ -440,6 +444,10 @@ func TestIntegration_E2E_PlaybackSupportPolicyAndFirstChunk(t *testing.T) {
 	if capabilities.GetEncoderFrameTested() &&
 		(capabilities.GetEncoderWidth() <= 0 || capabilities.GetEncoderHeight() <= 0) {
 		t.Fatalf("Real-frame probe did not report a valid encoder size: %dx%d",
+			capabilities.GetEncoderWidth(), capabilities.GetEncoderHeight())
+	}
+	if capabilities.GetEncoderFrameTested() && capabilities.GetEncoderHeight() < 1080 {
+		t.Fatalf("4K projection fallback must not select below 1080p; got %dx%d",
 			capabilities.GetEncoderWidth(), capabilities.GetEncoderHeight())
 	}
 
