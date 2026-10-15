@@ -361,6 +361,13 @@ FFMPEG_DECODERS="h264,hevc,vp9,av1,aac,opus,mp3,png,jpeg,webp,tiff,ass,ssa"
 OS=${1:-linux}
 ARCH=${2:-amd64}
 
+# Keep Windows NVENC compatible with the API 12.2 runtime exposed by
+# 560-series drivers on Maxwell-era systems. Other targets retain the newer
+# headers and their newer NVENC features.
+if [[ "$OS" == "windows" && "$ARCH" == "amd64" ]]; then
+    NV_CODEC_HEADERS_VERSION="12.2.72.0"
+fi
+
 # Fallback to 10.15 only if MACOSX_DEPLOYMENT_TARGET was not passed into the container
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}"
 
