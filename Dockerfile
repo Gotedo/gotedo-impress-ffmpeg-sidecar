@@ -1362,7 +1362,7 @@ if [[ "$OS" != "darwin" ]]; then
       "https://github.com/intel/libvpl/archive/refs/tags/v${VPL_VERSION}.tar.gz" \
       "${VPL_VERSION}" \
       "cmake" \
-      "-DBUILD_DISPATCHER_ONLY=ON -DBUILD_DISPATCHER=ON -DBUILD_TESTS=OFF -DENABLE_LIBDIR_IN_RUNTIME_SEARCH=ON" \
+      "-DBUILD_DEV=ON -DBUILD_DISPATCHER=ON -DBUILD_TOOLS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_PREVIEW=OFF -DBUILD_TESTS=OFF" \
       ".tar.gz" "tar -xzf"
     if [ ! -f "${sysroot}/lib/libvpl.a" ]; then
       echo "ERROR: static oneVPL dispatcher was not installed at ${sysroot}/lib/libvpl.a"
@@ -1689,13 +1689,16 @@ fi
 
 if [[ "$ARCH" == "amd64" && "$OS" != "darwin" ]]; then
     echo ">>> Verifying QSV/oneVPL components in FFmpeg configuration..."
+    if ! grep -q '^#define CONFIG_LIBVPL 1$' config.h; then
+        echo "ERROR: FFmpeg configuration is missing CONFIG_LIBVPL"
+        exit 1
+    fi
     for qsv_component in \
-        CONFIG_LIBVPL \
         CONFIG_H264_QSV_DECODER \
         CONFIG_HEVC_QSV_DECODER \
         CONFIG_H264_QSV_ENCODER \
         CONFIG_HEVC_QSV_ENCODER; do
-        if ! grep -q "^#define ${qsv_component} 1$" config.h; then
+        if ! grep -q "^#define ${qsv_component} 1$" config_components.h; then
             echo "ERROR: FFmpeg configuration is missing ${qsv_component}"
             exit 1
         fi
