@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/cgo"
 	"sync"
@@ -73,9 +74,71 @@ type PlaybackSession struct {
 }
 
 var (
-	activePlaybacks = make(map[string]*PlaybackSession)
-	playbacksMu     sync.RWMutex
+	activePlaybacks    = make(map[string]*PlaybackSession)
+	playbacksMu        sync.RWMutex
+	playbackProbeMu    sync.Mutex
+	playbackProbeCache = make(map[string]cachedPlaybackProbe)
 )
+
+const playbackProbeCacheTTL = 30 * time.Second
+
+type cachedPlaybackProbe struct {
+	size       int64
+	modifiedAt int64
+	expiresAt  time.Time
+	support    C.CPlaybackSupport
+}
+
+// probePlaybackSupport shares the expensive hardware probe between the UI's
+// preflight and StartStream's enforcement check. File identity includes size
+// and nanosecond mtime so replacing a video at the same path invalidates it.
+func probePlaybackSupport(filePath string, info os.FileInfo) (C.CPlaybackSupport, C.int) {
+	var empty C.CPlaybackSupport
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return empty, C.int(-1)
+	}
+	key := filepath.Clean(absPath)
+	modifiedAt := info.ModTime().UnixNano()
+	now := time.Now()
+
+	// Serialize cache misses as well as protecting map access. Hardware probing
+	// is device intensive; simultaneous callers for one or more files should not
+	// launch competing decoder/encoder trials on the same GPU.
+	playbackProbeMu.Lock()
+	defer playbackProbeMu.Unlock()
+	if cached, ok := playbackProbeCache[key]; ok {
+		if cached.size == info.Size() && cached.modifiedAt == modifiedAt && now.Before(cached.expiresAt) {
+			return cached.support, 0
+		}
+		delete(playbackProbeCache, key)
+	}
+
+	cPath := C.CString(filePath)
+	defer C.free(unsafe.Pointer(cPath))
+	var support C.CPlaybackSupport
+	ret := C.probe_playback_support(cPath, &support)
+	if ret >= 0 {
+		if len(playbackProbeCache) >= 128 {
+			for cacheKey, cached := range playbackProbeCache {
+				if !now.Before(cached.expiresAt) {
+					delete(playbackProbeCache, cacheKey)
+				}
+			}
+			if len(playbackProbeCache) >= 128 {
+				for cacheKey := range playbackProbeCache {
+					delete(playbackProbeCache, cacheKey)
+					break
+				}
+			}
+		}
+		playbackProbeCache[key] = cachedPlaybackProbe{
+			size: info.Size(), modifiedAt: modifiedAt,
+			expiresAt: now.Add(playbackProbeCacheTTL), support: support,
+		}
+	}
+	return support, ret
+}
 
 // updateLastKnownPTS is called from set_session_pts / telemetry
 func (s *PlaybackSession) updateLastKnownPTS(pts float64) {
@@ -322,18 +385,19 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 	log.Printf("[SIDECAR] Received StartStream request for target=%s; file: %s; stream mode: %s; stream container: %s", targetID, filePath, streamMode, streamContainer)
 
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	fileInfo, statErr := os.Stat(filePath)
+	if os.IsNotExist(statErr) {
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
+	}
+	if statErr != nil {
+		return status.Errorf(codes.Internal, "failed to inspect media file: %v", statErr)
 	}
 
 	// Transcoding must never silently fall back to CPU. The application performs
 	// this same preflight before opening the WebSocket, while this server-side
 	// check protects callers that bypass the application UI.
 	if streamMode == proto.StreamMode_transcode && req.GetProcessingPolicy() == proto.ProcessingPolicy_PROCESSING_GPU_REQUIRED {
-		var support C.CPlaybackSupport
-		cPath := C.CString(filePath)
-		ret := C.probe_playback_support(cPath, &support)
-		C.free(unsafe.Pointer(cPath))
+		support, ret := probePlaybackSupport(filePath, fileInfo)
 		if ret < 0 {
 			return status.Errorf(codes.FailedPrecondition, "native GPU playback preflight failed with code: %d", int(ret))
 		}
@@ -613,7 +677,7 @@ func (s *ffmpegServer) GetPlaybackSupport(ctx context.Context, req *proto.Playba
 	filePath := req.GetFilePath()
 	log.Printf("[SIDECAR] Probing playback hardware support for file: %s", filePath)
 
-	_, err := os.Stat(filePath)
+	fileInfo, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
 		return nil, status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
 	}
@@ -621,11 +685,7 @@ func (s *ffmpegServer) GetPlaybackSupport(ctx context.Context, req *proto.Playba
 		return nil, status.Errorf(codes.Internal, "failed to inspect media file: %v", err)
 	}
 
-	cPath := C.CString(filePath)
-	defer C.free(unsafe.Pointer(cPath))
-
-	var cSupport C.CPlaybackSupport
-	ret := C.probe_playback_support(cPath, &cSupport)
+	cSupport, ret := probePlaybackSupport(filePath, fileInfo)
 	if ret < 0 {
 		return nil, status.Errorf(codes.Internal, "FFmpeg playback support probe failed with code: %d", int(ret))
 	}

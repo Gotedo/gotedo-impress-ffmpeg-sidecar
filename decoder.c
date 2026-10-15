@@ -3645,6 +3645,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   int logged_hdr_path = 0;
   int logged_zerocopy = 0;
   int logged_swpath = 0;
+  int logged_audio_packet = 0;
 
   // Initialize in-memory fMP4 muxer
   ret = init_fmp4_muxer(&out_fmt_ctx, &tx_ctx);
@@ -3812,11 +3813,12 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
     }
   }
 
-  // 2. Setup Audio Stream (Passthrough if AAC/MP3, otherwise Transcode to AAC)
+  // 2. Setup Audio Stream (Passthrough if AAC/Opus, otherwise Transcode to AAC)
   if (dec_ctx->audio_stream_idx >= 0)
   {
     AVCodecParameters *a_par = dec_ctx->fmt_ctx->streams[dec_ctx->audio_stream_idx]->codecpar;
-    audio_needs_transcode = (a_par->codec_id != AV_CODEC_ID_AAC && a_par->codec_id != AV_CODEC_ID_OPUS);
+    audio_needs_transcode = (a_par->codec_id != AV_CODEC_ID_AAC &&
+                             a_par->codec_id != AV_CODEC_ID_OPUS);
 
     if (!audio_needs_transcode)
     {
@@ -3837,6 +3839,9 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       }
       out_stream->codecpar->codec_tag = 0;
       out_audio_idx = out_stream->index;
+      LOG_INFO("C-AUDIO", "Configured %s passthrough: %d channels at %d Hz",
+               avcodec_get_name(a_par->codec_id), a_par->ch_layout.nb_channels,
+               a_par->sample_rate);
     }
     else
     {
@@ -3877,6 +3882,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             goto cleanup;
           }
           out_stream->codecpar->codec_tag = 0;
+          LOG_INFO("C-AUDIO", "Configured AAC transcode: stereo at 48000 Hz");
 
           // FFmpeg AAC strict frame size enforcement (1024 frames)
           fifo = av_audio_fifo_alloc(aac_enc_ctx->sample_fmt, 2, 32768);
@@ -4730,6 +4736,11 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         {
           LOG_ERROR("C-MUX", "Failed to write interleaved audio packet (passthrough). Halting.");
           __atomic_store_n(&dec_ctx->stop_requested, 1, __ATOMIC_RELEASE);
+        }
+        else if (!logged_audio_packet)
+        {
+          logged_audio_packet = 1;
+          LOG_INFO("C-AUDIO", "Forwarded first passthrough audio packet to fMP4 output");
         }
       }
       else if (aac_enc_ctx && fifo)
