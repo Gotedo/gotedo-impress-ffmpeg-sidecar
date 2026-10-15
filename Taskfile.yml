@@ -6,6 +6,8 @@ vars:
   ARCH: '{{.ARCH | default ARCH}}'
   DEFAULT_FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
   IS_TEST: '{{.IS_TEST}}'
+  # Evaluates to empty on Windows, skipping the proxy entirely
+  APT_PROXY: '{{if eq OS "windows"}}{{else}}http://host.docker.internal:3142{{end}}'
 
 tasks:
   apt-cache:
@@ -30,33 +32,38 @@ tasks:
 
       # 3. Start the proxy container
       - echo ">>> Launching apt-cache-proxy container..."
-      - |
-        docker run -d \
-          --name apt-cache-proxy \
-          -p 3142:3142 \
-          -v /tmp/apt-cacher-ng:/var/cache/apt-cacher-ng \
-          sameersbn/apt-cacher-ng
+      - cmd: powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '{{.TASKFILE_DIR | toSlash}}/build_cache/apt-cacher-ng'"
+        platforms: [windows]
+      - cmd: mkdir -p "{{.TASKFILE_DIR | toSlash}}/build_cache/apt-cacher-ng"
+        platforms: [linux, darwin]
+      - docker run -d --name apt-cache-proxy -p 3142:3142 -v "{{.TASKFILE_DIR | toSlash}}/build_cache/apt-cacher-ng:/var/cache/apt-cacher-ng" sameersbn/apt-cacher-ng
 
   create-ffmpeg-builder:
     desc: Set up a dedicated buildx container builder instance
     internal: true
     cmds:
-      - |
-        if ! docker buildx ls | grep -q "ffmpeg-builder"; then
-          docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap
-        fi
+      - cmd: powershell -NoProfile -Command "if (-not (docker buildx ls | Select-String 'ffmpeg-builder')) { docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap } else { docker buildx use ffmpeg-builder }"
+        platforms: [windows]
+      - cmd: |
+          if ! docker buildx ls | grep -q "ffmpeg-builder"; then
+            docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap
+          else
+            docker buildx use ffmpeg-builder
+          fi
+        platforms: [linux, darwin]
       - docker buildx use ffmpeg-builder
       # Build the compiler-toolchain runner image using our local Dockerfile
       - |
         docker buildx build --progress=plain \
           --builder ffmpeg-builder \
           --build-arg BUILDKIT_INLINE_CACHE=1 \
-          --cache-from=type=local,src={{.TASKFILE_DIR}}/build_cache/buildx \
-          --cache-to=type=local,dest={{.TASKFILE_DIR}}/build_cache/buildx,mode=max \
+          --build-arg APT_PROXY="{{.APT_PROXY}}" \
+          --cache-from=type=local,src="{{.TASKFILE_DIR | toSlash}}/build_cache/buildx" \
+          --cache-to=type=local,dest="{{.TASKFILE_DIR | toSlash}}/build_cache/buildx",mode=max \
           --cache-to=type=inline \
           -t ffmpeg-builder \
-          -f {{.TASKFILE_DIR}}/Dockerfile \
-          --load {{.TASKFILE_DIR}}
+          -f "{{.TASKFILE_DIR | toSlash}}/Dockerfile" \
+          --load "{{.TASKFILE_DIR | toSlash}}"
 
   build:ffmpeg:
     desc: Build FFmpeg dynamically using multi-platform cross-compilation
@@ -177,6 +184,11 @@ tasks:
             exit 0
           fi
           set -- \
+            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/*/bin/gcc.exe \
+            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/bin/gcc.exe \
+            "${USERPROFILE}/scoop/apps/llvm-mingw/current/bin/gcc.exe" \
+            "C:/llvm-mingw/bin/gcc.exe" \
+            "${USERPROFILE}/scoop/apps/mingw/current/bin" \
             "${USERPROFILE}/scoop/apps/mingw/current/bin/gcc.exe" \
             "${USERPROFILE}/scoop/apps/gcc/current/bin/gcc.exe" \
             "C:/msys64/mingw64/bin/gcc.exe" \
@@ -188,7 +200,7 @@ tasks:
               exit 0
             fi
           done
-          echo "MinGW gcc.exe not found (need posix-seh gcc, not LLVM clang)" >&2
+          echo "MinGW / LLVM-MinGW gcc.exe not found. Prefer installing LLVM-MinGW." >&2
           exit 1
 
   # Native Platform Tasks
@@ -203,7 +215,7 @@ tasks:
       RELEASE: '{{.RELEASE}}'
       # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample -lswscale
+        -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
     cmds:
@@ -229,11 +241,11 @@ tasks:
       # Windows requires Winsock and threading libraries
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample -lswscale
+        -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame
         -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv
-        -lass -lharfbuzz -lfreetype -lpng16 -liconv -lbz2 -llzma
-        -lstdc++
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon
+        -lc++
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32
         -lmfplat -lmfuuid -lstrmiids -luuid
         -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi
@@ -260,7 +272,7 @@ tasks:
       # Linux requires standard pthread and math libraries for static linking
       # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
       LDFLAGS_EXTRA: >-
-        -lavformat -lavcodec -lavutil -lswresample -lswscale
+        -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lasound -lm -lpthread -ldl
     cmds:

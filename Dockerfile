@@ -2,8 +2,12 @@
 
 FROM rust:1.93.1-slim-bookworm
 
-RUN echo 'Acquire::HTTP::Proxy "http://host.docker.internal:3142";' >> /etc/apt/apt.conf.d/01proxy \
-  && echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy
+ARG APT_PROXY=""
+
+RUN if [ -n "$APT_PROXY" ] && [ "$APT_PROXY" != "false" ]; then \
+      echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy && \
+      echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy; \
+    fi
 
 # Install prerequisites to fetch external secure repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,8 +40,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   llvm-20-linker-tools \
   llvm-20-dev \
   libclang-rt-20-dev \
-  # Windows Execution Compatibility
-  wine wine64 libwine \
   # FFmpeg-specific Assemblers & Build Tools
   nasm yasm ccache autoconf automake libtool texinfo \
   libfreetype6-dev libharfbuzz-dev \
@@ -1703,7 +1705,7 @@ STATIC_DEP_LIBS=$(pkg-config --static --libs libavformat libavcodec libavutil li
 # If pkg-config fails or isn't fully populated yet, we fall back to a manual list
 # Move -lavutil towards the end so prior libs can resolve their dependencies against it
 if [ -z "$STATIC_DEP_LIBS" ]; then
-    STATIC_DEP_LIBS="-lavformat -lavcodec -lswscale -lswresample -lavutil ${PLATFORM_LIBS} -lz -lm -lpthread"
+    STATIC_DEP_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswscale -lswresample -lavutil ${PLATFORM_LIBS} -lz -lm -lpthread"
 fi
 
 # Only use static flag for Windows (where it is required and supported cleanly by llvm-mingw)
@@ -1893,9 +1895,11 @@ case "${OS}-${ARCH}" in
     windows-amd64)
         export CC="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
-        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
-        -lpng -lbz2 -llzma -lws2_32 -lbcrypt -lmfplat -lmfuuid -lole32 -lstrmiids -luuid -lshlwapi -lpsapi -lwinmm -lncrypt -lcrypt32 -lsecur32 -lstdc++ -lpthread"
+        EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lc++ \
+        -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
         GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
         export CGO_LDFLAGS="-static"
@@ -1903,9 +1907,11 @@ case "${OS}-${ARCH}" in
     windows-arm64)
         export CC="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang++"
-        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
-        -lpng -lbz2 -llzma -lws2_32 -lbcrypt -lmfplat -lmfuuid -lole32 -lstrmiids -luuid -lshlwapi -lpsapi -lwinmm -lncrypt -lcrypt32 -lsecur32 -lstdc++ -lpthread"
+        EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lc++ \
+        -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
         GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
         export CGO_LDFLAGS="-static"
@@ -1916,9 +1922,10 @@ case "${OS}-${ARCH}" in
         TARGET_FLAG="-target x86_64-linux-gnu"
         export CGO_CFLAGS="$TARGET_FLAG -fPIC"
         export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
-        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
-        -lpng -lbz2 -llzma -lm -lpthread -ldl -lstdc++"
+        EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lasound -lm -lpthread -ldl -lc++"
         ;;
     linux-arm64)
         export CC="/usr/bin/clang"
@@ -1926,9 +1933,10 @@ case "${OS}-${ARCH}" in
         TARGET_FLAG="-target aarch64-linux-gnu"
         export CGO_CFLAGS="$TARGET_FLAG -fPIC"
         export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
-        EXTRA_LIBS="-lavformat -lavcodec -lswresample -lswscale -lavutil
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype
-        -lpng -lbz2 -llzma -lm -lpthread -ldl -lstdc++"
+        EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lasound -lm -lpthread -ldl -lc++"
         ;;
     darwin-amd64 | darwin-arm64)
         export CC="/usr/bin/clang"
@@ -1965,8 +1973,10 @@ EOF
 
         export CGO_CFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk"
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
-        EXTRA_LIBS="-lavformat -lavcodec -lavutil -lswresample -lswscale
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
+        EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lc++ \
         -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv"
         ;;
     *)
