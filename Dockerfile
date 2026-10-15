@@ -4,9 +4,12 @@ FROM rust:1.93.1-slim-bookworm
 
 ARG APT_PROXY=""
 
+# apt.llvm.org publishes mutable repository artifacts, so it must bypass the
+# local cache to keep package indexes and archives consistent.
 RUN if [ -n "$APT_PROXY" ] && [ "$APT_PROXY" != "false" ]; then \
       echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy && \
-      echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy; \
+      echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy && \
+      echo 'Acquire::http::Proxy::apt.llvm.org "DIRECT";' >> /etc/apt/apt.conf.d/01proxy; \
     fi
 
 # Install prerequisites to fetch external secure repositories
@@ -1359,7 +1362,7 @@ if [[ "$OS" != "darwin" ]]; then
       "https://github.com/intel/libvpl/archive/refs/tags/v${VPL_VERSION}.tar.gz" \
       "${VPL_VERSION}" \
       "cmake" \
-      "-DBUILD_DISPATCHER=ON -DINSTALL_EXAMPLES=OFF -DBUILD_TESTS=OFF -DENABLE_LIBDIR_IN_RUNTIME_SEARCH=ON" \
+      "-DBUILD_DISPATCHER_ONLY=ON -DBUILD_DISPATCHER=ON -DBUILD_TESTS=OFF -DENABLE_LIBDIR_IN_RUNTIME_SEARCH=ON" \
       ".tar.gz" "tar -xzf"
     if [ ! -f "${sysroot}/lib/libvpl.a" ]; then
       echo "ERROR: static oneVPL dispatcher was not installed at ${sysroot}/lib/libvpl.a"
