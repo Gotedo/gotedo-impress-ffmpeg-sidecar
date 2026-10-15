@@ -414,7 +414,7 @@ case "${OS}-${ARCH}" in
         if [ "$ARCH" = "amd64" ]; then
             # NVIDIA + AMD (headers only; uses driver at runtime on the target PC)
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
-            FMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
+            FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
         fi
         PROPERTIES="
@@ -1897,7 +1897,7 @@ case "${OS}-${ARCH}" in
         export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
-        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lc++ \
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
@@ -1909,7 +1909,7 @@ case "${OS}-${ARCH}" in
         export CXX="$LLVM_MINGW_PATH/bin/aarch64-w64-mingw32-clang++"
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
-        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng16 -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lc++ \
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window

@@ -97,23 +97,14 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
    * Always feed it system memory. */
   bool force_software = (codec_name && strcmp(codec_name, "h264_mf") == 0);
 
-  /* GPU encoders that are known to accept HW surfaces and can scale on-GPU */
-  bool prefer_hw_even_if_scaled =
-      codec_name &&
-      (strcmp(codec_name, "h264_nvenc") == 0 ||
-       strcmp(codec_name, "h264_amf") == 0 ||
-       strcmp(codec_name, "h264_d3d12va") == 0 ||
-       strcmp(codec_name, "h264_qsv") == 0 ||
-       strcmp(codec_name, "h264_vaapi") == 0);
-
   int same_size = !force_software &&
                   dec_ctx &&
                   dec_ctx->video_dec_ctx &&
                   enc->width == dec_ctx->video_dec_ctx->width &&
                   enc->height == dec_ctx->video_dec_ctx->height;
 
-  /* 1. True zero-copy (identical size) or GPU encoder that can scale */
-  if ((same_size || prefer_hw_even_if_scaled) &&
+  /* 1. True zero-copy only when dimensions are identical. */
+  if (same_size &&
       dec_ctx && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
   {
     for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
@@ -243,7 +234,12 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
     {
       AVHWFramesContext *frames_ctx = (AVHWFramesContext *)frames_ref->data;
       frames_ctx->format = enc->pix_fmt;
-      frames_ctx->sw_format = AV_PIX_FMT_NV12; /* or the actual sw format */
+      enum AVPixelFormat decoder_sw_fmt = dec_ctx->video_dec_ctx->sw_pix_fmt;
+      const AVPixFmtDescriptor *decoder_sw_desc = av_pix_fmt_desc_get(decoder_sw_fmt);
+      frames_ctx->sw_format = (decoder_sw_fmt != AV_PIX_FMT_NONE && decoder_sw_desc &&
+                               !(decoder_sw_desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+                                  ? decoder_sw_fmt
+                                  : AV_PIX_FMT_NV12;
       frames_ctx->width = width;
       frames_ctx->height = height;
       frames_ctx->initial_pool_size = 20; /* tune as needed */
@@ -432,6 +428,21 @@ static int nvenc_likely_available(void)
 #endif
 }
 
+static void append_unique_hw_type(enum AVHWDeviceType *types, int *count,
+                                  enum AVHWDeviceType type)
+{
+  if (!types || !count || type == AV_HWDEVICE_TYPE_NONE)
+    return;
+
+  for (int i = 0; i < *count; i++)
+  {
+    if (types[i] == type)
+      return;
+  }
+
+  types[(*count)++] = type;
+}
+
 /**
  * Allocates, configures, and opens an H.264 video encoder context.
  *
@@ -456,20 +467,46 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
   if (!dec_ctx || !dec_ctx->video_dec_ctx)
     return AVERROR(EINVAL);
 
-  /* Quality-first portable order.
-   * Never hard-code preference for a particular machine.
-   * We try to open each encoder at the target resolution;
-   * first success wins.
-   */
-  static const char *const candidates[] = {
-      "h264_nvenc",        // Best quality + latency (NVIDIA Turing+)
-      "h264_amf",          // AMD
-      "h264_qsv",          // Intel Quick Sync
-      "h264_videotoolbox", // Apple
-      "h264_d3d12va",      // Modern Windows HW path
-      "h264_mf",           // Windows Media Foundation (fallback)
-      "libx264",           // Software last resort
-      NULL};
+  /* Keep the decoder and encoder on the same hardware device whenever
+   * possible. A D3D11 surface can be consumed directly by NVENC/AMF, CUDA
+   * surfaces by NVENC, and D3D12 surfaces by h264_d3d12va. The old global
+   * encoder order could select NVENC after a D3D12 decode, forcing every 4K
+   * frame through GPU->CPU memory before encoding. */
+  const char *candidates[8] = {0};
+  int candidate_count = 0;
+
+  if (dec_ctx->hw_device_type == AV_HWDEVICE_TYPE_D3D12VA)
+  {
+    candidates[candidate_count++] = "h264_d3d12va";
+    candidates[candidate_count++] = "h264_mf";
+    candidates[candidate_count++] = "h264_nvenc";
+    candidates[candidate_count++] = "h264_amf";
+    candidates[candidate_count++] = "libx264";
+  }
+  else if (dec_ctx->hw_device_type == AV_HWDEVICE_TYPE_CUDA)
+  {
+    candidates[candidate_count++] = "h264_nvenc";
+    candidates[candidate_count++] = "h264_mf";
+    candidates[candidate_count++] = "h264_amf";
+    candidates[candidate_count++] = "libx264";
+  }
+  else if (dec_ctx->hw_device_type == AV_HWDEVICE_TYPE_D3D11VA)
+  {
+    candidates[candidate_count++] = "h264_nvenc";
+    candidates[candidate_count++] = "h264_amf";
+    candidates[candidate_count++] = "h264_mf";
+    candidates[candidate_count++] = "libx264";
+  }
+  else
+  {
+    /* Portable fallback order for macOS/Linux and software decode. */
+    candidates[candidate_count++] = "h264_nvenc";
+    candidates[candidate_count++] = "h264_amf";
+    candidates[candidate_count++] = "h264_qsv";
+    candidates[candidate_count++] = "h264_videotoolbox";
+    candidates[candidate_count++] = "h264_mf";
+    candidates[candidate_count++] = "libx264";
+  }
 
   const int src_width = dec_ctx->video_dec_ctx->width;
   const int src_height = dec_ctx->video_dec_ctx->height;
@@ -539,7 +576,7 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     LOG_INFO("C-ENC", "Trying resolution %s (%dx%d) ...",
              resolutions[r].label, target_width, target_height);
 
-    for (int i = 0; candidates[i]; i++)
+    for (int i = 0; i < candidate_count; i++)
     {
       const AVCodec *codec = avcodec_find_encoder_by_name(candidates[i]);
       if (!codec)
@@ -762,6 +799,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   ctx->swr_ctx = NULL;
   // Do not set it again in the passthrough short-circuit or the fail: path. AV_PIX_FMT_NONE is not a heap object.
   ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
+  ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
 
   // CAUTION: Disabled to avoid overriding the values set in Go
   // ctx->is_passthrough = 0;
@@ -861,21 +899,40 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     }
     else
     {
-      /* Try device types in a stable, OS-neutral order. A type is used only
-       * when this codec advertises HW_DEVICE_CTX for it and
-       * av_hwdevice_ctx_create succeeds on this machine. */
-      static const enum AVHWDeviceType preferred[] = {
-          AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-          AV_HWDEVICE_TYPE_D3D11VA,
-          AV_HWDEVICE_TYPE_D3D12VA,
-          AV_HWDEVICE_TYPE_CUDA,
-          AV_HWDEVICE_TYPE_VAAPI,
-          AV_HWDEVICE_TYPE_QSV,
-          AV_HWDEVICE_TYPE_DXVA2,
-          AV_HWDEVICE_TYPE_VULKAN,
-          AV_HWDEVICE_TYPE_NONE};
+      /* Choose a device in a way that preserves a zero-copy encoder pairing.
+       * On Windows, NVENC is paired with CUDA, AMF with D3D11, and the
+       * generic D3D12 encoder with D3D12VA. If no vendor runtime is present,
+       * prefer D3D12 so Intel/modern integrated GPUs can use the native path.
+       * Every choice is still validated by codec capabilities and device
+       * creation, so unsupported machines fall through safely. */
+      enum AVHWDeviceType preferred[10] = {0};
+      int preferred_count = 0;
+#ifdef _WIN32
+      const int has_nvenc_runtime = nvenc_likely_available();
+      const int has_amf_runtime = amf_runtime_available();
+      if (has_nvenc_runtime)
+        append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_CUDA);
+      if (has_amf_runtime)
+        append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D11VA);
+      if (!has_nvenc_runtime && !has_amf_runtime &&
+          avcodec_find_encoder_by_name("h264_d3d12va"))
+        append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D12VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D11VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D12VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_CUDA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_DXVA2);
+#else
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_VIDEOTOOLBOX);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_VAAPI);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_CUDA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_QSV);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D11VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D12VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_DXVA2);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_VULKAN);
+#endif
 
-      for (int p = 0; preferred[p] != AV_HWDEVICE_TYPE_NONE; p++)
+      for (int p = 0; p < preferred_count; p++)
       {
         const AVCodecHWConfig *match = NULL;
         for (int i = 0;; i++)
@@ -907,6 +964,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
         ctx->video_dec_ctx->hw_device_ctx = hw_device_ctx;
         ctx->video_dec_ctx->opaque = ctx;
         ctx->hw_pix_fmt = match->pix_fmt;
+        ctx->hw_device_type = match->device_type;
         ctx->video_dec_ctx->get_format = get_hw_format;
 
         // CRITICAL FIX: Hardware decoders require single-threaded context configuration in FFmpeg.
