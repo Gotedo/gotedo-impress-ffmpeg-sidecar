@@ -340,7 +340,11 @@ LIBOGG_VERSION="1.3.5"
 BZIP2_VERSION="1.0.8"
 XZ_VERSION="5.8.3"
 MINIAUDIO_VERSION="0.11.25"
-NV_CODEC_HEADERS_VERSION="13.1.15.0"
+# Pin NVENC/NVDEC headers to the oldest API this sidecar needs so one FFmpeg
+# build remains compatible with older supported NVIDIA drivers. Newer NVIDIA
+# drivers retain backward API compatibility; bump only when the sidecar needs
+# newer NVENC features and the minimum driver version is intentionally raised.
+NV_CODEC_HEADERS_VERSION="12.2.72.0"
 AMF_VERSION="1.5.2"
 ZIMG_VERSION="3.0.6"
 VPL_VERSION="2023.4.0"
@@ -360,13 +364,6 @@ FFMPEG_DECODERS="h264,hevc,vp9,av1,aac,opus,mp3,png,jpeg,webp,tiff,ass,ssa"
 
 OS=${1:-linux}
 ARCH=${2:-amd64}
-
-# Keep Windows NVENC compatible with the API 12.2 runtime exposed by
-# 560-series drivers on Maxwell-era systems. Other targets retain the newer
-# headers and their newer NVENC features.
-if [[ "$OS" == "windows" && "$ARCH" == "amd64" ]]; then
-    NV_CODEC_HEADERS_VERSION="12.2.72.0"
-fi
 
 # Fallback to 10.15 only if MACOSX_DEPLOYMENT_TARGET was not passed into the container
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.15}"
