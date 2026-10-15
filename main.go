@@ -319,12 +319,16 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		if ret < 0 {
 			return status.Errorf(codes.FailedPrecondition, "native GPU playback preflight failed with code: %d", int(ret))
 		}
-		if support.native_gpu_supported == 0 {
+		gpuPathVerified := support.native_gpu_supported != 0 ||
+			(support.hardware_decode_supported != 0 &&
+				support.hardware_encode_supported != 0 &&
+				support.encoder_frame_tested != 0)
+		if !gpuPathVerified {
 			failureCode := C.GoString(&support.failure_code[0])
 			reason := C.GoString(&support.reason[0])
-			return status.Errorf(codes.FailedPrecondition, "native GPU playback unavailable (%s): %s; retry with processing_policy=PROCESSING_ALLOW_CPU after user confirmation", failureCode, reason)
+			return status.Errorf(codes.FailedPrecondition, "verified GPU playback unavailable (%s): %s; retry with processing_policy=PROCESSING_ALLOW_CPU after user confirmation", failureCode, reason)
 		}
-		log.Printf("[SIDECAR] Native GPU playback preflight passed for target=%s", targetID)
+		log.Printf("[SIDECAR] Verified GPU playback preflight passed for target=%s (native_zero_copy=%t)", targetID, support.native_gpu_supported != 0)
 	} else if streamMode == proto.StreamMode_transcode {
 		log.Printf("[SIDECAR] CPU fallback explicitly allowed for target=%s", targetID)
 	}
@@ -635,6 +639,9 @@ func (s *ffmpegServer) GetPlaybackSupport(ctx context.Context, req *proto.Playba
 		HardwareEncodeSupported: hardwareEncode,
 		ZeroCopySupported:       zeroCopy,
 		CpuFallbackAvailable:    cpuFallback,
+		EncoderFrameTested:      cSupport.encoder_frame_tested != 0,
+		EncoderWidth:            int32(cSupport.encoder_width),
+		EncoderHeight:           int32(cSupport.encoder_height),
 		OperatingSystem:         runtime.GOOS,
 		Architecture:            runtime.GOARCH,
 		DecoderBackend:          decoderBackend,

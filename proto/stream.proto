@@ -144,6 +144,9 @@ message PlaybackSupportResponse {
     string reason = 12;
     string recommendation = 13;
     string cpu_warning = 14;
+    bool encoder_frame_tested = 15;
+    int32 encoder_width = 16;
+    int32 encoder_height = 17;
 }
 
 message MetadataResponse {
