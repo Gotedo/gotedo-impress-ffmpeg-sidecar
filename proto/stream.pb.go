@@ -964,6 +964,9 @@ type PlaybackSupportResponse struct {
 	Reason                  string                 `protobuf:"bytes,12,opt,name=reason,proto3" json:"reason,omitempty"`
 	Recommendation          string                 `protobuf:"bytes,13,opt,name=recommendation,proto3" json:"recommendation,omitempty"`
 	CpuWarning              string                 `protobuf:"bytes,14,opt,name=cpu_warning,json=cpuWarning,proto3" json:"cpu_warning,omitempty"`
+	EncoderFrameTested      bool                   `protobuf:"varint,15,opt,name=encoder_frame_tested,json=encoderFrameTested,proto3" json:"encoder_frame_tested,omitempty"`
+	EncoderWidth            int32                  `protobuf:"varint,16,opt,name=encoder_width,json=encoderWidth,proto3" json:"encoder_width,omitempty"`
+	EncoderHeight           int32                  `protobuf:"varint,17,opt,name=encoder_height,json=encoderHeight,proto3" json:"encoder_height,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -1094,6 +1097,27 @@ func (x *PlaybackSupportResponse) GetCpuWarning() string {
 		return x.CpuWarning
 	}
 	return ""
+}
+
+func (x *PlaybackSupportResponse) GetEncoderFrameTested() bool {
+	if x != nil {
+		return x.EncoderFrameTested
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetEncoderWidth() int32 {
+	if x != nil {
+		return x.EncoderWidth
+	}
+	return 0
+}
+
+func (x *PlaybackSupportResponse) GetEncoderHeight() int32 {
+	if x != nil {
+		return x.EncoderHeight
+	}
+	return 0
 }
 
 type MetadataResponse struct {
@@ -1654,7 +1678,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0fMetadataRequest\x12\x1b\n" +
 	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"5\n" +
 	"\x16PlaybackSupportRequest\x12\x1b\n" +
-	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\x85\x05\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\x83\x06\n" +
 	"\x17PlaybackSupportResponse\x125\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x1d.ffmpeg.PlaybackSupportStatusR\x06status\x120\n" +
 	"\x14native_gpu_supported\x18\x02 \x01(\bR\x12nativeGpuSupported\x12:\n" +
@@ -1671,7 +1695,10 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x06reason\x18\f \x01(\tR\x06reason\x12&\n" +
 	"\x0erecommendation\x18\r \x01(\tR\x0erecommendation\x12\x1f\n" +
 	"\vcpu_warning\x18\x0e \x01(\tR\n" +
-	"cpuWarning\"\xd3\t\n" +
+	"cpuWarning\x120\n" +
+	"\x14encoder_frame_tested\x18\x0f \x01(\bR\x12encoderFrameTested\x12#\n" +
+	"\rencoder_width\x18\x10 \x01(\x05R\fencoderWidth\x12%\n" +
+	"\x0eencoder_height\x18\x11 \x01(\x05R\rencoderHeight\"\xd3\t\n" +
 	"\x10MetadataResponse\x12\x1f\n" +
 	"\vformat_name\x18\x01 \x01(\tR\n" +
 	"formatName\x12(\n" +
