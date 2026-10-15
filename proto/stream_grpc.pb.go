@@ -25,6 +25,7 @@ const (
 	FFmpegService_ControlStream_FullMethodName      = "/ffmpeg.FFmpegService/ControlStream"
 	FFmpegService_GetAudioDevices_FullMethodName    = "/ffmpeg.FFmpegService/GetAudioDevices"
 	FFmpegService_GetMediaProperties_FullMethodName = "/ffmpeg.FFmpegService/GetMediaProperties"
+	FFmpegService_GetPlaybackSupport_FullMethodName = "/ffmpeg.FFmpegService/GetPlaybackSupport"
 	FFmpegService_GetVideoScreenshot_FullMethodName = "/ffmpeg.FFmpegService/GetVideoScreenshot"
 	FFmpegService_Shutdown_FullMethodName           = "/ffmpeg.FFmpegService/Shutdown"
 )
@@ -47,6 +48,8 @@ type FFmpegServiceClient interface {
 	GetAudioDevices(ctx context.Context, in *DevicesRequest, opts ...grpc.CallOption) (*DevicesResponse, error)
 	// Probe metadata properties directly via static analysis
 	GetMediaProperties(ctx context.Context, in *MetadataRequest, opts ...grpc.CallOption) (*MetadataResponse, error)
+	// Probe the actual decoder/encoder path without starting playback.
+	GetPlaybackSupport(ctx context.Context, in *PlaybackSupportRequest, opts ...grpc.CallOption) (*PlaybackSupportResponse, error)
 	// Extract a standalone compressed frame at a specific offset
 	GetVideoScreenshot(ctx context.Context, in *ScreenshotRequest, opts ...grpc.CallOption) (*ScreenshotResponse, error)
 	// Graceful shutdown RPC for the persistent sidecar
@@ -130,6 +133,16 @@ func (c *fFmpegServiceClient) GetMediaProperties(ctx context.Context, in *Metada
 	return out, nil
 }
 
+func (c *fFmpegServiceClient) GetPlaybackSupport(ctx context.Context, in *PlaybackSupportRequest, opts ...grpc.CallOption) (*PlaybackSupportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PlaybackSupportResponse)
+	err := c.cc.Invoke(ctx, FFmpegService_GetPlaybackSupport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *fFmpegServiceClient) GetVideoScreenshot(ctx context.Context, in *ScreenshotRequest, opts ...grpc.CallOption) (*ScreenshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ScreenshotResponse)
@@ -168,6 +181,8 @@ type FFmpegServiceServer interface {
 	GetAudioDevices(context.Context, *DevicesRequest) (*DevicesResponse, error)
 	// Probe metadata properties directly via static analysis
 	GetMediaProperties(context.Context, *MetadataRequest) (*MetadataResponse, error)
+	// Probe the actual decoder/encoder path without starting playback.
+	GetPlaybackSupport(context.Context, *PlaybackSupportRequest) (*PlaybackSupportResponse, error)
 	// Extract a standalone compressed frame at a specific offset
 	GetVideoScreenshot(context.Context, *ScreenshotRequest) (*ScreenshotResponse, error)
 	// Graceful shutdown RPC for the persistent sidecar
@@ -199,6 +214,9 @@ func (UnimplementedFFmpegServiceServer) GetAudioDevices(context.Context, *Device
 }
 func (UnimplementedFFmpegServiceServer) GetMediaProperties(context.Context, *MetadataRequest) (*MetadataResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetMediaProperties not implemented")
+}
+func (UnimplementedFFmpegServiceServer) GetPlaybackSupport(context.Context, *PlaybackSupportRequest) (*PlaybackSupportResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPlaybackSupport not implemented")
 }
 func (UnimplementedFFmpegServiceServer) GetVideoScreenshot(context.Context, *ScreenshotRequest) (*ScreenshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVideoScreenshot not implemented")
@@ -328,6 +346,24 @@ func _FFmpegService_GetMediaProperties_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FFmpegService_GetPlaybackSupport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PlaybackSupportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FFmpegServiceServer).GetPlaybackSupport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FFmpegService_GetPlaybackSupport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FFmpegServiceServer).GetPlaybackSupport(ctx, req.(*PlaybackSupportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FFmpegService_GetVideoScreenshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ScreenshotRequest)
 	if err := dec(in); err != nil {
@@ -390,6 +426,10 @@ var FFmpegService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMediaProperties",
 			Handler:    _FFmpegService_GetMediaProperties_Handler,
+		},
+		{
+			MethodName: "GetPlaybackSupport",
+			Handler:    _FFmpegService_GetPlaybackSupport_Handler,
 		},
 		{
 			MethodName: "GetVideoScreenshot",

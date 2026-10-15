@@ -308,6 +308,27 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		return status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
 	}
 
+	// Transcoding must never silently fall back to CPU. The application performs
+	// this same preflight before opening the WebSocket, while this server-side
+	// check protects callers that bypass the application UI.
+	if streamMode == proto.StreamMode_transcode && req.GetProcessingPolicy() == proto.ProcessingPolicy_PROCESSING_GPU_REQUIRED {
+		var support C.CPlaybackSupport
+		cPath := C.CString(filePath)
+		ret := C.probe_playback_support(cPath, &support)
+		C.free(unsafe.Pointer(cPath))
+		if ret < 0 {
+			return status.Errorf(codes.FailedPrecondition, "native GPU playback preflight failed with code: %d", int(ret))
+		}
+		if support.native_gpu_supported == 0 {
+			failureCode := C.GoString(&support.failure_code[0])
+			reason := C.GoString(&support.reason[0])
+			return status.Errorf(codes.FailedPrecondition, "native GPU playback unavailable (%s): %s; retry with processing_policy=PROCESSING_ALLOW_CPU after user confirmation", failureCode, reason)
+		}
+		log.Printf("[SIDECAR] Native GPU playback preflight passed for target=%s", targetID)
+	} else if streamMode == proto.StreamMode_transcode {
+		log.Printf("[SIDECAR] CPU fallback explicitly allowed for target=%s", targetID)
+	}
+
 	// PRE: Handle case where target already has an active playback
 	if oldSess, exists := getPlaybackSession(targetID); exists && oldSess != nil {
 		log.Printf("[SIDECAR] Target %s already has active playback — replacing it", targetID)
@@ -384,7 +405,7 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			if r := recover(); r != nil {
 				stack := make([]byte, 4096)
 				n := runtime.Stack(stack, false)
-				log.Println(fmt.Sprintf("[%s] PANIC recovered in goroutine: %v\n%s", r, stack[:n]))
+				log.Println(fmt.Sprintf("[%v] PANIC recovered in goroutine: %s", r, stack[:n]))
 
 				// Stop playback
 				unregisterPlayback(targetID)
@@ -558,6 +579,104 @@ func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.Metada
 		CandidateAudioMime: C.GoString(&cProps.candidate_audio_mime[0]),
 		CandidateFullMime:  C.GoString(&cProps.candidate_full_mime[0]),
 	}, nil
+}
+
+// GetPlaybackSupport performs a real decoder/encoder preflight without
+// starting a playback session. The application uses this before opening the
+// WebSocket so a CPU fallback is always an explicit user decision.
+func (s *ffmpegServer) GetPlaybackSupport(ctx context.Context, req *proto.PlaybackSupportRequest) (*proto.PlaybackSupportResponse, error) {
+	filePath := req.GetFilePath()
+	log.Printf("[SIDECAR] Probing playback hardware support for file: %s", filePath)
+
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return nil, status.Errorf(codes.NotFound, "media file does not exist: %s", filePath)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to inspect media file: %v", err)
+	}
+
+	cPath := C.CString(filePath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	var cSupport C.CPlaybackSupport
+	ret := C.probe_playback_support(cPath, &cSupport)
+	if ret < 0 {
+		return nil, status.Errorf(codes.Internal, "FFmpeg playback support probe failed with code: %d", int(ret))
+	}
+
+	nativeGPU := cSupport.native_gpu_supported != 0
+	hardwareDecode := cSupport.hardware_decode_supported != 0
+	hardwareEncode := cSupport.hardware_encode_supported != 0
+	zeroCopy := cSupport.zero_copy_supported != 0
+	cpuFallback := cSupport.cpu_fallback_available != 0
+	failureCode := C.GoString(&cSupport.failure_code[0])
+	reason := C.GoString(&cSupport.reason[0])
+	decoderBackend := C.GoString(&cSupport.decoder_backend[0])
+	encoderBackend := C.GoString(&cSupport.encoder_backend[0])
+	recommendation, cpuWarning := playbackSupportGuidance(failureCode, decoderBackend, encoderBackend, nativeGPU)
+
+	statusValue := proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_UNAVAILABLE
+	switch {
+	case nativeGPU:
+		statusValue = proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_NATIVE_GPU
+	case hardwareDecode && hardwareEncode:
+		statusValue = proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_GPU_ASSISTED
+	case cpuFallback:
+		statusValue = proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_CPU_FALLBACK
+	}
+
+	log.Printf("[SIDECAR] Playback support result: status=%s native_gpu=%t decoder=%s encoder=%s failure=%s", statusValue.String(), nativeGPU, decoderBackend, encoderBackend, failureCode)
+
+	return &proto.PlaybackSupportResponse{
+		Status:                  statusValue,
+		NativeGpuSupported:      nativeGPU,
+		HardwareDecodeSupported: hardwareDecode,
+		HardwareEncodeSupported: hardwareEncode,
+		ZeroCopySupported:       zeroCopy,
+		CpuFallbackAvailable:    cpuFallback,
+		OperatingSystem:         runtime.GOOS,
+		Architecture:            runtime.GOARCH,
+		DecoderBackend:          decoderBackend,
+		EncoderBackend:          encoderBackend,
+		FailureCode:             failureCode,
+		Reason:                  reason,
+		Recommendation:          recommendation,
+		CpuWarning:              cpuWarning,
+	}, nil
+}
+
+func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string, nativeGPU bool) (string, string) {
+	if nativeGPU {
+		return "Native GPU playback is available.", ""
+	}
+
+	var recommendation string
+	switch runtime.GOOS {
+	case "windows":
+		switch failureCode {
+		case "gpu_encode_unavailable":
+			recommendation = "Update the graphics driver and reboot. NVIDIA systems using this FFmpeg build require NVENC API 13.1 (driver 610 or newer); AMD systems require a current Adrenalin/AMF runtime; Intel systems require a current graphics driver."
+		case "gpu_decode_capability":
+			recommendation = "Update the graphics driver and verify that the GPU supports hardware decoding for this codec/profile, especially HEVC Main 10."
+		case "zero_copy_unavailable":
+			recommendation = "Update the graphics driver and use the matching native GPU decoder/encoder pair for this GPU vendor."
+		default:
+			recommendation = "Update the graphics driver, restart the application, and retry the native GPU preflight."
+		}
+	case "linux":
+		recommendation = "Install or update the vendor graphics driver and verify the required VAAPI, NVENC, or AMF runtime is available to the application."
+	case "darwin":
+		recommendation = "Update macOS and verify that VideoToolbox supports this codec/profile on the current Mac."
+	default:
+		recommendation = "Verify that the operating-system graphics driver and FFmpeg hardware runtime are installed and current."
+	}
+
+	warning := "CPU processing is available, but 4K playback may stutter, buffer slowly, or pause because decoding/encoding will run through system memory."
+	if decoderBackend != "" || encoderBackend != "" {
+		warning = fmt.Sprintf("CPU processing is available, but the current path (%s decode, %s encode) may not sustain 4K realtime playback.", decoderBackend, encoderBackend)
+	}
+	return recommendation, warning
 }
 
 // GetVideoScreenshot extracts a single frame image out of a media asset layout.

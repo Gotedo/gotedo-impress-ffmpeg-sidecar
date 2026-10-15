@@ -19,6 +19,7 @@
 #include <miniaudio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -227,6 +228,26 @@ typedef struct
   char candidate_full_mime[256];
 } CMediaProperties;
 
+// Runtime playback capability probe. This is intentionally separate from
+// CMediaProperties: metadata can be valid while the host GPU/driver cannot
+// sustain the required decode + encode path.
+typedef struct
+{
+  int32_t native_gpu_supported;
+  int32_t hardware_decode_supported;
+  int32_t hardware_encode_supported;
+  int32_t zero_copy_supported;
+  int32_t cpu_fallback_available;
+  int32_t decoder_device_type;
+  int32_t decoder_frame_format;
+  int32_t encoder_width;
+  int32_t encoder_height;
+  char decoder_backend[32];
+  char encoder_backend[64];
+  char failure_code[64];
+  char reason[512];
+} CPlaybackSupport;
+
 // Function prototypes
 int init_audio_resampler(DemuxDecContext *ctx);
 int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path);
@@ -242,6 +263,10 @@ int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
 
 // Probes a file and fills out the CMediaProperties memory layout
 int probe_media_properties(const char *file_path, CMediaProperties *props);
+
+// Opens the real decoder/encoder path, decodes a sample frame, and reports
+// whether native GPU playback is actually available without starting a stream.
+int probe_playback_support(const char *file_path, CPlaybackSupport *support);
 
 // Extract a compressed image frame into a dynamically allocated buffer
 int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **out_buf, int *out_size);

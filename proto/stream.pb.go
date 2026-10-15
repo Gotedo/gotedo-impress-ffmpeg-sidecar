@@ -113,6 +113,107 @@ func (StreamMode) EnumDescriptor() ([]byte, []int) {
 	return file_proto_stream_proto_rawDescGZIP(), []int{1}
 }
 
+type ProcessingPolicy int32
+
+const (
+	ProcessingPolicy_PROCESSING_GPU_REQUIRED ProcessingPolicy = 0
+	ProcessingPolicy_PROCESSING_ALLOW_CPU    ProcessingPolicy = 1
+)
+
+// Enum value maps for ProcessingPolicy.
+var (
+	ProcessingPolicy_name = map[int32]string{
+		0: "PROCESSING_GPU_REQUIRED",
+		1: "PROCESSING_ALLOW_CPU",
+	}
+	ProcessingPolicy_value = map[string]int32{
+		"PROCESSING_GPU_REQUIRED": 0,
+		"PROCESSING_ALLOW_CPU":    1,
+	}
+)
+
+func (x ProcessingPolicy) Enum() *ProcessingPolicy {
+	p := new(ProcessingPolicy)
+	*p = x
+	return p
+}
+
+func (x ProcessingPolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessingPolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_stream_proto_enumTypes[2].Descriptor()
+}
+
+func (ProcessingPolicy) Type() protoreflect.EnumType {
+	return &file_proto_stream_proto_enumTypes[2]
+}
+
+func (x ProcessingPolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessingPolicy.Descriptor instead.
+func (ProcessingPolicy) EnumDescriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{2}
+}
+
+type PlaybackSupportStatus int32
+
+const (
+	PlaybackSupportStatus_PLAYBACK_SUPPORT_UNKNOWN      PlaybackSupportStatus = 0
+	PlaybackSupportStatus_PLAYBACK_SUPPORT_NATIVE_GPU   PlaybackSupportStatus = 1
+	PlaybackSupportStatus_PLAYBACK_SUPPORT_GPU_ASSISTED PlaybackSupportStatus = 2
+	PlaybackSupportStatus_PLAYBACK_SUPPORT_CPU_FALLBACK PlaybackSupportStatus = 3
+	PlaybackSupportStatus_PLAYBACK_SUPPORT_UNAVAILABLE  PlaybackSupportStatus = 4
+)
+
+// Enum value maps for PlaybackSupportStatus.
+var (
+	PlaybackSupportStatus_name = map[int32]string{
+		0: "PLAYBACK_SUPPORT_UNKNOWN",
+		1: "PLAYBACK_SUPPORT_NATIVE_GPU",
+		2: "PLAYBACK_SUPPORT_GPU_ASSISTED",
+		3: "PLAYBACK_SUPPORT_CPU_FALLBACK",
+		4: "PLAYBACK_SUPPORT_UNAVAILABLE",
+	}
+	PlaybackSupportStatus_value = map[string]int32{
+		"PLAYBACK_SUPPORT_UNKNOWN":      0,
+		"PLAYBACK_SUPPORT_NATIVE_GPU":   1,
+		"PLAYBACK_SUPPORT_GPU_ASSISTED": 2,
+		"PLAYBACK_SUPPORT_CPU_FALLBACK": 3,
+		"PLAYBACK_SUPPORT_UNAVAILABLE":  4,
+	}
+)
+
+func (x PlaybackSupportStatus) Enum() *PlaybackSupportStatus {
+	p := new(PlaybackSupportStatus)
+	*p = x
+	return p
+}
+
+func (x PlaybackSupportStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PlaybackSupportStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_stream_proto_enumTypes[3].Descriptor()
+}
+
+func (PlaybackSupportStatus) Type() protoreflect.EnumType {
+	return &file_proto_stream_proto_enumTypes[3]
+}
+
+func (x PlaybackSupportStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PlaybackSupportStatus.Descriptor instead.
+func (PlaybackSupportStatus) EnumDescriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{3}
+}
+
 type ControlRequest_Action int32
 
 const (
@@ -155,11 +256,11 @@ func (x ControlRequest_Action) String() string {
 }
 
 func (ControlRequest_Action) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_stream_proto_enumTypes[2].Descriptor()
+	return file_proto_stream_proto_enumTypes[4].Descriptor()
 }
 
 func (ControlRequest_Action) Type() protoreflect.EnumType {
-	return &file_proto_stream_proto_enumTypes[2]
+	return &file_proto_stream_proto_enumTypes[4]
 }
 
 func (x ControlRequest_Action) Number() protoreflect.EnumNumber {
@@ -172,14 +273,15 @@ func (ControlRequest_Action) EnumDescriptor() ([]byte, []int) {
 }
 
 type StreamRequest struct {
-	state         protoimpl.MessageState     `protogen:"open.v1"`
-	TargetId      string                     `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // "preview" or projector screen ID string
-	FilePath      string                     `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	AudioDeviceId string                     `protobuf:"bytes,3,opt,name=audio_device_id,json=audioDeviceId,proto3" json:"audio_device_id,omitempty"`
-	StreamMode    StreamMode                 `protobuf:"varint,4,opt,name=stream_mode,json=streamMode,proto3,enum=ffmpeg.StreamMode" json:"stream_mode,omitempty"` // passthrough or transcode
-	Container     PassthroughContainerFormat `protobuf:"varint,5,opt,name=container,proto3,enum=ffmpeg.PassthroughContainerFormat" json:"container,omitempty"`     // CONTAINER_FMP4 or CONTAINER_WEBM
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState     `protogen:"open.v1"`
+	TargetId         string                     `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // "preview" or projector screen ID string
+	FilePath         string                     `protobuf:"bytes,2,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	AudioDeviceId    string                     `protobuf:"bytes,3,opt,name=audio_device_id,json=audioDeviceId,proto3" json:"audio_device_id,omitempty"`
+	StreamMode       StreamMode                 `protobuf:"varint,4,opt,name=stream_mode,json=streamMode,proto3,enum=ffmpeg.StreamMode" json:"stream_mode,omitempty"`                         // passthrough or transcode
+	Container        PassthroughContainerFormat `protobuf:"varint,5,opt,name=container,proto3,enum=ffmpeg.PassthroughContainerFormat" json:"container,omitempty"`                             // CONTAINER_FMP4 or CONTAINER_WEBM
+	ProcessingPolicy ProcessingPolicy           `protobuf:"varint,6,opt,name=processing_policy,json=processingPolicy,proto3,enum=ffmpeg.ProcessingPolicy" json:"processing_policy,omitempty"` // GPU required unless CPU fallback is explicitly allowed
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StreamRequest) Reset() {
@@ -245,6 +347,13 @@ func (x *StreamRequest) GetContainer() PassthroughContainerFormat {
 		return x.Container
 	}
 	return PassthroughContainerFormat_CONTAINER_FMP4
+}
+
+func (x *StreamRequest) GetProcessingPolicy() ProcessingPolicy {
+	if x != nil {
+		return x.ProcessingPolicy
+	}
+	return ProcessingPolicy_PROCESSING_GPU_REQUIRED
 }
 
 type StreamResponse struct {
@@ -795,6 +904,198 @@ func (x *MetadataRequest) GetFilePath() string {
 	return ""
 }
 
+type PlaybackSupportRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaybackSupportRequest) Reset() {
+	*x = PlaybackSupportRequest{}
+	mi := &file_proto_stream_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaybackSupportRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaybackSupportRequest) ProtoMessage() {}
+
+func (x *PlaybackSupportRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaybackSupportRequest.ProtoReflect.Descriptor instead.
+func (*PlaybackSupportRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PlaybackSupportRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
+	}
+	return ""
+}
+
+type PlaybackSupportResponse struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	Status                  PlaybackSupportStatus  `protobuf:"varint,1,opt,name=status,proto3,enum=ffmpeg.PlaybackSupportStatus" json:"status,omitempty"`
+	NativeGpuSupported      bool                   `protobuf:"varint,2,opt,name=native_gpu_supported,json=nativeGpuSupported,proto3" json:"native_gpu_supported,omitempty"`
+	HardwareDecodeSupported bool                   `protobuf:"varint,3,opt,name=hardware_decode_supported,json=hardwareDecodeSupported,proto3" json:"hardware_decode_supported,omitempty"`
+	HardwareEncodeSupported bool                   `protobuf:"varint,4,opt,name=hardware_encode_supported,json=hardwareEncodeSupported,proto3" json:"hardware_encode_supported,omitempty"`
+	ZeroCopySupported       bool                   `protobuf:"varint,5,opt,name=zero_copy_supported,json=zeroCopySupported,proto3" json:"zero_copy_supported,omitempty"`
+	CpuFallbackAvailable    bool                   `protobuf:"varint,6,opt,name=cpu_fallback_available,json=cpuFallbackAvailable,proto3" json:"cpu_fallback_available,omitempty"`
+	OperatingSystem         string                 `protobuf:"bytes,7,opt,name=operating_system,json=operatingSystem,proto3" json:"operating_system,omitempty"`
+	Architecture            string                 `protobuf:"bytes,8,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	DecoderBackend          string                 `protobuf:"bytes,9,opt,name=decoder_backend,json=decoderBackend,proto3" json:"decoder_backend,omitempty"`
+	EncoderBackend          string                 `protobuf:"bytes,10,opt,name=encoder_backend,json=encoderBackend,proto3" json:"encoder_backend,omitempty"`
+	FailureCode             string                 `protobuf:"bytes,11,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	Reason                  string                 `protobuf:"bytes,12,opt,name=reason,proto3" json:"reason,omitempty"`
+	Recommendation          string                 `protobuf:"bytes,13,opt,name=recommendation,proto3" json:"recommendation,omitempty"`
+	CpuWarning              string                 `protobuf:"bytes,14,opt,name=cpu_warning,json=cpuWarning,proto3" json:"cpu_warning,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *PlaybackSupportResponse) Reset() {
+	*x = PlaybackSupportResponse{}
+	mi := &file_proto_stream_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaybackSupportResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaybackSupportResponse) ProtoMessage() {}
+
+func (x *PlaybackSupportResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaybackSupportResponse.ProtoReflect.Descriptor instead.
+func (*PlaybackSupportResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *PlaybackSupportResponse) GetStatus() PlaybackSupportStatus {
+	if x != nil {
+		return x.Status
+	}
+	return PlaybackSupportStatus_PLAYBACK_SUPPORT_UNKNOWN
+}
+
+func (x *PlaybackSupportResponse) GetNativeGpuSupported() bool {
+	if x != nil {
+		return x.NativeGpuSupported
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetHardwareDecodeSupported() bool {
+	if x != nil {
+		return x.HardwareDecodeSupported
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetHardwareEncodeSupported() bool {
+	if x != nil {
+		return x.HardwareEncodeSupported
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetZeroCopySupported() bool {
+	if x != nil {
+		return x.ZeroCopySupported
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetCpuFallbackAvailable() bool {
+	if x != nil {
+		return x.CpuFallbackAvailable
+	}
+	return false
+}
+
+func (x *PlaybackSupportResponse) GetOperatingSystem() string {
+	if x != nil {
+		return x.OperatingSystem
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetDecoderBackend() string {
+	if x != nil {
+		return x.DecoderBackend
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetEncoderBackend() string {
+	if x != nil {
+		return x.EncoderBackend
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetRecommendation() string {
+	if x != nil {
+		return x.Recommendation
+	}
+	return ""
+}
+
+func (x *PlaybackSupportResponse) GetCpuWarning() string {
+	if x != nil {
+		return x.CpuWarning
+	}
+	return ""
+}
+
 type MetadataResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Container Format Information
@@ -843,7 +1144,7 @@ type MetadataResponse struct {
 
 func (x *MetadataResponse) Reset() {
 	*x = MetadataResponse{}
-	mi := &file_proto_stream_proto_msgTypes[12]
+	mi := &file_proto_stream_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -855,7 +1156,7 @@ func (x *MetadataResponse) String() string {
 func (*MetadataResponse) ProtoMessage() {}
 
 func (x *MetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[12]
+	mi := &file_proto_stream_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -868,7 +1169,7 @@ func (x *MetadataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetadataResponse.ProtoReflect.Descriptor instead.
 func (*MetadataResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{12}
+	return file_proto_stream_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *MetadataResponse) GetFormatName() string {
@@ -1126,7 +1427,7 @@ type ScreenshotRequest struct {
 
 func (x *ScreenshotRequest) Reset() {
 	*x = ScreenshotRequest{}
-	mi := &file_proto_stream_proto_msgTypes[13]
+	mi := &file_proto_stream_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1138,7 +1439,7 @@ func (x *ScreenshotRequest) String() string {
 func (*ScreenshotRequest) ProtoMessage() {}
 
 func (x *ScreenshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[13]
+	mi := &file_proto_stream_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1151,7 +1452,7 @@ func (x *ScreenshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenshotRequest.ProtoReflect.Descriptor instead.
 func (*ScreenshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{13}
+	return file_proto_stream_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ScreenshotRequest) GetFilePath() string {
@@ -1178,7 +1479,7 @@ type ScreenshotResponse struct {
 
 func (x *ScreenshotResponse) Reset() {
 	*x = ScreenshotResponse{}
-	mi := &file_proto_stream_proto_msgTypes[14]
+	mi := &file_proto_stream_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1190,7 +1491,7 @@ func (x *ScreenshotResponse) String() string {
 func (*ScreenshotResponse) ProtoMessage() {}
 
 func (x *ScreenshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[14]
+	mi := &file_proto_stream_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1203,7 +1504,7 @@ func (x *ScreenshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenshotResponse.ProtoReflect.Descriptor instead.
 func (*ScreenshotResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{14}
+	return file_proto_stream_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ScreenshotResponse) GetImageData() []byte {
@@ -1228,7 +1529,7 @@ type ShutdownRequest struct {
 
 func (x *ShutdownRequest) Reset() {
 	*x = ShutdownRequest{}
-	mi := &file_proto_stream_proto_msgTypes[15]
+	mi := &file_proto_stream_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1240,7 +1541,7 @@ func (x *ShutdownRequest) String() string {
 func (*ShutdownRequest) ProtoMessage() {}
 
 func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[15]
+	mi := &file_proto_stream_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1253,7 +1554,7 @@ func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{15}
+	return file_proto_stream_proto_rawDescGZIP(), []int{17}
 }
 
 type ShutdownResponse struct {
@@ -1265,7 +1566,7 @@ type ShutdownResponse struct {
 
 func (x *ShutdownResponse) Reset() {
 	*x = ShutdownResponse{}
-	mi := &file_proto_stream_proto_msgTypes[16]
+	mi := &file_proto_stream_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1277,7 +1578,7 @@ func (x *ShutdownResponse) String() string {
 func (*ShutdownResponse) ProtoMessage() {}
 
 func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[16]
+	mi := &file_proto_stream_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1290,7 +1591,7 @@ func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{16}
+	return file_proto_stream_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ShutdownResponse) GetAccepted() bool {
@@ -1304,14 +1605,15 @@ var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/stream.proto\x12\x06ffmpeg\"\xe8\x01\n" +
+	"\x12proto/stream.proto\x12\x06ffmpeg\"\xaf\x02\n" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
 	"\x0faudio_device_id\x18\x03 \x01(\tR\raudioDeviceId\x123\n" +
 	"\vstream_mode\x18\x04 \x01(\x0e2\x12.ffmpeg.StreamModeR\n" +
 	"streamMode\x12@\n" +
-	"\tcontainer\x18\x05 \x01(\x0e2\".ffmpeg.PassthroughContainerFormatR\tcontainer\"X\n" +
+	"\tcontainer\x18\x05 \x01(\x0e2\".ffmpeg.PassthroughContainerFormatR\tcontainer\x12E\n" +
+	"\x11processing_policy\x18\x06 \x01(\x0e2\x18.ffmpeg.ProcessingPolicyR\x10processingPolicy\"X\n" +
 	"\x0eStreamResponse\x12\x1d\n" +
 	"\n" +
 	"fmp4_chunk\x18\x01 \x01(\fR\tfmp4Chunk\x12\x10\n" +
@@ -1350,7 +1652,26 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0fDevicesResponse\x12-\n" +
 	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices\".\n" +
 	"\x0fMetadataRequest\x12\x1b\n" +
-	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\xd3\t\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"5\n" +
+	"\x16PlaybackSupportRequest\x12\x1b\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\x85\x05\n" +
+	"\x17PlaybackSupportResponse\x125\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x1d.ffmpeg.PlaybackSupportStatusR\x06status\x120\n" +
+	"\x14native_gpu_supported\x18\x02 \x01(\bR\x12nativeGpuSupported\x12:\n" +
+	"\x19hardware_decode_supported\x18\x03 \x01(\bR\x17hardwareDecodeSupported\x12:\n" +
+	"\x19hardware_encode_supported\x18\x04 \x01(\bR\x17hardwareEncodeSupported\x12.\n" +
+	"\x13zero_copy_supported\x18\x05 \x01(\bR\x11zeroCopySupported\x124\n" +
+	"\x16cpu_fallback_available\x18\x06 \x01(\bR\x14cpuFallbackAvailable\x12)\n" +
+	"\x10operating_system\x18\a \x01(\tR\x0foperatingSystem\x12\"\n" +
+	"\farchitecture\x18\b \x01(\tR\farchitecture\x12'\n" +
+	"\x0fdecoder_backend\x18\t \x01(\tR\x0edecoderBackend\x12'\n" +
+	"\x0fencoder_backend\x18\n" +
+	" \x01(\tR\x0eencoderBackend\x12!\n" +
+	"\ffailure_code\x18\v \x01(\tR\vfailureCode\x12\x16\n" +
+	"\x06reason\x18\f \x01(\tR\x06reason\x12&\n" +
+	"\x0erecommendation\x18\r \x01(\tR\x0erecommendation\x12\x1f\n" +
+	"\vcpu_warning\x18\x0e \x01(\tR\n" +
+	"cpuWarning\"\xd3\t\n" +
 	"\x10MetadataResponse\x12\x1f\n" +
 	"\vformat_name\x18\x01 \x01(\tR\n" +
 	"formatName\x12(\n" +
@@ -1410,7 +1731,16 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
 	"StreamMode\x12\x0f\n" +
 	"\vpassthrough\x10\x00\x12\r\n" +
-	"\ttranscode\x10\x012\xb7\x04\n" +
+	"\ttranscode\x10\x01*I\n" +
+	"\x10ProcessingPolicy\x12\x1b\n" +
+	"\x17PROCESSING_GPU_REQUIRED\x10\x00\x12\x18\n" +
+	"\x14PROCESSING_ALLOW_CPU\x10\x01*\xbe\x01\n" +
+	"\x15PlaybackSupportStatus\x12\x1c\n" +
+	"\x18PLAYBACK_SUPPORT_UNKNOWN\x10\x00\x12\x1f\n" +
+	"\x1bPLAYBACK_SUPPORT_NATIVE_GPU\x10\x01\x12!\n" +
+	"\x1dPLAYBACK_SUPPORT_GPU_ASSISTED\x10\x02\x12!\n" +
+	"\x1dPLAYBACK_SUPPORT_CPU_FALLBACK\x10\x03\x12 \n" +
+	"\x1cPLAYBACK_SUPPORT_UNAVAILABLE\x10\x042\x8e\x05\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
@@ -1418,7 +1748,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\rAdjustLatency\x12\x16.ffmpeg.LatencyRequest\x1a\x17.ffmpeg.LatencyResponse\x12@\n" +
 	"\rControlStream\x12\x16.ffmpeg.ControlRequest\x1a\x17.ffmpeg.ControlResponse\x12B\n" +
 	"\x0fGetAudioDevices\x12\x16.ffmpeg.DevicesRequest\x1a\x17.ffmpeg.DevicesResponse\x12G\n" +
-	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponse\x12K\n" +
+	"\x12GetMediaProperties\x12\x17.ffmpeg.MetadataRequest\x1a\x18.ffmpeg.MetadataResponse\x12U\n" +
+	"\x12GetPlaybackSupport\x12\x1e.ffmpeg.PlaybackSupportRequest\x1a\x1f.ffmpeg.PlaybackSupportResponse\x12K\n" +
 	"\x12GetVideoScreenshot\x12\x19.ffmpeg.ScreenshotRequest\x1a\x1a.ffmpeg.ScreenshotResponse\x12=\n" +
 	"\bShutdown\x12\x17.ffmpeg.ShutdownRequest\x1a\x18.ffmpeg.ShutdownResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
@@ -1434,56 +1765,64 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 	return file_proto_stream_proto_rawDescData
 }
 
-var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_proto_stream_proto_goTypes = []any{
 	(PassthroughContainerFormat)(0), // 0: ffmpeg.PassthroughContainerFormat
 	(StreamMode)(0),                 // 1: ffmpeg.StreamMode
-	(ControlRequest_Action)(0),      // 2: ffmpeg.ControlRequest.Action
-	(*StreamRequest)(nil),           // 3: ffmpeg.StreamRequest
-	(*StreamResponse)(nil),          // 4: ffmpeg.StreamResponse
-	(*StreamControlRequest)(nil),    // 5: ffmpeg.StreamControlRequest
-	(*StreamControlResponse)(nil),   // 6: ffmpeg.StreamControlResponse
-	(*LatencyRequest)(nil),          // 7: ffmpeg.LatencyRequest
-	(*LatencyResponse)(nil),         // 8: ffmpeg.LatencyResponse
-	(*ControlRequest)(nil),          // 9: ffmpeg.ControlRequest
-	(*ControlResponse)(nil),         // 10: ffmpeg.ControlResponse
-	(*DevicesRequest)(nil),          // 11: ffmpeg.DevicesRequest
-	(*AudioDevice)(nil),             // 12: ffmpeg.AudioDevice
-	(*DevicesResponse)(nil),         // 13: ffmpeg.DevicesResponse
-	(*MetadataRequest)(nil),         // 14: ffmpeg.MetadataRequest
-	(*MetadataResponse)(nil),        // 15: ffmpeg.MetadataResponse
-	(*ScreenshotRequest)(nil),       // 16: ffmpeg.ScreenshotRequest
-	(*ScreenshotResponse)(nil),      // 17: ffmpeg.ScreenshotResponse
-	(*ShutdownRequest)(nil),         // 18: ffmpeg.ShutdownRequest
-	(*ShutdownResponse)(nil),        // 19: ffmpeg.ShutdownResponse
+	(ProcessingPolicy)(0),           // 2: ffmpeg.ProcessingPolicy
+	(PlaybackSupportStatus)(0),      // 3: ffmpeg.PlaybackSupportStatus
+	(ControlRequest_Action)(0),      // 4: ffmpeg.ControlRequest.Action
+	(*StreamRequest)(nil),           // 5: ffmpeg.StreamRequest
+	(*StreamResponse)(nil),          // 6: ffmpeg.StreamResponse
+	(*StreamControlRequest)(nil),    // 7: ffmpeg.StreamControlRequest
+	(*StreamControlResponse)(nil),   // 8: ffmpeg.StreamControlResponse
+	(*LatencyRequest)(nil),          // 9: ffmpeg.LatencyRequest
+	(*LatencyResponse)(nil),         // 10: ffmpeg.LatencyResponse
+	(*ControlRequest)(nil),          // 11: ffmpeg.ControlRequest
+	(*ControlResponse)(nil),         // 12: ffmpeg.ControlResponse
+	(*DevicesRequest)(nil),          // 13: ffmpeg.DevicesRequest
+	(*AudioDevice)(nil),             // 14: ffmpeg.AudioDevice
+	(*DevicesResponse)(nil),         // 15: ffmpeg.DevicesResponse
+	(*MetadataRequest)(nil),         // 16: ffmpeg.MetadataRequest
+	(*PlaybackSupportRequest)(nil),  // 17: ffmpeg.PlaybackSupportRequest
+	(*PlaybackSupportResponse)(nil), // 18: ffmpeg.PlaybackSupportResponse
+	(*MetadataResponse)(nil),        // 19: ffmpeg.MetadataResponse
+	(*ScreenshotRequest)(nil),       // 20: ffmpeg.ScreenshotRequest
+	(*ScreenshotResponse)(nil),      // 21: ffmpeg.ScreenshotResponse
+	(*ShutdownRequest)(nil),         // 22: ffmpeg.ShutdownRequest
+	(*ShutdownResponse)(nil),        // 23: ffmpeg.ShutdownResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
 	1,  // 0: ffmpeg.StreamRequest.stream_mode:type_name -> ffmpeg.StreamMode
 	0,  // 1: ffmpeg.StreamRequest.container:type_name -> ffmpeg.PassthroughContainerFormat
-	2,  // 2: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
-	12, // 3: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
-	3,  // 4: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
-	5,  // 5: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
-	7,  // 6: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
-	9,  // 7: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
-	11, // 8: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
-	14, // 9: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
-	16, // 10: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
-	18, // 11: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
-	4,  // 12: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	6,  // 13: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	8,  // 14: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	10, // 15: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	13, // 16: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	15, // 17: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
-	17, // 18: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
-	19, // 19: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
-	12, // [12:20] is the sub-list for method output_type
-	4,  // [4:12] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	2,  // 2: ffmpeg.StreamRequest.processing_policy:type_name -> ffmpeg.ProcessingPolicy
+	4,  // 3: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
+	14, // 4: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
+	3,  // 5: ffmpeg.PlaybackSupportResponse.status:type_name -> ffmpeg.PlaybackSupportStatus
+	5,  // 6: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
+	7,  // 7: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
+	9,  // 8: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
+	11, // 9: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
+	13, // 10: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
+	16, // 11: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
+	17, // 12: ffmpeg.FFmpegService.GetPlaybackSupport:input_type -> ffmpeg.PlaybackSupportRequest
+	20, // 13: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
+	22, // 14: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
+	6,  // 15: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	8,  // 16: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	10, // 17: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	12, // 18: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	15, // 19: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	19, // 20: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	18, // 21: ffmpeg.FFmpegService.GetPlaybackSupport:output_type -> ffmpeg.PlaybackSupportResponse
+	21, // 22: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
+	23, // 23: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
+	15, // [15:24] is the sub-list for method output_type
+	6,  // [6:15] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_stream_proto_init() }
@@ -1496,8 +1835,8 @@ func file_proto_stream_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   17,
+			NumEnums:      5,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

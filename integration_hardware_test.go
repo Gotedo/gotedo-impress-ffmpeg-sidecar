@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -19,17 +20,26 @@ import (
 	"github.com/gotedo/gotedo-impress-ffmpeg-sidecar/proto"
 )
 
-// Setup a real gRPC server bound to an internal local Unix Domain Socket (UDS)
+// Setup a real gRPC server bound to a local UDS or TCP listener, depending on
+// the host platform. Windows does not support the Unix-socket URI used by the
+// original harness.
 func setupRealHardwareTestServer(t *testing.T) (proto.FFmpegServiceClient, string, func()) {
 	t.Helper()
 
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hardware_test_%d.sock", time.Now().UnixNano()))
-	_ = os.Remove(socketPath)
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("[HARDWARE TEST SETUP] Failed to bind local UDS: %v", err)
+	endpoint := filepath.Join(os.TempDir(), fmt.Sprintf("hardware_test_%d.sock", time.Now().UnixNano()))
+	network := "unix"
+	if runtime.GOOS == "windows" {
+		network = "tcp"
+		endpoint = "127.0.0.1:0"
+	} else {
+		_ = os.Remove(endpoint)
 	}
+
+	listener, err := net.Listen(network, endpoint)
+	if err != nil {
+		t.Fatalf("[HARDWARE TEST SETUP] Failed to bind local test listener: %v", err)
+	}
+	address := listener.Addr().String()
 
 	grpcServer := grpc.NewServer()
 	srv := &ffmpegServer{}
@@ -42,22 +52,30 @@ func setupRealHardwareTestServer(t *testing.T) (proto.FFmpegServiceClient, strin
 	}()
 
 	// Establish real client channel
-	conn, err := grpc.Dial("unix://"+socketPath, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialTarget := "unix:///" + filepath.ToSlash(address)
+	if runtime.GOOS == "windows" {
+		dialTarget = address
+	}
+	conn, err := grpc.Dial(dialTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		grpcServer.Stop()
 		listener.Close()
-		_ = os.Remove(socketPath)
-		t.Fatalf("[HARDWARE TEST SETUP] Client failed to dial UDS: %v", err)
+		if runtime.GOOS != "windows" {
+			_ = os.Remove(address)
+		}
+		t.Fatalf("[HARDWARE TEST SETUP] Client failed to dial test listener: %v", err)
 	}
 
 	closer := func() {
 		conn.Close()
 		grpcServer.GracefulStop()
 		listener.Close()
-		_ = os.Remove(socketPath)
+		if runtime.GOOS != "windows" {
+			_ = os.Remove(address)
+		}
 	}
 
-	return proto.NewFFmpegServiceClient(conn), socketPath, closer
+	return proto.NewFFmpegServiceClient(conn), address, closer
 }
 
 // generateRealTestMedia points to the validated baseline asset in your repository
@@ -72,8 +90,15 @@ func generateRealTestMedia(t *testing.T) (string, func()) {
 	}
 
 	// Verify the file actually exists before passing it to the C-layer
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	info, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
 		t.Fatalf("Baseline test asset not found at expected path: %s", filePath)
+	}
+	if err != nil {
+		t.Fatalf("Failed to inspect baseline test asset: %v", err)
+	}
+	if info.Size() < 1024 {
+		t.Skipf("Baseline test asset is a Git LFS pointer or otherwise incomplete (%d bytes): %s", info.Size(), filePath)
 	}
 
 	// Return a "no-op" cleanup function because we are using a persistent source file,
@@ -110,6 +135,31 @@ func generate4KHDRTestMedia(t *testing.T) (string, func()) {
 	return selectedPath, func() {
 		// No-op: Do not delete the source repository asset
 	}
+}
+
+// generateExodusHDRTestMedia resolves the checked-in HDR HEVC sample used by
+// the runtime GPU support preflight test.
+func generateExodusHDRTestMedia(t *testing.T) (string, func()) {
+	t.Helper()
+
+	filePath := filepath.Join("assets", "(HDR HEVC 10-bit BT.2020 24fps) Exodus Sample.mp4")
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		t.Fatalf("Failed to resolve Exodus HDR test asset: %v", err)
+	}
+
+	info, err := os.Stat(absPath)
+	if os.IsNotExist(err) {
+		t.Skipf("Exodus HDR test asset not found: %s", absPath)
+	}
+	if err != nil {
+		t.Fatalf("Failed to inspect Exodus HDR test asset: %v", err)
+	}
+	if info.Size() < 1024 {
+		t.Skipf("Exodus HDR test asset is incomplete (%d bytes): %s", info.Size(), absPath)
+	}
+
+	return absPath, func() {}
 }
 
 // -------------------------------------------------------------------------
@@ -166,8 +216,9 @@ func TestIntegration_FullPipelineStreamingAndRealTimeLatencyControl(t *testing.T
 
 	// 1. Initialize the live streaming consumer against real system loops
 	stream, err := client.StartStream(ctx, &proto.StreamRequest{
-		TargetId: "hardware-integration-target",
-		FilePath: mediaPath,
+		TargetId:         "hardware-integration-target",
+		FilePath:         mediaPath,
+		ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_ALLOW_CPU,
 	})
 	if err != nil {
 		t.Fatalf("Failed to establish real stream pipeline channel: %v", err)
@@ -327,6 +378,38 @@ func TestIntegration_MediaPropertiesProbing(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
+// Integration Test: Runtime Playback Support Preflight
+// -------------------------------------------------------------------------
+func TestIntegration_PlaybackSupportPreflight(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp, err := client.GetPlaybackSupport(ctx, &proto.PlaybackSupportRequest{
+		FilePath: mediaPath,
+	})
+	if err != nil {
+		t.Fatalf("Playback support preflight failed over gRPC: %v", err)
+	}
+
+	if resp.GetOperatingSystem() == "" || resp.GetArchitecture() == "" {
+		t.Fatal("Playback support preflight did not report the host platform")
+	}
+	if resp.GetStatus() == proto.PlaybackSupportStatus_PLAYBACK_SUPPORT_UNKNOWN {
+		t.Fatal("Playback support preflight returned an unknown status")
+	}
+
+	t.Logf("[SUPPORT REPORT] status=%s native_gpu=%t decoder=%s encoder=%s failure=%s recommendation=%s",
+		resp.GetStatus().String(), resp.GetNativeGpuSupported(), resp.GetDecoderBackend(),
+		resp.GetEncoderBackend(), resp.GetFailureCode(), resp.GetRecommendation())
+}
+
+// -------------------------------------------------------------------------
 // Integration Test 4: Frame Seek, Extraction, and Disk Inspection (JPEG)
 // -------------------------------------------------------------------------
 func TestIntegration_VideoScreenshotExtractionAndDiskWrite(t *testing.T) {
@@ -427,7 +510,7 @@ func TestIntegration_PassthroughStreamingPipeline4KHDR(t *testing.T) {
 	stream, err := client.StartStream(ctx, &proto.StreamRequest{
 		TargetId:   "passthrough-4k-target",
 		FilePath:   mediaPath,
-		StreamMode: "passthrough",
+		StreamMode: proto.StreamMode_passthrough,
 	})
 	if err != nil {
 		t.Fatalf("Failed to initialize passthrough stream over gRPC: %v", err)
