@@ -15,11 +15,16 @@
 #include <libavutil/log.h>
 #include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
+#include <libavfilter/avfilter.h>
 #include <miniaudio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifndef AV_PROFILE_UNKNOWN
 #define AV_PROFILE_UNKNOWN -99

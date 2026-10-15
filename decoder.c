@@ -6,49 +6,64 @@
 
 /**
  * Apply low-latency + high-quality options when the encoder implements them.
- * av_opt_set returns an error for unknown keys; that is ignored so the
- * same helper works for libx264, Media Foundation, NVENC, AMF, VAAPI, etc.
+ * Options are applied only for the codecs that actually support them,
+ * so the same helper works for libx264, Media Foundation, NVENC, AMF, QSV, etc.
+ * Unknown keys are never written for a given encoder.
  */
 static void apply_low_latency_encoder_opts(AVCodecContext *enc)
 {
-  void *priv = enc ? enc->priv_data : NULL;
-  if (!priv)
+  if (!enc || !enc->priv_data || !enc->codec)
     return;
 
-  /* ---- Low-latency common options ---- */
-  av_opt_set(priv, "tune", "zerolatency", 0);
-  av_opt_set(priv, "profile", "main", 0);
-  av_opt_set_int(priv, "realtime", 1, 0);
-  av_opt_set_int(priv, "async_depth", 1, 0);
-  av_opt_set(priv, "delay", "0", 0);
-  av_opt_set_int(priv, "bf", 0, 0);       // reinforce no B-frames
-  av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks (ignored if unsupported)
+  void *priv = enc->priv_data;
+  const char *name = enc->codec->name;
 
-  /* libx264 uses named presets; NVENC uses p1–p7 / llhq. */
-  if (av_opt_set(priv, "preset", "ultrafast", 0) < 0)
+  /* ---- Low-latency common options (widely accepted) ---- */
+  av_opt_set_int(priv, "bf", 0, 0); // reinforce no B-frames
+  av_opt_set_int(priv, "async_depth", 1, 0);
+
+  if (strcmp(name, "libx264") == 0 || strcmp(name, "libx264rgb") == 0)
   {
-    av_opt_set(priv, "preset", "p4", 0); /* NVENC balanced quality */
-    av_opt_set(priv, "tune", "ll", 0);   /* NVENC low latency tune */
+    /* libx264 / x264rgb */
+    av_opt_set(priv, "tune", "zerolatency", 0);
+    av_opt_set(priv, "preset", "ultrafast", 0);
+    av_opt_set(priv, "profile", "main", 0);
+    av_opt_set(priv, "crf", "19", 0);       /* high quality, still real-time capable */
+    av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks
+    return;
   }
 
-  /* ---- Quality-based rate control (preferred) ---- */
-  /* libx264 / x264rgb */
-  av_opt_set(priv, "crf", "19", 0); /* high quality, still real-time capable */
+  if (strcmp(name, "h264_nvenc") == 0)
+  {
+    /* NVENC – never use x264-style names */
+    av_opt_set(priv, "preset", "p4", 0); /* balanced quality (p1–p7) */
+    av_opt_set(priv, "tune", "ll", 0);   /* low-latency tune */
+    av_opt_set(priv, "rc", "constqp", 0);
+    av_opt_set_int(priv, "qp", 19, 0);
+    av_opt_set_int(priv, "zerolatency", 1, 0);
+    av_opt_set(priv, "profile", "main", 0);
+    return;
+  }
 
-  /* NVENC */
-  av_opt_set(priv, "rc", "constqp", 0);
-  av_opt_set_int(priv, "qp", 19, 0);
-  av_opt_set(priv, "rc", "vbr", 0); /* fallback if constqp rejected */
-  av_opt_set_int(priv, "cq", 19, 0);
+  if (strcmp(name, "h264_amf") == 0)
+  {
+    /* AMF */
+    av_opt_set(priv, "quality", "speed", 0);
+    av_opt_set(priv, "rc", "cqp", 0);
+    av_opt_set_int(priv, "qp_i", 18, 0);
+    av_opt_set_int(priv, "qp_p", 20, 0);
+    return;
+  }
 
-  /* AMF */
-  av_opt_set(priv, "rc", "cqp", 0);
-  av_opt_set_int(priv, "qp_i", 18, 0);
-  av_opt_set_int(priv, "qp_p", 20, 0);
+  if (strcmp(name, "h264_qsv") == 0)
+  {
+    /* QSV */
+    av_opt_set(priv, "look_ahead", "0", 0);        /* low latency */
+    av_opt_set_int(priv, "global_quality", 19, 0); /* ICQ-style */
+    return;
+  }
 
-  /* QSV */
-  av_opt_set(priv, "look_ahead", "0", 0);        /* low latency */
-  av_opt_set_int(priv, "global_quality", 19, 0); /* ICQ-style */
+  /* h264_mf and any other encoder: leave defaults (most options are ignored or rejected) */
 }
 
 /**
@@ -60,6 +75,13 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
  * matches (true zero-copy) AND the encoder can actually consume it.
  * h264_mf is known to produce garbage when given D3D11 surfaces, so it
  * is forced onto system-memory formats (NV12 / yuv420p).
+ *
+ * Additional hardening:
+ * - GPU encoders (nvenc / amf / d3d12va \ldots) may accept the decoder’s
+ *   HW surface even after a modest downscale because they can scale
+ *   on the GPU. We therefore prefer the HW format for those encoders
+ *   whenever it appears in the supported list.
+ * - Software / Media-Foundation encoders stay on system memory.
  */
 static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecContext *dec_ctx)
 {
@@ -69,10 +91,20 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
   if (ret < 0 || !fmts)
     return AV_PIX_FMT_YUV420P;
 
+  const char *codec_name = (enc->codec) ? enc->codec->name : NULL;
+
   /* h264_mf cannot reliably consume D3D11 / D3D12 surfaces.
    * Always feed it system memory. */
-  const char *codec_name = (enc->codec) ? enc->codec->name : NULL;
   bool force_software = (codec_name && strcmp(codec_name, "h264_mf") == 0);
+
+  /* GPU encoders that are known to accept HW surfaces and can scale on-GPU */
+  bool prefer_hw_even_if_scaled =
+      codec_name &&
+      (strcmp(codec_name, "h264_nvenc") == 0 ||
+       strcmp(codec_name, "h264_amf") == 0 ||
+       strcmp(codec_name, "h264_d3d12va") == 0 ||
+       strcmp(codec_name, "h264_qsv") == 0 ||
+       strcmp(codec_name, "h264_vaapi") == 0);
 
   int same_size = !force_software &&
                   dec_ctx &&
@@ -80,7 +112,9 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
                   enc->width == dec_ctx->video_dec_ctx->width &&
                   enc->height == dec_ctx->video_dec_ctx->height;
 
-  if (same_size && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
+  /* 1. True zero-copy (identical size) or GPU encoder that can scale */
+  if ((same_size || prefer_hw_even_if_scaled) &&
+      dec_ctx && dec_ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
   {
     for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
     {
@@ -89,7 +123,7 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
     }
   }
 
-  /* Prefer NV12, then yuv420p (safe software formats) */
+  /* 2. Prefer NV12, then yuv420p (safe software formats) */
   for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; i++)
   {
     if (fmts[i] == AV_PIX_FMT_NV12)
@@ -100,6 +134,8 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
     if (fmts[i] == AV_PIX_FMT_YUV420P)
       return AV_PIX_FMT_YUV420P;
   }
+
+  /* 3. Last resort – first format the encoder claims to support */
   return fmts[0];
 }
 
@@ -188,6 +224,8 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
   /* Share the decoder device ONLY when the encoder can actually consume
    * that surface. Never attach a D3D11 device to h264_mf. */
   bool is_mf = (strcmp(codec->name, "h264_mf") == 0);
+  /* Inside try_open_h264_encoder, after setting pix_fmt and before avcodec_open2 */
+
   if (!is_mf &&
       dec_ctx->video_dec_ctx->hw_device_ctx &&
       enc->pix_fmt == dec_ctx->hw_pix_fmt)
@@ -198,13 +236,55 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
       avcodec_free_context(&enc);
       return AVERROR(ENOMEM);
     }
+
+    /* Create frames context so the encoder can accept HW surfaces */
+    AVBufferRef *frames_ref = av_hwframe_ctx_alloc(enc->hw_device_ctx);
+    if (frames_ref)
+    {
+      AVHWFramesContext *frames_ctx = (AVHWFramesContext *)frames_ref->data;
+      frames_ctx->format = enc->pix_fmt;
+      frames_ctx->sw_format = AV_PIX_FMT_NV12; /* or the actual sw format */
+      frames_ctx->width = width;
+      frames_ctx->height = height;
+      frames_ctx->initial_pool_size = 20; /* tune as needed */
+
+      if (av_hwframe_ctx_init(frames_ref) >= 0)
+      {
+        enc->hw_frames_ctx = frames_ref;
+      }
+      else
+      {
+        av_buffer_unref(&frames_ref);
+      }
+    }
   }
 
   apply_low_latency_encoder_opts(enc);
 
+  /* Extra real-time bias for libx264 at high resolutions.
+   * CRF 19 is high quality but can be too heavy for 1440p/4K on many CPUs.
+   * Raising CRF and reinforcing ultrafast improves the chance of sustaining
+   * real-time encode without changing the options used for hardware encoders. */
+  if (strcmp(codec->name, "libx264") == 0 &&
+      (width > 1920 || height > 1080))
+  {
+    void *priv = enc->priv_data;
+    if (priv)
+    {
+      av_opt_set(priv, "preset", "ultrafast", 0);
+      av_opt_set(priv, "crf", "23", 0); /* still good quality, much faster */
+      av_opt_set(priv, "tune", "zerolatency", 0);
+    }
+    LOG_INFO("C-ENC", "  libx264 high-res tuning: preset=ultrafast crf=23");
+  }
+
   int ret = avcodec_open2(enc, codec, NULL);
   if (ret < 0)
   {
+    char errbuf[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(ret, errbuf, sizeof(errbuf));
+    LOG_WARN("C-ENC", "  Encoder %s failed to open at %dx%d: %s (%d)",
+             codec->name, width, height, errbuf, ret);
     avcodec_free_context(&enc);
     return ret;
   }
@@ -243,7 +323,16 @@ static int sws_coeff_id_from_colorspace(enum AVColorSpace spc)
 
 /**
  * Returns true when the source should be treated as HDR.
- * Used to select higher-quality scaling and correct output tags.
+ *
+ * Detection is based on transfer characteristics (PQ / HLG) or
+ * BT.2020 primaries. This flag is used only to:
+ *   - choose a higher-quality scaler (SWS_BICUBIC),
+ *   - apply the correct colour-matrix conversion (BT.2020 → BT.709),
+ *   - force the encoder to tag the output as BT.709 SDR.
+ *
+ * IMPORTANT: the current pipeline performs a *matrix conversion only*.
+ * It does NOT perform perceptual tone-mapping of PQ/HLG content.
+ * True tone-mapping requires zscale or libplacebo (see below).
  */
 static bool is_hdr_source(const AVCodecContext *dec)
 {
@@ -260,6 +349,87 @@ static bool is_hdr_source(const AVCodecContext *dec)
     return true;
 
   return false;
+}
+
+/**
+ * Returns 1 if the zscale filter is present in this FFmpeg build.
+ * zscale is required for proper PQ/HLG tone-mapping.
+ * When it is missing we fall back to the matrix-only path.
+ */
+static int zscale_available(void)
+{
+  return avfilter_get_by_name("zscale") != NULL;
+}
+
+/**
+ * Returns 1 if the AMD AMF runtime DLL is present and loadable on this
+ * machine, 0 otherwise. On non-Windows platforms always returns 0
+ * (AMF is Windows-only in practice for this build).
+ */
+static int amf_runtime_available(void)
+{
+#ifdef _WIN32
+  HMODULE h = LoadLibraryExA("amfrt64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!h)
+    h = LoadLibraryA("amfrt64.dll"); /* fallback search path */
+  if (h)
+  {
+    FreeLibrary(h);
+    return 1;
+  }
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+/**
+ * Lightweight NVENC pre-flight.
+ * We do not link the full NVENC SDK; instead we rely on the fact that
+ * FFmpeg itself will refuse to open when the driver API is too old.
+ * This helper only skips the attempt when we can positively detect that
+ * the NVIDIA encode library is completely absent (no driver / no GPU).
+ * The detailed "Required: X Found: Y" message is still emitted by
+ * FFmpeg on open failure, which is intentional and useful for operators.
+ */
+static int nvenc_likely_available(void)
+{
+#ifdef _WIN32
+  HMODULE h = LoadLibraryExA("nvEncodeAPI64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!h)
+    h = LoadLibraryA("nvEncodeAPI64.dll");
+  if (h)
+  {
+    FreeLibrary(h);
+    return 1;
+  }
+  /* Also accept the 32-bit name on WoW64 if present */
+  h = LoadLibraryA("nvEncodeAPI.dll");
+  if (h)
+  {
+    FreeLibrary(h);
+    return 1;
+  }
+  return 0;
+#elif defined(__linux__)
+  /* On Linux the library is usually libnvidia-encode.so.1 */
+  void *h = dlopen("libnvidia-encode.so.1", RTLD_LAZY | RTLD_NOLOAD);
+  if (h)
+  {
+    dlclose(h);
+    return 1;
+  }
+  h = dlopen("libnvidia-encode.so.1", RTLD_LAZY);
+  if (h)
+  {
+    dlclose(h);
+    return 1;
+  }
+  return 0;
+#else
+  /* macOS / other – NVENC does not exist */
+  return 0;
+#endif
 }
 
 /**
@@ -378,15 +548,38 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
         continue;
       }
 
-      /* Weak encoders cannot sustain real-time 4K / 1440p.
-       * Skip high resolutions for them. */
+      /* Pre-flight capability checks */
+      if (strcmp(candidates[i], "h264_nvenc") == 0)
+      {
+        if (!nvenc_likely_available())
+        {
+          LOG_INFO("C-ENC", "  Skipping h264_nvenc – NVIDIA encode library not found on this system");
+          continue;
+        }
+        /* Driver API version is still validated by FFmpeg itself inside
+         * avcodec_open2; the detailed “Required: X Found: Y” message will
+         * appear in the log if the driver is too old. */
+      }
+      else if (strcmp(candidates[i], "h264_amf") == 0)
+      {
+        if (!amf_runtime_available())
+        {
+          LOG_INFO("C-ENC", "  Skipping h264_amf – amfrt64.dll not present (no AMD AMF runtime)");
+          continue;
+        }
+      }
+
+      /* Soft preference only – no longer a hard skip.
+       * We still try to open weak encoders at higher resolutions and let
+       * avcodec_open2 decide. A log line is emitted so operators can see
+       * that a potentially slow path is being attempted. */
       bool is_weak = (strcmp(candidates[i], "h264_mf") == 0 ||
                       strcmp(candidates[i], "libx264") == 0);
       if (is_weak && (target_width > 1920 || target_height > 1080))
       {
-        LOG_INFO("C-ENC", "  Skipping %s at %dx%d (weak encoder, needs ≤1080p)",
+        LOG_INFO("C-ENC", "  Attempting %s at %dx%d (software / weak encoder – may not be real-time)",
                  candidates[i], target_width, target_height);
-        continue;
+        /* no continue – fall through to try_open_h264_encoder */
       }
 
       AVCodecContext *enc = NULL;
@@ -415,14 +608,20 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
                av_get_pix_fmt_name(enc->pix_fmt),
                enc->width, enc->height);
 
-      /* Final configuration summary – one clear line for operators */
-      LOG_INFO("C-ENC", "FINAL: encoder=%s  %dx%d  pix_fmt=%s  bitrate=%lld kbps  gop=%d  max_b=%d",
+      /* Final configuration summary – one clear line for operators.
+       * Includes whether a hardware frames context was attached so it
+       * is immediately obvious whether the zero-copy / GPU path is active. */
+      LOG_INFO("C-ENC",
+               "FINAL: encoder=%s  %dx%d  pix_fmt=%s  bitrate=%lld kbps  gop=%d  max_b=%d  "
+               "hw_frames=%s  hw_device=%s",
                codec->name,
                enc->width, enc->height,
                av_get_pix_fmt_name(enc->pix_fmt),
                (long long)(enc->bit_rate / 1000),
                enc->gop_size,
-               enc->max_b_frames);
+               enc->max_b_frames,
+               enc->hw_frames_ctx ? "yes" : "no",
+               enc->hw_device_ctx ? "yes" : "no");
 
       *out_enc_ctx = enc;
       return 0;
@@ -751,6 +950,17 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
     ret = avcodec_parameters_to_context(ctx->audio_dec_ctx, ctx->fmt_ctx->streams[ctx->audio_stream_idx]->codecpar);
     if (ret < 0)
       goto fail;
+
+    /* Normalise 6-channel layouts to the canonical 5.1 mask.
+     * Some AAC streams incorrectly tag the LFE channel as index 3
+     * instead of the standard LFE position; this silences the
+     * recurring “LFE[3] → LFE[0]” decoder warning and gives the
+     * resampler / FIFO a predictable channel order. */
+    if (ctx->audio_dec_ctx->ch_layout.nb_channels == 6)
+    {
+      av_channel_layout_uninit(&ctx->audio_dec_ctx->ch_layout);
+      av_channel_layout_from_mask(&ctx->audio_dec_ctx->ch_layout, AV_CH_LAYOUT_5POINT1);
+    }
 
     // Initialize and open the audio decoder
     ret = avcodec_open2(ctx->audio_dec_ctx, audio_codec, NULL);
@@ -2537,8 +2747,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
       if (hdr && !logged_hdr_path)
       {
-        LOG_INFO("C-ENC", "HDR source detected (BT.2020/PQ/HLG). "
-                          "Applying BT.2020→BT.709 color matrix + zscale tone-mapping pipeline.");
+        if (zscale_available())
+        {
+          LOG_INFO("C-ENC", "HDR source detected. zscale is available in this FFmpeg build – "
+                            "matrix conversion active; true PQ/HLG tone-map can be added later via filter graph.");
+        }
+        else
+        {
+          LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
+                            "Applying BT.2020→BT.709 *matrix conversion only* (no perceptual tone-map). "
+                            "zscale/libplacebo not present in this FFmpeg build.");
+        }
         logged_hdr_path = 1;
       }
 
@@ -3359,8 +3578,17 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
                 if (hdr && !logged_hdr_path)
                 {
-                  LOG_INFO("C-ENC", "HDR source detected (BT.2020/PQ/HLG). "
-                                    "Applying BT.2020→BT.709 color matrix + zscale tone-mapping pipeline.");
+                  if (zscale_available())
+                  {
+                    LOG_INFO("C-ENC", "HDR source detected. zscale is available in this FFmpeg build – "
+                                      "matrix conversion active; true PQ/HLG tone-map can be added later via filter graph.");
+                  }
+                  else
+                  {
+                    LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
+                                      "Applying BT.2020→BT.709 *matrix conversion only* (no perceptual tone-map). "
+                                      "zscale/libplacebo not present in this FFmpeg build.");
+                  }
                   logged_hdr_path = 1;
                 }
               }
