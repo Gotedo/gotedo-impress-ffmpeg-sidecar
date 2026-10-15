@@ -231,8 +231,8 @@ tasks:
       # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
       LDFLAGS_EXTRA: >-
         -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
-        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma -lc++
-        -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
+        -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon -lz -lc++
+        -framework Foundation -framework AppKit -framework CoreFoundation -framework CoreImage -framework OpenGL -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv
     cmds:
       - task: build_base
         vars:
