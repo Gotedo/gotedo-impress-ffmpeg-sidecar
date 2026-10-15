@@ -41,12 +41,12 @@ tasks:
   create-ffmpeg-builder:
     desc: Set up a dedicated buildx container builder instance
     internal: true
-    # The builder image is independent of the mounted source tree. Reusing an
-    # existing image avoids exporting the full LLVM/Go toolchain on every
-    # cross-build. Use `task --force build` after changing Dockerfile/toolchain
-    # instructions when an image refresh is intentional.
-    status:
-      - docker image inspect ffmpeg-builder > /dev/null 2>&1
+    deps:
+      # The builder image uses APT_PROXY during its Dockerfile build. Ensure
+      # the proxy is ready before BuildKit starts resolving Debian packages.
+      - task: apt-cache
+    # Always invoke BuildKit so Dockerfile/toolchain changes are detected.
+    # BuildKit's inline/local caches still reuse the expensive toolchain layers.
     cmds:
       - cmd: powershell -NoProfile -Command "if (-not (docker buildx ls | Select-String 'ffmpeg-builder')) { docker buildx create --use --driver docker-container --name ffmpeg-builder --bootstrap } else { docker buildx use ffmpeg-builder }"
         platforms: [windows]
@@ -76,7 +76,6 @@ tasks:
       Compiles FFmpeg and its libraries across Linux, macOS, and Windows.
       Outputs built components directly to the local 'dist/' directory.
     deps:
-      - task: apt-cache
       - task: create-ffmpeg-builder
     cmds:
       # Cross-compile across target OS and Architecture arrays
