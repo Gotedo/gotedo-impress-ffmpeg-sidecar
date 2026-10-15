@@ -340,6 +340,7 @@ MINIAUDIO_VERSION="0.11.25"
 NV_CODEC_HEADERS_VERSION="13.1.15.0"
 AMF_VERSION="1.5.2"
 ZIMG_VERSION="3.0.6"
+VPL_VERSION="2023.4.0"
 
 AUTO_CONF_FLAGS="--enable-static --disable-shared"
 CMAKE_CONF_FLAGS="-DBUILD_SHARED_LIBS=OFF -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_INSTALL_LIBDIR=lib"
@@ -352,6 +353,7 @@ FFMPEG_OS_FLAGS="--enable-libzimg"
 EXTRA_FFMPEG_FLAGS=""
 FFMPEG_ENCODERS="libx264,libx265,libvpx-vp9,libaom-av1,png,mjpeg,libwebp,tiff"
 FFMPEG_FILTERS="scale,format,fps,thumbnail,colorspace,ass,hwupload,hwdownload"
+FFMPEG_DECODERS="h264,hevc,vp9,av1,aac,opus,mp3,png,jpeg,webp,tiff,ass,ssa"
 
 OS=${1:-linux}
 ARCH=${2:-amd64}
@@ -412,6 +414,12 @@ case "${OS}-${ARCH}" in
         FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-d3d11va --enable-d3d12va --enable-dxva2"
 
         if [ "$ARCH" = "amd64" ]; then
+            # Intel Quick Sync Video via the oneVPL dispatcher. The dispatcher
+            # loads the Intel GPU implementation supplied by the Windows driver
+            # at runtime, so no Intel GPU SDK is bundled into the sidecar.
+            FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_qsv,hevc_qsv"
+            FFMPEG_DECODERS="${FFMPEG_DECODERS},h264_qsv,hevc_qsv"
+            FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-libvpl"
             # NVIDIA + AMD (headers only; uses driver at runtime on the target PC)
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
             FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
@@ -451,6 +459,10 @@ growing_stack = false
         FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-vaapi"
 
         if [ "$ARCH" = "amd64" ]; then
+            # Intel Quick Sync Video via the oneVPL dispatcher.
+            FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_qsv,hevc_qsv"
+            FFMPEG_DECODERS="${FFMPEG_DECODERS},h264_qsv,hevc_qsv"
+            FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-libvpl"
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
             FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
@@ -820,7 +832,7 @@ EOF
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
 ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
-BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}|${ZIMG_VERSION}"
+BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${FFMPEG_DECODERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}|${ZIMG_VERSION}|${VPL_VERSION}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
 if [ -f "/output/build.checksum" ]; then
@@ -1340,6 +1352,21 @@ build_dep "zimg" \
   "release-${ZIMG_VERSION}" "autotools" "--disable-shared --enable-static" ".tar.gz" "tar -xzf"
 
 if [[ "$OS" != "darwin" ]]; then
+  # Intel HD 530 and newer Intel targets use QSV through the oneVPL
+  # dispatcher. The implementation remains a target-machine runtime.
+  if [[ "$ARCH" == "amd64" ]]; then
+    build_dep "libvpl" \
+      "https://github.com/intel/libvpl/archive/refs/tags/v${VPL_VERSION}.tar.gz" \
+      "${VPL_VERSION}" \
+      "cmake" \
+      "-DBUILD_DISPATCHER=ON -DINSTALL_EXAMPLES=OFF -DBUILD_TESTS=OFF -DENABLE_LIBDIR_IN_RUNTIME_SEARCH=ON" \
+      ".tar.gz" "tar -xzf"
+    if [ ! -f "${sysroot}/lib/libvpl.a" ]; then
+      echo "ERROR: static oneVPL dispatcher was not installed at ${sysroot}/lib/libvpl.a"
+      exit 1
+    fi
+  fi
+
   # Only available on Windows AMD64 or Linux
   if [[ "$OS" != "windows" || "$ARCH" == "amd64" ]]; then
     build_dep "nv-codec-headers" \
@@ -1643,7 +1670,7 @@ fi
     --enable-muxer=mp4,mov,webm,image2 \
     --enable-encoder="${FFMPEG_ENCODERS}" \
     --enable-filter=${FFMPEG_FILTERS} \
-    --enable-decoder=h264,hevc,vp9,av1,aac,opus,mp3,png,jpeg,webp,tiff,ass,ssa \
+    --enable-decoder="${FFMPEG_DECODERS}" \
     --enable-parser=h264,hevc,vp9,av1,aac,opus \
     --disable-doc \
     --disable-htmlpages \
@@ -1656,6 +1683,21 @@ fi
     --extra-cflags="-I${sysroot}/include -fPIC ${FFMPEG_CFLAGS}" \
     --extra-ldflags="-L${sysroot}/lib ${FFMPEG_LDFLAGS}" \
     ${FFMPEG_OS_FLAGS}
+
+if [[ "$ARCH" == "amd64" && "$OS" != "darwin" ]]; then
+    echo ">>> Verifying QSV/oneVPL components in FFmpeg configuration..."
+    for qsv_component in \
+        CONFIG_LIBVPL \
+        CONFIG_H264_QSV_DECODER \
+        CONFIG_HEVC_QSV_DECODER \
+        CONFIG_H264_QSV_ENCODER \
+        CONFIG_HEVC_QSV_ENCODER; do
+        if ! grep -q "^#define ${qsv_component} 1$" config.h; then
+            echo "ERROR: FFmpeg configuration is missing ${qsv_component}"
+            exit 1
+        fi
+    done
+fi
 
 # Temporarily rename the VERSION file if compiling on Windows
 HAS_VERSION_RENAME=false
@@ -1896,6 +1938,7 @@ case "${OS}-${ARCH}" in
         export CC="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang"
         export CXX="$LLVM_MINGW_PATH/bin/x86_64-w64-mingw32-clang++"
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lvpl \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
         -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lc++ \
@@ -1923,6 +1966,7 @@ case "${OS}-${ARCH}" in
         export CGO_CFLAGS="$TARGET_FLAG -fPIC"
         export CGO_LDFLAGS="$TARGET_FLAG -fuse-ld=lld"
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
+        -lvpl \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
         -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lasound -lm -lpthread -ldl -lc++"

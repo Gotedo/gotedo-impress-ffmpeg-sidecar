@@ -254,6 +254,7 @@ tasks:
       LDFLAGS_EXTRA: >-
         -L{{.TASKFILE_DIR}}/build_cache/native_windows/{{.GOARCH}}/lib
         -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
+        {{if eq .GOARCH "amd64"}}-lvpl{{end}}
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame
         -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv
         -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon
@@ -285,6 +286,7 @@ tasks:
       # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
       LDFLAGS_EXTRA: >-
         -lavformat -lavfilter -lzimg -lavcodec -lavutil -lswresample -lswscale
+        {{if eq .GOARCH "amd64"}}-lvpl{{end}}
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lass -lharfbuzz -lfreetype -lpng -liconv -lbz2 -llzma
         -lasound -lm -lpthread -ldl
     cmds:

@@ -656,11 +656,11 @@ func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string,
 	case "windows":
 		switch failureCode {
 		case "gpu_encode_unavailable":
-			recommendation = "Update the graphics driver and reboot. NVIDIA systems using this FFmpeg build require NVENC API 13.1 (driver 610 or newer); AMD systems require a current Adrenalin/AMF runtime; Intel systems require a current graphics driver."
+			recommendation = "If this is an NVIDIA system, install a driver that exposes NVENC API 13.1 (driver 610 or newer) and reboot; AMD systems require a current Adrenalin/AMF runtime, and Intel systems require a current graphics driver. A legacy GPU may not support that driver/API, in which case native GPU encoding cannot be enabled on this system."
 		case "gpu_decode_capability":
-			recommendation = "Update the graphics driver and verify that the GPU supports hardware decoding for this codec/profile, especially HEVC Main 10."
+			recommendation = "Install the newest driver supported by the GPU and verify hardware decoding for this codec/profile, especially HEVC Main 10. A driver update cannot add missing decoder hardware; if this GPU lacks HEVC Main 10 support, use a newer GPU or CPU processing."
 		case "zero_copy_unavailable":
-			recommendation = "Update the graphics driver and use the matching native GPU decoder/encoder pair for this GPU vendor."
+			recommendation = "Install the newest supported driver and use a matching native decoder/encoder pair from the same GPU vendor. If the GPU or driver cannot provide that pairing, native zero-copy playback is unavailable on this system."
 		default:
 			recommendation = "Update the graphics driver, restart the application, and retry the native GPU preflight."
 		}

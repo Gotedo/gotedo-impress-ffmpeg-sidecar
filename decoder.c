@@ -497,6 +497,15 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     candidates[candidate_count++] = "h264_mf";
     candidates[candidate_count++] = "libx264";
   }
+  else if (dec_ctx->hw_device_type == AV_HWDEVICE_TYPE_QSV)
+  {
+    /* QSV surfaces should first be handed to the matching QSV encoder.
+     * Media Foundation remains a compatible hardware fallback when the
+     * installed Intel runtime exposes decode but not QSV encode. */
+    candidates[candidate_count++] = "h264_qsv";
+    candidates[candidate_count++] = "h264_mf";
+    candidates[candidate_count++] = "libx264";
+  }
   else
   {
     /* Portable fallback order for macOS/Linux and software decode. */
@@ -726,6 +735,11 @@ static int probe_one_hardware_video_frame(DemuxDecContext *ctx)
           if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
             hardware_frame = 1;
           av_frame_unref(frame);
+          /* Once the decoder emits its first frame, the selected format is
+           * settled for this codec context. A software frame means this
+           * hardware trial already failed; continuing through 128 packets
+           * only adds avoidable startup latency. */
+          packets_checked = 128;
           break;
         }
       }
@@ -940,6 +954,23 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *avctx, const enum AVPixe
   return *pix_fmts;
 }
 
+/* A hardware decoder can open successfully and still reject the first real
+ * frame because the GPU lacks the stream's codec/profile capability. Reset
+ * the demuxer after each trial so the next hardware backend sees the input
+ * from the beginning. File-backed media is seekable; a failed rewind makes
+ * the current trial unsafe to keep.
+ */
+static int rewind_video_probe(DemuxDecContext *ctx)
+{
+  if (!ctx || !ctx->fmt_ctx || !ctx->video_dec_ctx)
+    return AVERROR(EINVAL);
+
+  int ret = avformat_seek_file(ctx->fmt_ctx, -1, 0, 0, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+  if (ret >= 0)
+    avcodec_flush_buffers(ctx->video_dec_ctx);
+  return ret;
+}
+
 /**
  * Opens a media file, reads its metadata, and initializes the decoders
  * for both the primary video and audio streams.
@@ -1014,19 +1045,6 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   // 3. Find and configure the best Video Stream in the container
   if (ctx->video_stream_idx >= 0 && video_codec)
   {
-    // Allocate raw codec context block
-    ctx->video_dec_ctx = avcodec_alloc_context3(video_codec);
-    if (!ctx->video_dec_ctx)
-    {
-      ret = AVERROR(ENOMEM);
-      goto fail;
-    }
-
-    // Copy stream configurations (width, height, profiles) to the decoder context
-    ret = avcodec_parameters_to_context(ctx->video_dec_ctx, ctx->fmt_ctx->streams[ctx->video_stream_idx]->codecpar);
-    if (ret < 0)
-      goto fail;
-
     // --- DIAGNOSTIC 1: Enumerate compiled HW types in libavutil ---
     LOG_INFO("C-DEC", "--- Available HW Device Types in FFmpeg Build ---");
     enum AVHWDeviceType iter_type = AV_HWDEVICE_TYPE_NONE;
@@ -1075,7 +1093,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
        * prefer D3D12 so Intel/modern integrated GPUs can use the native path.
        * Every choice is still validated by codec capabilities and device
        * creation, so unsupported machines fall through safely. */
-      enum AVHWDeviceType preferred[10] = {0};
+      enum AVHWDeviceType preferred[32] = {0};
       int preferred_count = 0;
 #ifdef _WIN32
       const int has_nvenc_runtime = nvenc_likely_available();
@@ -1088,6 +1106,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
           avcodec_find_encoder_by_name("h264_d3d12va"))
         append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D12VA);
       append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D11VA);
+      append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_QSV);
       append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_D3D12VA);
       append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_CUDA);
       append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_DXVA2);
@@ -1102,65 +1121,174 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
       append_unique_hw_type(preferred, &preferred_count, AV_HWDEVICE_TYPE_VULKAN);
 #endif
 
-      for (int p = 0; p < preferred_count; p++)
+      /* Do not let the platform preference list hide a backend newly added
+       * by FFmpeg or by a future build configuration. Append every hardware
+       * device type advertised by this codec, on every operating system. */
+      for (int i = 0;; i++)
       {
-        const AVCodecHWConfig *match = NULL;
+        const AVCodecHWConfig *config = avcodec_get_hw_config(video_codec, i);
+        if (!config)
+          break;
+        if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+          append_unique_hw_type(preferred, &preferred_count, config->device_type);
+      }
+
+      /* Try every compiled/available hardware configuration. Creating a
+       * device context is not enough: CUDA, D3D11VA, DXVA2, and D3D12VA can
+       * all open successfully while rejecting the first frame for a codec or
+       * profile that the physical adapter does not support. Each trial gets
+       * a fresh decoder, is required to produce a hardware frame, and is
+       * rewound before the next trial. */
+      bool hardware_decoder_selected = false;
+      for (int p = 0; p < preferred_count && !hardware_decoder_selected; p++)
+      {
         for (int i = 0;; i++)
         {
-          const AVCodecHWConfig *config = avcodec_get_hw_config(video_codec, i);
-          if (!config)
+          const AVCodecHWConfig *match = avcodec_get_hw_config(video_codec, i);
+          if (!match)
             break;
-          if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
-              config->device_type == preferred[p])
+          if (!(match->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) ||
+              match->device_type != preferred[p])
+            continue;
+
+          /* Windows systems can expose multiple adapters. Try explicit
+           * adapter indices as well as the default device; the default
+           * adapter may be a display GPU without the required video decoder
+           * while another adapter can decode the same stream. */
+#ifdef _WIN32
+          const char *device_names[] = {"0", "1", "2", NULL};
+          const int device_count = (int)(sizeof(device_names) / sizeof(device_names[0]));
+#else
+          const char *device_names[] = {NULL};
+          const int device_count = 1;
+#endif
+
+          for (int device_index = 0;
+               device_index < device_count && !hardware_decoder_selected;
+               device_index++)
           {
-            match = config;
+            AVBufferRef *hw_device_ctx = NULL;
+            int hw_ret = av_hwdevice_ctx_create(
+                &hw_device_ctx, match->device_type, device_names[device_index], NULL, 0);
+            if (hw_ret < 0)
+            {
+              LOG_WARN("C-DEC", "Failed to create %s hardware device context (device=%s). Trying next.",
+                       av_hwdevice_get_type_name(match->device_type),
+                       device_names[device_index] ? device_names[device_index] : "default");
+              continue;
+            }
+
+            AVCodecContext *trial_decoder = avcodec_alloc_context3(video_codec);
+            if (!trial_decoder)
+            {
+              av_buffer_unref(&hw_device_ctx);
+              ret = AVERROR(ENOMEM);
+              goto fail;
+            }
+
+            ret = avcodec_parameters_to_context(
+                trial_decoder,
+                ctx->fmt_ctx->streams[ctx->video_stream_idx]->codecpar);
+            if (ret < 0)
+            {
+              avcodec_free_context(&trial_decoder);
+              av_buffer_unref(&hw_device_ctx);
+              goto fail;
+            }
+
+            /* Transfer ownership of the ref to the trial decoder. */
+            trial_decoder->hw_device_ctx = hw_device_ctx;
+            trial_decoder->opaque = ctx;
+            trial_decoder->get_format = get_hw_format;
+
+            /* Hardware decoders require single-threaded context configuration.
+             * Frame multithreading can silently disable hwaccel. */
+            trial_decoder->thread_count = 1;
+            trial_decoder->thread_type = 0;
+            ctx->hw_pix_fmt = match->pix_fmt;
+            ctx->hw_device_type = match->device_type;
+            ctx->video_dec_ctx = trial_decoder;
+
+            LOG_INFO("C-DEC", "Trying hardware acceleration type: %d (%s), device=%s, pixel format %s",
+                     match->device_type, av_hwdevice_get_type_name(match->device_type),
+                     device_names[device_index] ? device_names[device_index] : "default",
+                     av_get_pix_fmt_name(match->pix_fmt));
+
+            ret = avcodec_open2(trial_decoder, video_codec, NULL);
+            if (ret < 0)
+            {
+              LOG_WARN("C-DEC", "Hardware decoder %s device=%s failed to open; trying next backend.",
+                       av_hwdevice_get_type_name(match->device_type),
+                       device_names[device_index] ? device_names[device_index] : "default");
+              avcodec_free_context(&ctx->video_dec_ctx);
+              ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
+              ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+              continue;
+            }
+
+            if (!probe_one_hardware_video_frame(ctx))
+            {
+              LOG_WARN("C-DEC", "Hardware decoder %s device=%s opened but produced no hardware frame; trying next backend.",
+                       av_hwdevice_get_type_name(match->device_type),
+                       device_names[device_index] ? device_names[device_index] : "default");
+              if (rewind_video_probe(ctx) < 0)
+                LOG_WARN("C-DEC", "Could not rewind input after failed %s trial.",
+                         av_hwdevice_get_type_name(match->device_type));
+              avcodec_free_context(&ctx->video_dec_ctx);
+              ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
+              ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+              continue;
+            }
+
+            if (rewind_video_probe(ctx) < 0)
+            {
+              LOG_WARN("C-DEC", "Could not rewind input after successful %s trial; trying next backend.",
+                       av_hwdevice_get_type_name(match->device_type));
+              avcodec_free_context(&ctx->video_dec_ctx);
+              ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
+              ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+              continue;
+            }
+
+            LOG_INFO("C-DEC", "Selected verified hardware acceleration type: %d (%s), device=%s",
+                     match->device_type, av_hwdevice_get_type_name(match->device_type),
+                     device_names[device_index] ? device_names[device_index] : "default");
+            hardware_decoder_selected = true;
             break;
           }
+
+          if (hardware_decoder_selected)
+            break;
         }
-        if (!match)
-          continue;
-
-        AVBufferRef *hw_device_ctx = NULL;
-        int hw_ret = av_hwdevice_ctx_create(&hw_device_ctx, match->device_type, NULL, NULL, 0);
-        if (hw_ret < 0)
-        {
-          LOG_WARN("C-DEC", "Failed to create hardware device context (%s). Trying next.",
-                   av_hwdevice_get_type_name(match->device_type));
-          continue;
-        }
-
-        /* Transfer ownership of the ref to the decoder context.
-         * avcodec_free_context releases it. Do not unref hw_device_ctx after this. */
-        ctx->video_dec_ctx->hw_device_ctx = hw_device_ctx;
-        ctx->video_dec_ctx->opaque = ctx;
-        ctx->hw_pix_fmt = match->pix_fmt;
-        ctx->hw_device_type = match->device_type;
-        ctx->video_dec_ctx->get_format = get_hw_format;
-
-        // CRITICAL FIX: Hardware decoders require single-threaded context configuration in FFmpeg.
-        // Frame multithreading (FF_THREAD_FRAME) forces avcodec_open2 to silently disable hwaccel.
-        ctx->video_dec_ctx->thread_count = 1;
-        ctx->video_dec_ctx->thread_type = 0;
-
-        LOG_INFO("C-DEC", "Successfully initialized hardware acceleration type: %d (%s)",
-                 match->device_type, av_hwdevice_get_type_name(match->device_type));
-        break;
       }
     }
 
-    if (!ctx->video_dec_ctx->hw_device_ctx)
+    if (!ctx->video_dec_ctx || !ctx->video_dec_ctx->hw_device_ctx)
     {
       LOG_INFO("C-DEC", "No usable hardware decoder device; using software decode");
+
+      ctx->video_dec_ctx = avcodec_alloc_context3(video_codec);
+      if (!ctx->video_dec_ctx)
+      {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+      }
+
+      ret = avcodec_parameters_to_context(
+          ctx->video_dec_ctx,
+          ctx->fmt_ctx->streams[ctx->video_stream_idx]->codecpar);
+      if (ret < 0)
+        goto fail;
 
       // Multi-threaded configuration for platforms without hardware acceleration
       ctx->video_dec_ctx->thread_count = 0;
       ctx->video_dec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-    }
-    // --- END OF HARDWARE ACCELERATION INITIALIZATION ---
 
-    ret = avcodec_open2(ctx->video_dec_ctx, video_codec, NULL);
-    if (ret < 0)
-      goto fail;
+      // --- END OF HARDWARE ACCELERATION INITIALIZATION ---
+      ret = avcodec_open2(ctx->video_dec_ctx, video_codec, NULL);
+      if (ret < 0)
+        goto fail;
+    }
   }
 
   // 4. Find and configure the best Audio Stream in the container
