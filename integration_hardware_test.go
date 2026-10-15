@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -162,6 +164,29 @@ func generateExodusHDRTestMedia(t *testing.T) (string, func()) {
 	}
 
 	return absPath, func() {}
+}
+
+func findFFprobe(t *testing.T) string {
+	t.Helper()
+
+	candidates := []string{
+		os.Getenv("FFPROBE_BIN"),
+		filepath.Join("..", "..", "libs", "ffmpeg", "windows", "amd64", "bin", "ffprobe.exe"),
+	}
+	if executable, err := exec.LookPath("ffprobe"); err == nil {
+		candidates = append(candidates, executable)
+	}
+
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	t.Skip("ffprobe is required for fMP4 audio integration verification")
+	return ""
 }
 
 // -------------------------------------------------------------------------
@@ -505,6 +530,83 @@ func TestIntegration_E2E_PlaybackSupportPolicyAndFirstChunk(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestIntegration_E2E_TranscodeCarriesAACPackets verifies the browser-facing
+// contract, not merely the source metadata: the emitted fMP4 must contain an
+// AAC stream and actual AAC access units after H.264 transcoding starts.
+func TestIntegration_E2E_TranscodeCarriesAACPackets(t *testing.T) {
+	ffprobe := findFFprobe(t)
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	stream, err := client.StartStream(ctx, &proto.StreamRequest{
+		TargetId:         "e2e-aac-fragments",
+		FilePath:         mediaPath,
+		StreamMode:       proto.StreamMode_transcode,
+		Container:        proto.PassthroughContainerFormat_CONTAINER_FMP4,
+		ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_ALLOW_CPU,
+	})
+	if err != nil {
+		t.Fatalf("Could not start transcode stream for AAC verification: %v", err)
+	}
+
+	// Preserve complete AVIO writes. The first init segment plus this amount of
+	// media includes a keyframe fragment and its interleaved AAC packets.
+	const minimumCaptureBytes = 512 * 1024
+	capture := make([]byte, 0, minimumCaptureBytes)
+	for len(capture) < minimumCaptureBytes {
+		fragment, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("Transcode stream ended before AAC capture was complete: %v", recvErr)
+		}
+		capture = append(capture, fragment.GetFmp4Chunk()...)
+	}
+	cancel()
+
+	capturePath := filepath.Join(t.TempDir(), "transcoded-aac.fmp4")
+	if err := os.WriteFile(capturePath, capture, 0o600); err != nil {
+		t.Fatalf("Could not write captured fMP4 stream: %v", err)
+	}
+
+	streamJSON, err := exec.Command(ffprobe, "-v", "error", "-show_streams", "-of", "json", capturePath).Output()
+	if err != nil {
+		t.Fatalf("ffprobe could not inspect captured fMP4 streams: %v", err)
+	}
+	var streams struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(streamJSON, &streams); err != nil {
+		t.Fatalf("Could not parse ffprobe stream report: %v", err)
+	}
+	for _, streamInfo := range streams.Streams {
+		if streamInfo.CodecType == "audio" && streamInfo.CodecName == "aac" {
+			packetJSON, packetErr := exec.Command(ffprobe, "-v", "error", "-select_streams", "a", "-show_packets", "-of", "json", capturePath).Output()
+			if packetErr != nil {
+				t.Fatalf("ffprobe could not inspect captured AAC packets: %v", packetErr)
+			}
+			var packets struct {
+				Packets []json.RawMessage `json:"packets"`
+			}
+			if err := json.Unmarshal(packetJSON, &packets); err != nil {
+				t.Fatalf("Could not parse ffprobe AAC packet report: %v", err)
+			}
+			if len(packets.Packets) == 0 {
+				t.Fatal("Captured fMP4 declares AAC but contains no AAC packets")
+			}
+			t.Logf("[AUDIO E2E] Verified AAC stream with %d captured packets", len(packets.Packets))
+			return
+		}
+	}
+	t.Fatal("Captured H.264 fMP4 stream does not declare an AAC audio track")
 }
 
 // -------------------------------------------------------------------------
