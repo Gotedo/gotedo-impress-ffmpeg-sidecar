@@ -33,7 +33,11 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
     av_opt_set(priv, "tune", "zerolatency", 0);
     av_opt_set(priv, "preset", "ultrafast", 0);
     av_opt_set(priv, "profile", "main", 0);
-    av_opt_set(priv, "crf", "19", 0);       /* high quality, still real-time capable */
+    /* Do not set CRF here: it overrides AVCodecContext.bit_rate and caused
+     * the CPU fallback to emit 18–32 Mbps streams despite its configured
+     * 8–17 Mbps target.  ABR plus the VBV values below gives projection-safe
+     * quality with a hard, bounded workload and network rate. */
+    av_opt_set_int(priv, "rc-lookahead", 0, 0);
     av_opt_set(priv, "forced-idr", "1", 0); // helpful after seeks
     return;
   }
@@ -198,8 +202,8 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
       target_bps = (int)(megapixels * fps * 0.14 * 1000000.0);
     }
     else if (width >= 1920)
-    {                                                          /* 1080p */
-      target_bps = (int)(megapixels * fps * 0.14 * 1000000.0); /* ~8-14 Mbps */
+    { /* 1080p projection fallback: 8 Mbps at 24/30 fps, 12 Mbps at 50/60 fps. */
+      target_bps = fps >= 50.0 ? 12000000 : 8000000;
     }
     else
     {
@@ -213,7 +217,11 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
       target_bps = 45000000;
 
     enc->bit_rate = target_bps;
-    LOG_INFO("C-ENC", "Dynamic bitrate fallback: %d kbps for %dx%d @ %.2f fps",
+    /* Constrain software and CPU-upload encoders.  In particular, libx264
+     * honours this ABR/VBV configuration only when CRF is not also set. */
+    enc->rc_max_rate = target_bps;
+    enc->rc_buffer_size = target_bps;
+    LOG_INFO("C-ENC", "Rate cap: %d kbps (VBV max/buffer) for %dx%d @ %.2f fps",
              target_bps / 1000, width, height, fps);
   }
 
@@ -262,10 +270,9 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
 
   apply_low_latency_encoder_opts(enc);
 
-  /* Extra real-time bias for libx264 at high resolutions.
-   * CRF 19 is high quality but can be too heavy for 1440p/4K on many CPUs.
-   * Raising CRF and reinforcing ultrafast improves the chance of sustaining
-   * real-time encode without changing the options used for hardware encoders. */
+  /* Keep the software fallback low-latency and bounded. libx264 never
+   * receives 4K/1440p in the fallback ladder, but retain this guard for
+   * callers that request a native software encode explicitly. */
   if (strcmp(codec->name, "libx264") == 0 &&
       (width > 1920 || height > 1080))
   {
@@ -273,10 +280,9 @@ static int try_open_h264_encoder(DemuxDecContext *dec_ctx, const AVCodec *codec,
     if (priv)
     {
       av_opt_set(priv, "preset", "ultrafast", 0);
-      av_opt_set(priv, "crf", "23", 0); /* still good quality, much faster */
       av_opt_set(priv, "tune", "zerolatency", 0);
     }
-    LOG_INFO("C-ENC", "  libx264 high-res tuning: preset=ultrafast crf=23");
+    LOG_INFO("C-ENC", "  libx264 high-res tuning: preset=ultrafast ABR/VBV");
   }
 
   int ret = avcodec_open2(enc, codec, NULL);
@@ -453,7 +459,7 @@ static void append_unique_hw_type(enum AVHWDeviceType *types, int *count,
  *
  * Quality-first resolution policy:
  *   1. Try native resolution
- *   2. Fall back to 1440p → 1080p → 720p only when no encoder
+ *   2. Fall back to 1440p → 1080p only when no encoder
  *      can open at the higher size.
  * Weak encoders (h264_mf, libx264) are never offered native/1440p –
  * they cannot sustain real-time 4K.
@@ -553,7 +559,7 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     const char *label;
   } ResCandidate;
 
-  ResCandidate resolutions[4];
+  ResCandidate resolutions[3];
   int res_count = 0;
 
   /* 1. Native */
@@ -586,16 +592,6 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     w &= ~1;
     h &= ~1;
     resolutions[res_count++] = (ResCandidate){w, h, "1080p"};
-  }
-
-  /* 4. 720p last resort */
-  if (src_width > 1280 || src_height > 720)
-  {
-    int w = 1280;
-    int h = (int)(1280.0f / aspect);
-    w &= ~1;
-    h &= ~1;
-    resolutions[res_count++] = (ResCandidate){w, h, "720p"};
   }
 
   int last_err = AVERROR_ENCODER_NOT_FOUND;
@@ -798,6 +794,7 @@ static bool is_hardware_encoder_name(const char *name)
 
   return strcmp(name, "h264_nvenc") == 0 ||
          strcmp(name, "h264_amf") == 0 ||
+         strcmp(name, "h264_mf") == 0 ||
          strcmp(name, "h264_d3d12va") == 0 ||
          strcmp(name, "h264_qsv") == 0 ||
          strcmp(name, "h264_vaapi") == 0 ||
@@ -1033,9 +1030,34 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
     goto cleanup;
   }
 
-  /* Low-latency encoders should emit the first packet immediately. Avoid
-   * flushing QSV/NVENC probe contexts because some legacy runtimes do not
-   * tolerate a flush before their first asynchronous surface completes. */
+  /* Media Foundation commonly buffers its first input frame.  Its previous
+   * one-frame probe therefore reported EAGAIN and discarded a usable GPU
+   * encoder. Drain only this disposable MF probe; do not flush QSV/NVENC,
+   * whose legacy runtimes can reject a flush before asynchronous startup. */
+  if (enc->codec && strcmp(enc->codec->name, "h264_mf") == 0 &&
+      avcodec_send_frame(enc, NULL) >= 0)
+  {
+    for (;;)
+    {
+      int packet_ret = avcodec_receive_packet(enc, encoded);
+      if (packet_ret == 0)
+      {
+        if (encoded->size > 0)
+        {
+          result = 0;
+          goto cleanup;
+        }
+        av_packet_unref(encoded);
+        continue;
+      }
+      if (packet_ret == AVERROR(EAGAIN) || packet_ret == AVERROR_EOF)
+        break;
+      result = packet_ret;
+      goto cleanup;
+    }
+  }
+
+  /* Low-latency encoders should emit the first packet immediately. */
   result = AVERROR(EAGAIN);
 
 cleanup:
@@ -3354,9 +3376,6 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
                                      out_fmt_ctx->streams[out_audio_idx]->time_base);
                 enc_audio_pkt->stream_index = out_audio_idx;
 
-                LOG_DEBUG("C-MUX", "[HYBRID MUX] Writing AUDIO packet pts=%lld size=%d",
-                          (long long)enc_audio_pkt->pts, enc_audio_pkt->size);
-
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_audio_pkt) < 0)
                 {
                   LOG_ERROR("C-MUX", "[HYBRID MUX] Failed to write interleaved audio packet. Halting.");
@@ -3524,9 +3543,6 @@ int run_passthrough_mux_loop(DemuxDecContext *dec_ctx, uintptr_t go_token, Passt
         }
 
         *last_dts_ptr = pkt->dts;
-
-        LOG_DEBUG("C-MUX", "[PASSTHROUGH] Writing packet stream=%d pts=%lld dts=%lld size=%d",
-                  target_out_idx, (long long)pkt->pts, (long long)pkt->dts, pkt->size);
 
         if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
         {
@@ -4269,11 +4285,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
       continue;          // Bypass the rest of the loop and wait for a control signal
     }
 
-    if (ret >= 0)
-    {
-      LOG_DEBUG("C-READ", "stream=%d pts=%lld", pkt->stream_index, (long long)pkt->pts);
-    }
-
     if (wait_for_video_keyframe && dec_ctx->video_stream_idx >= 0)
     {
       if (pkt->stream_index == dec_ctx->video_stream_idx)
@@ -4391,10 +4402,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
           av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
           pkt->stream_index = out_video_idx;
 
-          // Catch fatal container formatting errors instead of feeding garbage to the browser
-          LOG_DEBUG("C-MUX", "Writing VIDEO packet pts=%lld size=%d",
-                    (long long)pkt->pts, pkt->size);
-
+          // Catch fatal container formatting errors instead of feeding garbage to the browser.
           if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
           {
             LOG_ERROR("C-MUX", "Failed to write interleaved video packet (passthrough). Halting.");
@@ -4679,9 +4687,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                      out_fmt_ctx->streams[out_video_idx]->time_base);
                 enc_video_pkt->stream_index = out_video_idx;
 
-                LOG_DEBUG("C-MUX", "Writing VIDEO packet pts=%lld size=%d",
-                          (long long)enc_video_pkt->pts, enc_video_pkt->size);
-
                 if (av_interleaved_write_frame(out_fmt_ctx, enc_video_pkt) < 0)
                 {
                   LOG_ERROR("C-MUX", "Failed to write interleaved encoded video packet. Halting.");
@@ -4720,9 +4725,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
 
         av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
         pkt->stream_index = out_audio_idx;
-
-        LOG_DEBUG("C-MUX", "Writing AUDIO packet (passthrough) pts=%lld size=%d",
-                  (long long)pkt->pts, pkt->size);
 
         if (av_interleaved_write_frame(out_fmt_ctx, pkt) < 0)
         {
@@ -4823,9 +4825,6 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                   av_packet_rescale_ts(enc_pkt, aac_enc_ctx->time_base,
                                        out_fmt_ctx->streams[out_audio_idx]->time_base);
                   enc_pkt->stream_index = out_audio_idx;
-
-                  LOG_DEBUG("C-MUX", "Writing AUDIO packet pts=%lld size=%d",
-                            (long long)enc_pkt->pts, enc_pkt->size);
 
                   if (av_interleaved_write_frame(out_fmt_ctx, enc_pkt) < 0)
                   {
