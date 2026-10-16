@@ -10,6 +10,8 @@ vars:
   # C++/UCRT ABI assumptions from this compiler, so accepting an arbitrary
   # system MinGW makes native results diverge from production releases.
   LLVM_MINGW_VERSION: '20260616'
+  # Keep generated stream.pb.go output consistent across developer machines.
+  PROTOC_GEN_GO_VERSION: 'v1.36.12'
   # Evaluates to empty on Windows, skipping the proxy entirely
   APT_PROXY: '{{if eq OS "windows"}}{{else}}http://host.docker.internal:3142{{end}}'
 
@@ -498,7 +500,7 @@ tasks:
         platforms: [linux, darwin]
       - |
         GOBIN="{{joinPath .TASKFILE_DIR "bin"}}" GOOS= GOARCH= \
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@{{.PROTOC_GEN_GO_VERSION}}
       - |
         GOBIN="{{joinPath .TASKFILE_DIR "bin"}}" GOOS= GOARCH= \
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
