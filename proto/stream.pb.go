@@ -269,7 +269,111 @@ func (x ControlRequest_Action) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ControlRequest_Action.Descriptor instead.
 func (ControlRequest_Action) EnumDescriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{8, 0}
+	return file_proto_stream_proto_rawDescGZIP(), []int{10, 0}
+}
+
+type ConversionCapacityRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConversionCapacityRequest) Reset() {
+	*x = ConversionCapacityRequest{}
+	mi := &file_proto_stream_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConversionCapacityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConversionCapacityRequest) ProtoMessage() {}
+
+func (x *ConversionCapacityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConversionCapacityRequest.ProtoReflect.Descriptor instead.
+func (*ConversionCapacityRequest) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{0}
+}
+
+type ConversionCapacityResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MaxConcurrent int32                  `protobuf:"varint,1,opt,name=max_concurrent,json=maxConcurrent,proto3" json:"max_concurrent,omitempty"`
+	ActiveSlots   int32                  `protobuf:"varint,2,opt,name=active_slots,json=activeSlots,proto3" json:"active_slots,omitempty"`
+	LogicalCpus   int32                  `protobuf:"varint,3,opt,name=logical_cpus,json=logicalCpus,proto3" json:"logical_cpus,omitempty"`
+	PhysicalCores int32                  `protobuf:"varint,4,opt,name=physical_cores,json=physicalCores,proto3" json:"physical_cores,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConversionCapacityResponse) Reset() {
+	*x = ConversionCapacityResponse{}
+	mi := &file_proto_stream_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConversionCapacityResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConversionCapacityResponse) ProtoMessage() {}
+
+func (x *ConversionCapacityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_stream_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConversionCapacityResponse.ProtoReflect.Descriptor instead.
+func (*ConversionCapacityResponse) Descriptor() ([]byte, []int) {
+	return file_proto_stream_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ConversionCapacityResponse) GetMaxConcurrent() int32 {
+	if x != nil {
+		return x.MaxConcurrent
+	}
+	return 0
+}
+
+func (x *ConversionCapacityResponse) GetActiveSlots() int32 {
+	if x != nil {
+		return x.ActiveSlots
+	}
+	return 0
+}
+
+func (x *ConversionCapacityResponse) GetLogicalCpus() int32 {
+	if x != nil {
+		return x.LogicalCpus
+	}
+	return 0
+}
+
+func (x *ConversionCapacityResponse) GetPhysicalCores() int32 {
+	if x != nil {
+		return x.PhysicalCores
+	}
+	return 0
 }
 
 type VideoConversionRequest struct {
@@ -287,7 +391,7 @@ type VideoConversionRequest struct {
 
 func (x *VideoConversionRequest) Reset() {
 	*x = VideoConversionRequest{}
-	mi := &file_proto_stream_proto_msgTypes[0]
+	mi := &file_proto_stream_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -299,7 +403,7 @@ func (x *VideoConversionRequest) String() string {
 func (*VideoConversionRequest) ProtoMessage() {}
 
 func (x *VideoConversionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[0]
+	mi := &file_proto_stream_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -312,7 +416,7 @@ func (x *VideoConversionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VideoConversionRequest.ProtoReflect.Descriptor instead.
 func (*VideoConversionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{0}
+	return file_proto_stream_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *VideoConversionRequest) GetJobId() string {
@@ -378,7 +482,7 @@ type VideoConversionProgress struct {
 
 func (x *VideoConversionProgress) Reset() {
 	*x = VideoConversionProgress{}
-	mi := &file_proto_stream_proto_msgTypes[1]
+	mi := &file_proto_stream_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -390,7 +494,7 @@ func (x *VideoConversionProgress) String() string {
 func (*VideoConversionProgress) ProtoMessage() {}
 
 func (x *VideoConversionProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[1]
+	mi := &file_proto_stream_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -403,7 +507,7 @@ func (x *VideoConversionProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VideoConversionProgress.ProtoReflect.Descriptor instead.
 func (*VideoConversionProgress) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{1}
+	return file_proto_stream_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *VideoConversionProgress) GetProgress() float64 {
@@ -462,7 +566,7 @@ type StreamRequest struct {
 
 func (x *StreamRequest) Reset() {
 	*x = StreamRequest{}
-	mi := &file_proto_stream_proto_msgTypes[2]
+	mi := &file_proto_stream_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -474,7 +578,7 @@ func (x *StreamRequest) String() string {
 func (*StreamRequest) ProtoMessage() {}
 
 func (x *StreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[2]
+	mi := &file_proto_stream_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -487,7 +591,7 @@ func (x *StreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamRequest.ProtoReflect.Descriptor instead.
 func (*StreamRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{2}
+	return file_proto_stream_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *StreamRequest) GetTargetId() string {
@@ -543,7 +647,7 @@ type StreamResponse struct {
 
 func (x *StreamResponse) Reset() {
 	*x = StreamResponse{}
-	mi := &file_proto_stream_proto_msgTypes[3]
+	mi := &file_proto_stream_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -555,7 +659,7 @@ func (x *StreamResponse) String() string {
 func (*StreamResponse) ProtoMessage() {}
 
 func (x *StreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[3]
+	mi := &file_proto_stream_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -568,7 +672,7 @@ func (x *StreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamResponse.ProtoReflect.Descriptor instead.
 func (*StreamResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{3}
+	return file_proto_stream_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *StreamResponse) GetFmp4Chunk() []byte {
@@ -601,7 +705,7 @@ type StreamControlRequest struct {
 
 func (x *StreamControlRequest) Reset() {
 	*x = StreamControlRequest{}
-	mi := &file_proto_stream_proto_msgTypes[4]
+	mi := &file_proto_stream_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +717,7 @@ func (x *StreamControlRequest) String() string {
 func (*StreamControlRequest) ProtoMessage() {}
 
 func (x *StreamControlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[4]
+	mi := &file_proto_stream_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +730,7 @@ func (x *StreamControlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamControlRequest.ProtoReflect.Descriptor instead.
 func (*StreamControlRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{4}
+	return file_proto_stream_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StreamControlRequest) GetTargetId() string {
@@ -646,7 +750,7 @@ type StreamControlResponse struct {
 
 func (x *StreamControlResponse) Reset() {
 	*x = StreamControlResponse{}
-	mi := &file_proto_stream_proto_msgTypes[5]
+	mi := &file_proto_stream_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -658,7 +762,7 @@ func (x *StreamControlResponse) String() string {
 func (*StreamControlResponse) ProtoMessage() {}
 
 func (x *StreamControlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[5]
+	mi := &file_proto_stream_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -671,7 +775,7 @@ func (x *StreamControlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamControlResponse.ProtoReflect.Descriptor instead.
 func (*StreamControlResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{5}
+	return file_proto_stream_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StreamControlResponse) GetSuccess() bool {
@@ -698,7 +802,7 @@ type LatencyRequest struct {
 
 func (x *LatencyRequest) Reset() {
 	*x = LatencyRequest{}
-	mi := &file_proto_stream_proto_msgTypes[6]
+	mi := &file_proto_stream_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -710,7 +814,7 @@ func (x *LatencyRequest) String() string {
 func (*LatencyRequest) ProtoMessage() {}
 
 func (x *LatencyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[6]
+	mi := &file_proto_stream_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -723,7 +827,7 @@ func (x *LatencyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LatencyRequest.ProtoReflect.Descriptor instead.
 func (*LatencyRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{6}
+	return file_proto_stream_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *LatencyRequest) GetTargetId() string {
@@ -749,7 +853,7 @@ type LatencyResponse struct {
 
 func (x *LatencyResponse) Reset() {
 	*x = LatencyResponse{}
-	mi := &file_proto_stream_proto_msgTypes[7]
+	mi := &file_proto_stream_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -761,7 +865,7 @@ func (x *LatencyResponse) String() string {
 func (*LatencyResponse) ProtoMessage() {}
 
 func (x *LatencyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[7]
+	mi := &file_proto_stream_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -774,7 +878,7 @@ func (x *LatencyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LatencyResponse.ProtoReflect.Descriptor instead.
 func (*LatencyResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{7}
+	return file_proto_stream_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *LatencyResponse) GetAccepted() bool {
@@ -795,7 +899,7 @@ type ControlRequest struct {
 
 func (x *ControlRequest) Reset() {
 	*x = ControlRequest{}
-	mi := &file_proto_stream_proto_msgTypes[8]
+	mi := &file_proto_stream_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -807,7 +911,7 @@ func (x *ControlRequest) String() string {
 func (*ControlRequest) ProtoMessage() {}
 
 func (x *ControlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[8]
+	mi := &file_proto_stream_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -820,7 +924,7 @@ func (x *ControlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlRequest.ProtoReflect.Descriptor instead.
 func (*ControlRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{8}
+	return file_proto_stream_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ControlRequest) GetTargetId() string {
@@ -854,7 +958,7 @@ type ControlResponse struct {
 
 func (x *ControlResponse) Reset() {
 	*x = ControlResponse{}
-	mi := &file_proto_stream_proto_msgTypes[9]
+	mi := &file_proto_stream_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -866,7 +970,7 @@ func (x *ControlResponse) String() string {
 func (*ControlResponse) ProtoMessage() {}
 
 func (x *ControlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[9]
+	mi := &file_proto_stream_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -879,7 +983,7 @@ func (x *ControlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlResponse.ProtoReflect.Descriptor instead.
 func (*ControlResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{9}
+	return file_proto_stream_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ControlResponse) GetSuccess() bool {
@@ -904,7 +1008,7 @@ type DevicesRequest struct {
 
 func (x *DevicesRequest) Reset() {
 	*x = DevicesRequest{}
-	mi := &file_proto_stream_proto_msgTypes[10]
+	mi := &file_proto_stream_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -916,7 +1020,7 @@ func (x *DevicesRequest) String() string {
 func (*DevicesRequest) ProtoMessage() {}
 
 func (x *DevicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[10]
+	mi := &file_proto_stream_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -929,7 +1033,7 @@ func (x *DevicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DevicesRequest.ProtoReflect.Descriptor instead.
 func (*DevicesRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{10}
+	return file_proto_stream_proto_rawDescGZIP(), []int{12}
 }
 
 type AudioDevice struct {
@@ -943,7 +1047,7 @@ type AudioDevice struct {
 
 func (x *AudioDevice) Reset() {
 	*x = AudioDevice{}
-	mi := &file_proto_stream_proto_msgTypes[11]
+	mi := &file_proto_stream_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -955,7 +1059,7 @@ func (x *AudioDevice) String() string {
 func (*AudioDevice) ProtoMessage() {}
 
 func (x *AudioDevice) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[11]
+	mi := &file_proto_stream_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -968,7 +1072,7 @@ func (x *AudioDevice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AudioDevice.ProtoReflect.Descriptor instead.
 func (*AudioDevice) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{11}
+	return file_proto_stream_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AudioDevice) GetId() string {
@@ -1001,7 +1105,7 @@ type DevicesResponse struct {
 
 func (x *DevicesResponse) Reset() {
 	*x = DevicesResponse{}
-	mi := &file_proto_stream_proto_msgTypes[12]
+	mi := &file_proto_stream_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1013,7 +1117,7 @@ func (x *DevicesResponse) String() string {
 func (*DevicesResponse) ProtoMessage() {}
 
 func (x *DevicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[12]
+	mi := &file_proto_stream_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1026,7 +1130,7 @@ func (x *DevicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DevicesResponse.ProtoReflect.Descriptor instead.
 func (*DevicesResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{12}
+	return file_proto_stream_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DevicesResponse) GetDevices() []*AudioDevice {
@@ -1047,7 +1151,7 @@ type MetadataRequest struct {
 
 func (x *MetadataRequest) Reset() {
 	*x = MetadataRequest{}
-	mi := &file_proto_stream_proto_msgTypes[13]
+	mi := &file_proto_stream_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1059,7 +1163,7 @@ func (x *MetadataRequest) String() string {
 func (*MetadataRequest) ProtoMessage() {}
 
 func (x *MetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[13]
+	mi := &file_proto_stream_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1072,7 +1176,7 @@ func (x *MetadataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetadataRequest.ProtoReflect.Descriptor instead.
 func (*MetadataRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{13}
+	return file_proto_stream_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *MetadataRequest) GetFilePath() string {
@@ -1098,7 +1202,7 @@ type PlaybackSupportRequest struct {
 
 func (x *PlaybackSupportRequest) Reset() {
 	*x = PlaybackSupportRequest{}
-	mi := &file_proto_stream_proto_msgTypes[14]
+	mi := &file_proto_stream_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1110,7 +1214,7 @@ func (x *PlaybackSupportRequest) String() string {
 func (*PlaybackSupportRequest) ProtoMessage() {}
 
 func (x *PlaybackSupportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[14]
+	mi := &file_proto_stream_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1123,7 +1227,7 @@ func (x *PlaybackSupportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaybackSupportRequest.ProtoReflect.Descriptor instead.
 func (*PlaybackSupportRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{14}
+	return file_proto_stream_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PlaybackSupportRequest) GetFilePath() string {
@@ -1158,7 +1262,7 @@ type PlaybackSupportResponse struct {
 
 func (x *PlaybackSupportResponse) Reset() {
 	*x = PlaybackSupportResponse{}
-	mi := &file_proto_stream_proto_msgTypes[15]
+	mi := &file_proto_stream_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1170,7 +1274,7 @@ func (x *PlaybackSupportResponse) String() string {
 func (*PlaybackSupportResponse) ProtoMessage() {}
 
 func (x *PlaybackSupportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[15]
+	mi := &file_proto_stream_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1183,7 +1287,7 @@ func (x *PlaybackSupportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaybackSupportResponse.ProtoReflect.Descriptor instead.
 func (*PlaybackSupportResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{15}
+	return file_proto_stream_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PlaybackSupportResponse) GetStatus() PlaybackSupportStatus {
@@ -1354,7 +1458,7 @@ type MetadataResponse struct {
 
 func (x *MetadataResponse) Reset() {
 	*x = MetadataResponse{}
-	mi := &file_proto_stream_proto_msgTypes[16]
+	mi := &file_proto_stream_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1366,7 +1470,7 @@ func (x *MetadataResponse) String() string {
 func (*MetadataResponse) ProtoMessage() {}
 
 func (x *MetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[16]
+	mi := &file_proto_stream_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1379,7 +1483,7 @@ func (x *MetadataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetadataResponse.ProtoReflect.Descriptor instead.
 func (*MetadataResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{16}
+	return file_proto_stream_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *MetadataResponse) GetFormatName() string {
@@ -1644,7 +1748,7 @@ type ScreenshotRequest struct {
 
 func (x *ScreenshotRequest) Reset() {
 	*x = ScreenshotRequest{}
-	mi := &file_proto_stream_proto_msgTypes[17]
+	mi := &file_proto_stream_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1656,7 +1760,7 @@ func (x *ScreenshotRequest) String() string {
 func (*ScreenshotRequest) ProtoMessage() {}
 
 func (x *ScreenshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[17]
+	mi := &file_proto_stream_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1669,7 +1773,7 @@ func (x *ScreenshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenshotRequest.ProtoReflect.Descriptor instead.
 func (*ScreenshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{17}
+	return file_proto_stream_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ScreenshotRequest) GetFilePath() string {
@@ -1696,7 +1800,7 @@ type ScreenshotResponse struct {
 
 func (x *ScreenshotResponse) Reset() {
 	*x = ScreenshotResponse{}
-	mi := &file_proto_stream_proto_msgTypes[18]
+	mi := &file_proto_stream_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1708,7 +1812,7 @@ func (x *ScreenshotResponse) String() string {
 func (*ScreenshotResponse) ProtoMessage() {}
 
 func (x *ScreenshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[18]
+	mi := &file_proto_stream_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1721,7 +1825,7 @@ func (x *ScreenshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenshotResponse.ProtoReflect.Descriptor instead.
 func (*ScreenshotResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{18}
+	return file_proto_stream_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ScreenshotResponse) GetImageData() []byte {
@@ -1746,7 +1850,7 @@ type ShutdownRequest struct {
 
 func (x *ShutdownRequest) Reset() {
 	*x = ShutdownRequest{}
-	mi := &file_proto_stream_proto_msgTypes[19]
+	mi := &file_proto_stream_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1758,7 +1862,7 @@ func (x *ShutdownRequest) String() string {
 func (*ShutdownRequest) ProtoMessage() {}
 
 func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[19]
+	mi := &file_proto_stream_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1771,7 +1875,7 @@ func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownRequest) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{19}
+	return file_proto_stream_proto_rawDescGZIP(), []int{21}
 }
 
 type ShutdownResponse struct {
@@ -1783,7 +1887,7 @@ type ShutdownResponse struct {
 
 func (x *ShutdownResponse) Reset() {
 	*x = ShutdownResponse{}
-	mi := &file_proto_stream_proto_msgTypes[20]
+	mi := &file_proto_stream_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1795,7 +1899,7 @@ func (x *ShutdownResponse) String() string {
 func (*ShutdownResponse) ProtoMessage() {}
 
 func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_stream_proto_msgTypes[20]
+	mi := &file_proto_stream_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1808,7 +1912,7 @@ func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownResponse) Descriptor() ([]byte, []int) {
-	return file_proto_stream_proto_rawDescGZIP(), []int{20}
+	return file_proto_stream_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ShutdownResponse) GetAccepted() bool {
@@ -1822,7 +1926,13 @@ var File_proto_stream_proto protoreflect.FileDescriptor
 
 const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/stream.proto\x12\x06ffmpeg\"\x97\x02\n" +
+	"\x12proto/stream.proto\x12\x06ffmpeg\"\x1b\n" +
+	"\x19ConversionCapacityRequest\"\xb0\x01\n" +
+	"\x1aConversionCapacityResponse\x12%\n" +
+	"\x0emax_concurrent\x18\x01 \x01(\x05R\rmaxConcurrent\x12!\n" +
+	"\factive_slots\x18\x02 \x01(\x05R\vactiveSlots\x12!\n" +
+	"\flogical_cpus\x18\x03 \x01(\x05R\vlogicalCpus\x12%\n" +
+	"\x0ephysical_cores\x18\x04 \x01(\x05R\rphysicalCores\"\x97\x02\n" +
 	"\x16VideoConversionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vsource_path\x18\x02 \x01(\tR\n" +
@@ -1981,7 +2091,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x1bPLAYBACK_SUPPORT_NATIVE_GPU\x10\x01\x12!\n" +
 	"\x1dPLAYBACK_SUPPORT_GPU_ASSISTED\x10\x02\x12!\n" +
 	"\x1dPLAYBACK_SUPPORT_CPU_FALLBACK\x10\x03\x12 \n" +
-	"\x1cPLAYBACK_SUPPORT_UNAVAILABLE\x10\x042\xe1\x05\n" +
+	"\x1cPLAYBACK_SUPPORT_UNAVAILABLE\x10\x042\xc1\x06\n" +
 	"\rFFmpegService\x12>\n" +
 	"\vStartStream\x12\x15.ffmpeg.StreamRequest\x1a\x16.ffmpeg.StreamResponse0\x01\x12I\n" +
 	"\n" +
@@ -1993,7 +2103,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x12GetPlaybackSupport\x12\x1e.ffmpeg.PlaybackSupportRequest\x1a\x1f.ffmpeg.PlaybackSupportResponse\x12K\n" +
 	"\x12GetVideoScreenshot\x12\x19.ffmpeg.ScreenshotRequest\x1a\x1a.ffmpeg.ScreenshotResponse\x12=\n" +
 	"\bShutdown\x12\x17.ffmpeg.ShutdownRequest\x1a\x18.ffmpeg.ShutdownResponse\x12Q\n" +
-	"\fConvertVideo\x12\x1e.ffmpeg.VideoConversionRequest\x1a\x1f.ffmpeg.VideoConversionProgress0\x01B7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
+	"\fConvertVideo\x12\x1e.ffmpeg.VideoConversionRequest\x1a\x1f.ffmpeg.VideoConversionProgress0\x01\x12^\n" +
+	"\x15GetConversionCapacity\x12!.ffmpeg.ConversionCapacityRequest\x1a\".ffmpeg.ConversionCapacityResponseB7Z5github.com/gotedo/gotedo-impress-ffmpeg-sidecar/protob\x06proto3"
 
 var (
 	file_proto_stream_proto_rawDescOnce sync.Once
@@ -2008,64 +2119,68 @@ func file_proto_stream_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_stream_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_proto_stream_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_proto_stream_proto_goTypes = []any{
-	(PassthroughContainerFormat)(0), // 0: ffmpeg.PassthroughContainerFormat
-	(StreamMode)(0),                 // 1: ffmpeg.StreamMode
-	(ProcessingPolicy)(0),           // 2: ffmpeg.ProcessingPolicy
-	(PlaybackSupportStatus)(0),      // 3: ffmpeg.PlaybackSupportStatus
-	(ControlRequest_Action)(0),      // 4: ffmpeg.ControlRequest.Action
-	(*VideoConversionRequest)(nil),  // 5: ffmpeg.VideoConversionRequest
-	(*VideoConversionProgress)(nil), // 6: ffmpeg.VideoConversionProgress
-	(*StreamRequest)(nil),           // 7: ffmpeg.StreamRequest
-	(*StreamResponse)(nil),          // 8: ffmpeg.StreamResponse
-	(*StreamControlRequest)(nil),    // 9: ffmpeg.StreamControlRequest
-	(*StreamControlResponse)(nil),   // 10: ffmpeg.StreamControlResponse
-	(*LatencyRequest)(nil),          // 11: ffmpeg.LatencyRequest
-	(*LatencyResponse)(nil),         // 12: ffmpeg.LatencyResponse
-	(*ControlRequest)(nil),          // 13: ffmpeg.ControlRequest
-	(*ControlResponse)(nil),         // 14: ffmpeg.ControlResponse
-	(*DevicesRequest)(nil),          // 15: ffmpeg.DevicesRequest
-	(*AudioDevice)(nil),             // 16: ffmpeg.AudioDevice
-	(*DevicesResponse)(nil),         // 17: ffmpeg.DevicesResponse
-	(*MetadataRequest)(nil),         // 18: ffmpeg.MetadataRequest
-	(*PlaybackSupportRequest)(nil),  // 19: ffmpeg.PlaybackSupportRequest
-	(*PlaybackSupportResponse)(nil), // 20: ffmpeg.PlaybackSupportResponse
-	(*MetadataResponse)(nil),        // 21: ffmpeg.MetadataResponse
-	(*ScreenshotRequest)(nil),       // 22: ffmpeg.ScreenshotRequest
-	(*ScreenshotResponse)(nil),      // 23: ffmpeg.ScreenshotResponse
-	(*ShutdownRequest)(nil),         // 24: ffmpeg.ShutdownRequest
-	(*ShutdownResponse)(nil),        // 25: ffmpeg.ShutdownResponse
+	(PassthroughContainerFormat)(0),    // 0: ffmpeg.PassthroughContainerFormat
+	(StreamMode)(0),                    // 1: ffmpeg.StreamMode
+	(ProcessingPolicy)(0),              // 2: ffmpeg.ProcessingPolicy
+	(PlaybackSupportStatus)(0),         // 3: ffmpeg.PlaybackSupportStatus
+	(ControlRequest_Action)(0),         // 4: ffmpeg.ControlRequest.Action
+	(*ConversionCapacityRequest)(nil),  // 5: ffmpeg.ConversionCapacityRequest
+	(*ConversionCapacityResponse)(nil), // 6: ffmpeg.ConversionCapacityResponse
+	(*VideoConversionRequest)(nil),     // 7: ffmpeg.VideoConversionRequest
+	(*VideoConversionProgress)(nil),    // 8: ffmpeg.VideoConversionProgress
+	(*StreamRequest)(nil),              // 9: ffmpeg.StreamRequest
+	(*StreamResponse)(nil),             // 10: ffmpeg.StreamResponse
+	(*StreamControlRequest)(nil),       // 11: ffmpeg.StreamControlRequest
+	(*StreamControlResponse)(nil),      // 12: ffmpeg.StreamControlResponse
+	(*LatencyRequest)(nil),             // 13: ffmpeg.LatencyRequest
+	(*LatencyResponse)(nil),            // 14: ffmpeg.LatencyResponse
+	(*ControlRequest)(nil),             // 15: ffmpeg.ControlRequest
+	(*ControlResponse)(nil),            // 16: ffmpeg.ControlResponse
+	(*DevicesRequest)(nil),             // 17: ffmpeg.DevicesRequest
+	(*AudioDevice)(nil),                // 18: ffmpeg.AudioDevice
+	(*DevicesResponse)(nil),            // 19: ffmpeg.DevicesResponse
+	(*MetadataRequest)(nil),            // 20: ffmpeg.MetadataRequest
+	(*PlaybackSupportRequest)(nil),     // 21: ffmpeg.PlaybackSupportRequest
+	(*PlaybackSupportResponse)(nil),    // 22: ffmpeg.PlaybackSupportResponse
+	(*MetadataResponse)(nil),           // 23: ffmpeg.MetadataResponse
+	(*ScreenshotRequest)(nil),          // 24: ffmpeg.ScreenshotRequest
+	(*ScreenshotResponse)(nil),         // 25: ffmpeg.ScreenshotResponse
+	(*ShutdownRequest)(nil),            // 26: ffmpeg.ShutdownRequest
+	(*ShutdownResponse)(nil),           // 27: ffmpeg.ShutdownResponse
 }
 var file_proto_stream_proto_depIdxs = []int32{
 	1,  // 0: ffmpeg.StreamRequest.stream_mode:type_name -> ffmpeg.StreamMode
 	0,  // 1: ffmpeg.StreamRequest.container:type_name -> ffmpeg.PassthroughContainerFormat
 	2,  // 2: ffmpeg.StreamRequest.processing_policy:type_name -> ffmpeg.ProcessingPolicy
 	4,  // 3: ffmpeg.ControlRequest.action:type_name -> ffmpeg.ControlRequest.Action
-	16, // 4: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
+	18, // 4: ffmpeg.DevicesResponse.devices:type_name -> ffmpeg.AudioDevice
 	3,  // 5: ffmpeg.PlaybackSupportResponse.status:type_name -> ffmpeg.PlaybackSupportStatus
-	7,  // 6: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
-	9,  // 7: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
-	11, // 8: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
-	13, // 9: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
-	15, // 10: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
-	18, // 11: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
-	19, // 12: ffmpeg.FFmpegService.GetPlaybackSupport:input_type -> ffmpeg.PlaybackSupportRequest
-	22, // 13: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
-	24, // 14: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
-	5,  // 15: ffmpeg.FFmpegService.ConvertVideo:input_type -> ffmpeg.VideoConversionRequest
-	8,  // 16: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
-	10, // 17: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
-	12, // 18: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
-	14, // 19: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
-	17, // 20: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
-	21, // 21: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
-	20, // 22: ffmpeg.FFmpegService.GetPlaybackSupport:output_type -> ffmpeg.PlaybackSupportResponse
-	23, // 23: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
-	25, // 24: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
-	6,  // 25: ffmpeg.FFmpegService.ConvertVideo:output_type -> ffmpeg.VideoConversionProgress
-	16, // [16:26] is the sub-list for method output_type
-	6,  // [6:16] is the sub-list for method input_type
+	9,  // 6: ffmpeg.FFmpegService.StartStream:input_type -> ffmpeg.StreamRequest
+	11, // 7: ffmpeg.FFmpegService.StopStream:input_type -> ffmpeg.StreamControlRequest
+	13, // 8: ffmpeg.FFmpegService.AdjustLatency:input_type -> ffmpeg.LatencyRequest
+	15, // 9: ffmpeg.FFmpegService.ControlStream:input_type -> ffmpeg.ControlRequest
+	17, // 10: ffmpeg.FFmpegService.GetAudioDevices:input_type -> ffmpeg.DevicesRequest
+	20, // 11: ffmpeg.FFmpegService.GetMediaProperties:input_type -> ffmpeg.MetadataRequest
+	21, // 12: ffmpeg.FFmpegService.GetPlaybackSupport:input_type -> ffmpeg.PlaybackSupportRequest
+	24, // 13: ffmpeg.FFmpegService.GetVideoScreenshot:input_type -> ffmpeg.ScreenshotRequest
+	26, // 14: ffmpeg.FFmpegService.Shutdown:input_type -> ffmpeg.ShutdownRequest
+	7,  // 15: ffmpeg.FFmpegService.ConvertVideo:input_type -> ffmpeg.VideoConversionRequest
+	5,  // 16: ffmpeg.FFmpegService.GetConversionCapacity:input_type -> ffmpeg.ConversionCapacityRequest
+	10, // 17: ffmpeg.FFmpegService.StartStream:output_type -> ffmpeg.StreamResponse
+	12, // 18: ffmpeg.FFmpegService.StopStream:output_type -> ffmpeg.StreamControlResponse
+	14, // 19: ffmpeg.FFmpegService.AdjustLatency:output_type -> ffmpeg.LatencyResponse
+	16, // 20: ffmpeg.FFmpegService.ControlStream:output_type -> ffmpeg.ControlResponse
+	19, // 21: ffmpeg.FFmpegService.GetAudioDevices:output_type -> ffmpeg.DevicesResponse
+	23, // 22: ffmpeg.FFmpegService.GetMediaProperties:output_type -> ffmpeg.MetadataResponse
+	22, // 23: ffmpeg.FFmpegService.GetPlaybackSupport:output_type -> ffmpeg.PlaybackSupportResponse
+	25, // 24: ffmpeg.FFmpegService.GetVideoScreenshot:output_type -> ffmpeg.ScreenshotResponse
+	27, // 25: ffmpeg.FFmpegService.Shutdown:output_type -> ffmpeg.ShutdownResponse
+	8,  // 26: ffmpeg.FFmpegService.ConvertVideo:output_type -> ffmpeg.VideoConversionProgress
+	6,  // 27: ffmpeg.FFmpegService.GetConversionCapacity:output_type -> ffmpeg.ConversionCapacityResponse
+	17, // [17:28] is the sub-list for method output_type
+	6,  // [6:17] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -2082,7 +2197,7 @@ func file_proto_stream_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_stream_proto_rawDesc), len(file_proto_stream_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

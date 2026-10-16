@@ -19,16 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	FFmpegService_StartStream_FullMethodName        = "/ffmpeg.FFmpegService/StartStream"
-	FFmpegService_StopStream_FullMethodName         = "/ffmpeg.FFmpegService/StopStream"
-	FFmpegService_AdjustLatency_FullMethodName      = "/ffmpeg.FFmpegService/AdjustLatency"
-	FFmpegService_ControlStream_FullMethodName      = "/ffmpeg.FFmpegService/ControlStream"
-	FFmpegService_GetAudioDevices_FullMethodName    = "/ffmpeg.FFmpegService/GetAudioDevices"
-	FFmpegService_GetMediaProperties_FullMethodName = "/ffmpeg.FFmpegService/GetMediaProperties"
-	FFmpegService_GetPlaybackSupport_FullMethodName = "/ffmpeg.FFmpegService/GetPlaybackSupport"
-	FFmpegService_GetVideoScreenshot_FullMethodName = "/ffmpeg.FFmpegService/GetVideoScreenshot"
-	FFmpegService_Shutdown_FullMethodName           = "/ffmpeg.FFmpegService/Shutdown"
-	FFmpegService_ConvertVideo_FullMethodName       = "/ffmpeg.FFmpegService/ConvertVideo"
+	FFmpegService_StartStream_FullMethodName           = "/ffmpeg.FFmpegService/StartStream"
+	FFmpegService_StopStream_FullMethodName            = "/ffmpeg.FFmpegService/StopStream"
+	FFmpegService_AdjustLatency_FullMethodName         = "/ffmpeg.FFmpegService/AdjustLatency"
+	FFmpegService_ControlStream_FullMethodName         = "/ffmpeg.FFmpegService/ControlStream"
+	FFmpegService_GetAudioDevices_FullMethodName       = "/ffmpeg.FFmpegService/GetAudioDevices"
+	FFmpegService_GetMediaProperties_FullMethodName    = "/ffmpeg.FFmpegService/GetMediaProperties"
+	FFmpegService_GetPlaybackSupport_FullMethodName    = "/ffmpeg.FFmpegService/GetPlaybackSupport"
+	FFmpegService_GetVideoScreenshot_FullMethodName    = "/ffmpeg.FFmpegService/GetVideoScreenshot"
+	FFmpegService_Shutdown_FullMethodName              = "/ffmpeg.FFmpegService/Shutdown"
+	FFmpegService_ConvertVideo_FullMethodName          = "/ffmpeg.FFmpegService/ConvertVideo"
+	FFmpegService_GetConversionCapacity_FullMethodName = "/ffmpeg.FFmpegService/GetConversionCapacity"
 )
 
 // FFmpegServiceClient is the client API for FFmpegService service.
@@ -58,6 +59,8 @@ type FFmpegServiceClient interface {
 	// Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
 	// the client stream interrupts decoding and encoding in the native loop.
 	ConvertVideo(ctx context.Context, in *VideoConversionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VideoConversionProgress], error)
+	// Reports the process-local conversion concurrency budget and active slots.
+	GetConversionCapacity(ctx context.Context, in *ConversionCapacityRequest, opts ...grpc.CallOption) (*ConversionCapacityResponse, error)
 }
 
 type fFmpegServiceClient struct {
@@ -186,6 +189,16 @@ func (c *fFmpegServiceClient) ConvertVideo(ctx context.Context, in *VideoConvers
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type FFmpegService_ConvertVideoClient = grpc.ServerStreamingClient[VideoConversionProgress]
 
+func (c *fFmpegServiceClient) GetConversionCapacity(ctx context.Context, in *ConversionCapacityRequest, opts ...grpc.CallOption) (*ConversionCapacityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConversionCapacityResponse)
+	err := c.cc.Invoke(ctx, FFmpegService_GetConversionCapacity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FFmpegServiceServer is the server API for FFmpegService service.
 // All implementations must embed UnimplementedFFmpegServiceServer
 // for forward compatibility.
@@ -213,6 +226,8 @@ type FFmpegServiceServer interface {
 	// Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
 	// the client stream interrupts decoding and encoding in the native loop.
 	ConvertVideo(*VideoConversionRequest, grpc.ServerStreamingServer[VideoConversionProgress]) error
+	// Reports the process-local conversion concurrency budget and active slots.
+	GetConversionCapacity(context.Context, *ConversionCapacityRequest) (*ConversionCapacityResponse, error)
 	mustEmbedUnimplementedFFmpegServiceServer()
 }
 
@@ -252,6 +267,9 @@ func (UnimplementedFFmpegServiceServer) Shutdown(context.Context, *ShutdownReque
 }
 func (UnimplementedFFmpegServiceServer) ConvertVideo(*VideoConversionRequest, grpc.ServerStreamingServer[VideoConversionProgress]) error {
 	return status.Error(codes.Unimplemented, "method ConvertVideo not implemented")
+}
+func (UnimplementedFFmpegServiceServer) GetConversionCapacity(context.Context, *ConversionCapacityRequest) (*ConversionCapacityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetConversionCapacity not implemented")
 }
 func (UnimplementedFFmpegServiceServer) mustEmbedUnimplementedFFmpegServiceServer() {}
 func (UnimplementedFFmpegServiceServer) testEmbeddedByValue()                       {}
@@ -440,6 +458,24 @@ func _FFmpegService_ConvertVideo_Handler(srv interface{}, stream grpc.ServerStre
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type FFmpegService_ConvertVideoServer = grpc.ServerStreamingServer[VideoConversionProgress]
 
+func _FFmpegService_GetConversionCapacity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConversionCapacityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FFmpegServiceServer).GetConversionCapacity(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FFmpegService_GetConversionCapacity_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FFmpegServiceServer).GetConversionCapacity(ctx, req.(*ConversionCapacityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FFmpegService_ServiceDesc is the grpc.ServiceDesc for FFmpegService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -478,6 +514,10 @@ var FFmpegService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Shutdown",
 			Handler:    _FFmpegService_Shutdown_Handler,
+		},
+		{
+			MethodName: "GetConversionCapacity",
+			Handler:    _FFmpegService_GetConversionCapacity_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

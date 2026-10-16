@@ -30,7 +30,84 @@ import (
 
 type ffmpegServer struct {
 	proto.UnimplementedFFmpegServiceServer
-	conversionMu sync.Mutex
+	conversionMu     sync.Mutex
+	conversionLeases map[int]string
+	nextCore         int
+	audioDevicesMu   sync.Mutex
+	audioDevices     []*proto.AudioDevice
+	audioDevicesAt   time.Time
+}
+
+const audioDevicesCacheTTL = 10 * time.Second
+
+func (s *ffmpegServer) conversionCapacity() (max, logical, physical int) {
+	var logicalCount, physicalCount C.int
+	C.conversion_get_cpu_counts(&logicalCount, &physicalCount)
+	logical, physical = int(logicalCount), int(physicalCount)
+	if logical <= 0 {
+		logical = runtime.NumCPU()
+	}
+	max = conversionConcurrencyLimit(physical, logical)
+	return
+}
+
+func conversionConcurrencyLimit(physicalCores, logicalCPUs int) int {
+	cores := physicalCores
+	if cores <= 0 {
+		cores = logicalCPUs
+	}
+	limit := cores / 2
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+func (s *ffmpegServer) acquireConversionLease(jobID string) (int, error) {
+	s.conversionMu.Lock()
+	defer s.conversionMu.Unlock()
+	max, logical, _ := s.conversionCapacity()
+	if s.conversionLeases == nil {
+		s.conversionLeases = make(map[int]string)
+	}
+	if len(s.conversionLeases) >= max {
+		return -1, status.Error(codes.ResourceExhausted, "conversion sidecar capacity is full")
+	}
+	for i := 0; i < logical; i++ {
+		core := (s.nextCore + i) % logical
+		if _, used := s.conversionLeases[core]; !used {
+			s.conversionLeases[core] = jobID
+			s.nextCore = (core + 1) % logical
+			return core, nil
+		}
+	}
+	return -1, status.Error(codes.ResourceExhausted, "no conversion CPU core is available")
+}
+
+func (s *ffmpegServer) releaseConversionLease(core int, jobID string) {
+	s.conversionMu.Lock()
+	if s.conversionLeases[core] == jobID {
+		delete(s.conversionLeases, core)
+	}
+	s.conversionMu.Unlock()
+}
+
+func (s *ffmpegServer) GetConversionCapacity(context.Context, *proto.ConversionCapacityRequest) (*proto.ConversionCapacityResponse, error) {
+	max, logical, physical := s.conversionCapacity()
+	s.conversionMu.Lock()
+	active := len(s.conversionLeases)
+	s.conversionMu.Unlock()
+	return &proto.ConversionCapacityResponse{MaxConcurrent: int32(max), ActiveSlots: int32(active), LogicalCpus: int32(logical), PhysicalCores: int32(physical)}, nil
+}
+
+func pinConversionThread(coreID int) (unsafe.Pointer, bool) {
+	var state unsafe.Pointer
+	result := C.conversion_pin_current_thread(C.int(coreID), &state)
+	return state, result == 0
+}
+
+func restoreConversionThreadAffinity(state unsafe.Pointer) {
+	C.conversion_restore_thread_affinity(state)
 }
 
 type conversionProgressContext struct {
@@ -640,6 +717,23 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 
 // GetAudioDevices queries miniaudio and maps discovered OS soundcards directly to gRPC responses.
 func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRequest) (*proto.DevicesResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Device enumeration enters native OS audio APIs and can take longer than a
+	// normal RPC, especially while the device graph is changing. Serialize it
+	// and briefly cache the result so multiple UI refreshes don't launch
+	// overlapping native enumerations.
+	s.audioDevicesMu.Lock()
+	defer s.audioDevicesMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if time.Since(s.audioDevicesAt) < audioDevicesCacheTTL {
+		return &proto.DevicesResponse{Devices: cloneAudioDevices(s.audioDevices)}, nil
+	}
+
 	maxDevices := 32
 	// Allocate sequential buffer in C heap space
 	cDevices := (*C.NativeAudioDevice)(C.calloc(C.size_t(maxDevices), C.size_t(unsafe.Sizeof(C.NativeAudioDevice{}))))
@@ -661,10 +755,32 @@ func (s *ffmpegServer) GetAudioDevices(ctx context.Context, req *proto.DevicesRe
 			IsDefault: bool(deviceSlice[i].is_default),
 		})
 	}
+	s.audioDevices = responseDevices
+	s.audioDevicesAt = time.Now()
+	if err := ctx.Err(); err != nil {
+		// Keep the completed enumeration cached for the next caller, but report
+		// the cancellation to this caller rather than returning a late response.
+		return nil, err
+	}
 
 	return &proto.DevicesResponse{
-		Devices: responseDevices,
+		Devices: cloneAudioDevices(responseDevices),
 	}, nil
+}
+
+func cloneAudioDevices(devices []*proto.AudioDevice) []*proto.AudioDevice {
+	clones := make([]*proto.AudioDevice, 0, len(devices))
+	for _, device := range devices {
+		if device == nil {
+			continue
+		}
+		clones = append(clones, &proto.AudioDevice{
+			Id:        device.GetId(),
+			Name:      device.GetName(),
+			IsDefault: device.GetIsDefault(),
+		})
+	}
+	return clones
 }
 
 // AdjustLatency handles real-time audio delay modifications from the backend client.
@@ -906,10 +1022,6 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 // The caller uses a dedicated sidecar process so CPU-heavy conversion cannot
 // contend with playback decoding or encoding.
 func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream proto.FFmpegService_ConvertVideoServer) error {
-	if !s.conversionMu.TryLock() {
-		return status.Error(codes.ResourceExhausted, "this sidecar is already processing a video conversion")
-	}
-	defer s.conversionMu.Unlock()
 	if req.GetJobId() == "" || req.GetSourcePath() == "" || req.GetOutputPath() == "" {
 		return status.Error(codes.InvalidArgument, "job_id, source_path, and output_path are required")
 	}
@@ -925,6 +1037,11 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	if req.GetHdrHandling() != "tone_map" && req.GetHdrHandling() != "preserve" {
 		return status.Error(codes.InvalidArgument, "hdr_handling must be tone_map or preserve")
 	}
+	core, err := s.acquireConversionLease(req.GetJobId())
+	if err != nil {
+		return err
+	}
+	defer s.releaseConversionLease(core, req.GetJobId())
 	sourcePath, err := filepath.Abs(filepath.Clean(req.GetSourcePath()))
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid source path: %v", err)
@@ -993,6 +1110,10 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	if os.Getenv("GOTEDO_TEST_MODE") == "1" && os.Getenv("GOTEDO_FFMPEG_FORCE_CPU_ENCODER") == "1" {
 		allowHardwareEncoder = 0
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	affinityState, _ := pinConversionThread(core)
+	defer restoreConversionThreadAffinity(affinityState)
 	ret := C.convert_video_file(cSource, cOutput,
 		C.int(req.GetVideoBitrateKbps()), C.int(req.GetAudioBitrateKbps()),
 		cPreset, preserveHDR, allowHardwareEncoder, cancelFlag,

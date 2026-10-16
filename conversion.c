@@ -1,7 +1,156 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "decoder.h"
 #include "_cgo_export.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <sysinfoapi.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <dirent.h>
+#endif
+
+typedef struct {
+#if defined(_WIN32)
+  DWORD_PTR previous_mask;
+#elif defined(__APPLE__)
+  thread_affinity_policy_data_t previous_policy;
+  mach_msg_type_number_t previous_count;
+  boolean_t previous_default;
+  thread_port_t thread;
+#elif defined(__linux__)
+  cpu_set_t previous_set;
+#endif
+  int supported;
+} ConversionThreadAffinity;
+
+void conversion_get_cpu_counts(int *logical_out, int *physical_out)
+{
+  if (logical_out) *logical_out = 0;
+  if (physical_out) *physical_out = 0;
+#if defined(_WIN32)
+  if (logical_out) *logical_out = (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+  DWORD bytes = 0;
+  (void)GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &bytes);
+  if (bytes) {
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *items = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)malloc(bytes);
+    if (items && GetLogicalProcessorInformationEx(RelationProcessorCore, items, &bytes)) {
+      DWORD offset = 0; int count = 0;
+      while (offset < bytes) { SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *item = (void *)((char *)items + offset); if (item->Relationship == RelationProcessorCore) count++; offset += item->Size; }
+      if (physical_out) *physical_out = count;
+    }
+    free(items);
+  }
+#elif defined(__APPLE__)
+  int value = 0; size_t size = sizeof(value);
+  if (sysctlbyname("hw.logicalcpu", &value, &size, NULL, 0) == 0 && logical_out) *logical_out = value;
+  value = 0; size = sizeof(value);
+  if (sysctlbyname("hw.physicalcpu", &value, &size, NULL, 0) == 0 && physical_out) *physical_out = value;
+#elif defined(__linux__)
+  cpu_set_t allowed; CPU_ZERO(&allowed);
+  if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0 && logical_out) *logical_out = CPU_COUNT(&allowed);
+  int packages[CPU_SETSIZE], cores[CPU_SETSIZE], seen_count = 0;
+  DIR *dir = opendir("/sys/devices/system/cpu");
+  if (dir) {
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+      if (strncmp(entry->d_name, "cpu", 3) != 0 || entry->d_name[3] < '0' || entry->d_name[3] > '9') continue;
+      int cpu_id = atoi(entry->d_name + 3);
+      if (cpu_id < 0 || cpu_id >= CPU_SETSIZE || !CPU_ISSET(cpu_id, &allowed)) continue;
+      char path[512]; int package = -1, core = -1;
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/%s/topology/physical_package_id", entry->d_name);
+      FILE *f = fopen(path, "r"); if (f) { (void)fscanf(f, "%d", &package); fclose(f); }
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/%s/topology/core_id", entry->d_name);
+      f = fopen(path, "r"); if (f) { (void)fscanf(f, "%d", &core); fclose(f); }
+      if (package >= 0 && core >= 0) {
+        int known = 0;
+        for (int i = 0; i < seen_count; i++) if (packages[i] == package && cores[i] == core) { known = 1; break; }
+        if (!known && seen_count < CPU_SETSIZE) {
+          packages[seen_count] = package; cores[seen_count++] = core;
+          if (physical_out) (*physical_out)++;
+        }
+      }
+    }
+    closedir(dir);
+  }
+#endif
+}
+
+int conversion_pin_current_thread(int core_id, void **state_out)
+{
+  if (state_out) *state_out = NULL;
+  if (core_id < 0 || !state_out) return -1;
+  ConversionThreadAffinity *state = (ConversionThreadAffinity *)calloc(1, sizeof(*state));
+  if (!state) return -1;
+#if defined(_WIN32)
+  if (core_id < (int)(sizeof(DWORD_PTR) * 8)) {
+    state->previous_mask = SetThreadAffinityMask(GetCurrentThread(), ((DWORD_PTR)1) << core_id);
+    state->supported = state->previous_mask != 0;
+  }
+#elif defined(__APPLE__)
+  state->thread = mach_thread_self();
+  state->previous_count = THREAD_AFFINITY_POLICY_COUNT;
+  kern_return_t got = thread_policy_get(state->thread, THREAD_AFFINITY_POLICY,
+      (thread_policy_t)&state->previous_policy, &state->previous_count, &state->previous_default);
+  thread_affinity_policy_data_t policy = { .affinity_tag = core_id + 1 };
+  state->supported = got == KERN_SUCCESS && thread_policy_set(state->thread,
+      THREAD_AFFINITY_POLICY, (thread_policy_t)&policy, THREAD_AFFINITY_POLICY_COUNT) == KERN_SUCCESS;
+#elif defined(__linux__)
+  CPU_ZERO(&state->previous_set);
+  if (pthread_getaffinity_np(pthread_self(), sizeof(state->previous_set), &state->previous_set) == 0) {
+    cpu_set_t selected;
+    CPU_ZERO(&selected);
+    int packages[CPU_SETSIZE], cores[CPU_SETSIZE], seen_count = 0, selected_cpu = -1;
+    for (int cpu_id = 0; cpu_id < CPU_SETSIZE; cpu_id++) {
+      if (!CPU_ISSET(cpu_id, &state->previous_set)) continue;
+      char path[512]; int package = -1, physical_core = -1;
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu_id);
+      FILE *f = fopen(path, "r"); if (f) { (void)fscanf(f, "%d", &package); fclose(f); }
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu_id);
+      f = fopen(path, "r"); if (f) { (void)fscanf(f, "%d", &physical_core); fclose(f); }
+      if (package < 0 || physical_core < 0) continue;
+      int known = 0;
+      for (int i = 0; i < seen_count; i++) if (packages[i] == package && cores[i] == physical_core) { known = 1; break; }
+      if (known || seen_count >= CPU_SETSIZE) continue;
+      packages[seen_count] = package; cores[seen_count] = physical_core;
+      if (seen_count++ == core_id) { selected_cpu = cpu_id; break; }
+    }
+    if (selected_cpu >= 0) CPU_SET(selected_cpu, &selected);
+    state->supported = selected_cpu >= 0 && pthread_setaffinity_np(pthread_self(), sizeof(selected), &selected) == 0;
+  }
+#endif
+  *state_out = state;
+  return state->supported ? 0 : -1;
+}
+
+void conversion_restore_thread_affinity(void *opaque)
+{
+  ConversionThreadAffinity *state = (ConversionThreadAffinity *)opaque;
+  if (!state) return;
+#if defined(_WIN32)
+  if (state->supported) (void)SetThreadAffinityMask(GetCurrentThread(), state->previous_mask);
+#elif defined(__APPLE__)
+  if (state->supported) (void)thread_policy_set(state->thread, THREAD_AFFINITY_POLICY,
+      (thread_policy_t)&state->previous_policy, state->previous_count);
+  if (state->thread != MACH_PORT_NULL) (void)mach_port_deallocate(mach_task_self(), state->thread);
+#elif defined(__linux__)
+  if (state->supported) (void)pthread_setaffinity_np(pthread_self(), sizeof(state->previous_set), &state->previous_set);
+#endif
+  free(state);
+}
 
 int sidecar_go_conversion_progress(double progress, const char *encoder_name,
                                    int hardware_accelerated, uintptr_t user_token)
