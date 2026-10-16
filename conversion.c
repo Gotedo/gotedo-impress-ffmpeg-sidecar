@@ -37,6 +37,57 @@ typedef struct {
   int supported;
 } ConversionThreadAffinity;
 
+int conversion_compute_output_dimensions(int input_width, int input_height,
+                                         int max_output_resolution,
+                                         int *output_width, int *output_height)
+{
+  if (!output_width || !output_height || input_width < 2 || input_height < 2)
+    return AVERROR(EINVAL);
+
+  int width = input_width & ~1;
+  int height = input_height & ~1;
+  *output_width = width;
+  *output_height = height;
+  if (max_output_resolution == 0)
+    return 0;
+
+  if (max_output_resolution != 720 && max_output_resolution != 1080 &&
+      max_output_resolution != 1440 && max_output_resolution != 2160)
+    return AVERROR(EINVAL);
+
+  int source_long_edge = width > height ? width : height;
+  if (source_long_edge < 3840)
+    return 0;
+
+  // Treat the selected resolution as a 16:9 bounding box. This preserves
+  // source aspect ratio while supporting portrait and non-16:9 footage.
+  int target_max_width = width >= height ? max_output_resolution * 16 / 9 : max_output_resolution;
+  int target_max_height = width >= height ? max_output_resolution : max_output_resolution * 16 / 9;
+  if (target_max_width >= width && target_max_height >= height)
+    return 0;
+
+  int target_width;
+  int target_height;
+  if ((int64_t)target_max_width * height <= (int64_t)target_max_height * width)
+  {
+    target_width = target_max_width;
+    target_height = (int)((int64_t)height * target_width / width);
+  }
+  else
+  {
+    target_height = target_max_height;
+    target_width = (int)((int64_t)width * target_height / height);
+  }
+  target_width &= ~1;
+  target_height &= ~1;
+  if (target_width < 2 || target_height < 2)
+    return AVERROR(EINVAL);
+
+  *output_width = target_width;
+  *output_height = target_height;
+  return 0;
+}
+
 void conversion_get_cpu_counts(int *logical_out, int *physical_out)
 {
   if (logical_out) *logical_out = 0;
@@ -630,6 +681,7 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                                    int video_bitrate_kbps, int audio_bitrate_kbps,
                                    const char *encoder_preset, int preserve_hdr,
                                    int allow_hardware_encoder,
+                                   int max_output_resolution,
                                    int double_pass_requested, int pass_number,
                                    const char *forced_encoder_name,
                                    const char *passlog_prefix,
@@ -719,8 +771,14 @@ static int convert_video_file_once(const char *source_path, const char *output_p
     goto fail;
 
   const AVCodec *video_codec = NULL;
-  int target_width = video_decoder->width & ~1;
-  int target_height = video_decoder->height & ~1;
+  int target_width = 0;
+  int target_height = 0;
+  ret = conversion_compute_output_dimensions(video_decoder->width,
+                                             video_decoder->height,
+                                             max_output_resolution,
+                                             &target_width, &target_height);
+  if (ret < 0)
+    goto fail;
   AVRational frame_rate = video_input_stream->avg_frame_rate.num > 0 && video_input_stream->avg_frame_rate.den > 0
                               ? video_input_stream->avg_frame_rate
                               : (AVRational){25, 1};
@@ -1110,7 +1168,8 @@ int convert_video_file(const char *source_path, const char *output_path,
                        int video_bitrate_kbps, int audio_bitrate_kbps,
                        const char *encoder_preset, int preserve_hdr,
                        int allow_hardware_encoder,
-                       int double_pass_requested, const char *passlog_prefix,
+                       int double_pass_requested, int max_output_resolution,
+                       const char *passlog_prefix,
                        volatile int *cancel_flag,
                        VideoConversionProgressCallback progress_callback,
                        uintptr_t user_token, char *encoder_name,
@@ -1125,12 +1184,21 @@ int convert_video_file(const char *source_path, const char *output_path,
   // when no permitted hardware encoder can be opened.
   if (double_pass_used)
     *double_pass_used = 0;
+  if (max_output_resolution != 0 && max_output_resolution != 720 &&
+      max_output_resolution != 1080 && max_output_resolution != 1440 &&
+      max_output_resolution != 2160)
+  {
+    conversion_set_error(err_buf, err_buf_size,
+                         "unsupported maximum output resolution",
+                         AVERROR(EINVAL));
+    return AVERROR(EINVAL);
+  }
   int pass_mode = 0;
   int pass_number = double_pass_requested ? 1 : 0;
   int ret = convert_video_file_once(source_path, output_path,
                                     video_bitrate_kbps, audio_bitrate_kbps,
                                     encoder_preset, preserve_hdr,
-                                    allow_hardware_encoder,
+                                    allow_hardware_encoder, max_output_resolution,
                                     double_pass_requested, pass_number, NULL,
                                     passlog_prefix, cancel_flag,
                                     progress_callback, user_token, encoder_name,
@@ -1170,7 +1238,7 @@ int convert_video_file(const char *source_path, const char *output_path,
   ret = convert_video_file_once(source_path, output_path,
                                 video_bitrate_kbps, audio_bitrate_kbps,
                                 encoder_preset, preserve_hdr,
-                                allow_hardware_encoder, 1, 2,
+                                allow_hardware_encoder, max_output_resolution, 1, 2,
                                 selected_encoder, passlog_prefix, cancel_flag,
                                 progress_callback, user_token, encoder_name,
                                 encoder_name_size, hardware_accelerated,

@@ -128,6 +128,17 @@ func rescaleConversionPTS(inputPTS int64, inputTBNum, inputTBDen, outputTBNum, o
 	return int64(output), int64(last)
 }
 
+func computeConversionOutputDimensions(width, height, maxResolution int) (int, int, error) {
+	outputWidth, outputHeight := C.int(0), C.int(0)
+	if result := C.conversion_compute_output_dimensions(
+		C.int(width), C.int(height), C.int(maxResolution),
+		&outputWidth, &outputHeight,
+	); result < 0 {
+		return 0, 0, fmt.Errorf("could not compute conversion output dimensions: %d", int(result))
+	}
+	return int(outputWidth), int(outputHeight), nil
+}
+
 // ChunkPayload bundles the binary fMP4 data with its extraction PTS
 type ChunkPayload struct {
 	Data []byte
@@ -1131,7 +1142,7 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	ret := C.convert_video_file(cSource, cOutput,
 		C.int(req.GetVideoBitrateKbps()), C.int(req.GetAudioBitrateKbps()),
 		cPreset, preserveHDR, allowHardwareEncoder,
-		doublePassRequested, cPasslogPrefix, cancelFlag,
+		doublePassRequested, C.int(req.GetMaxOutputResolution()), cPasslogPrefix, cancelFlag,
 		(C.VideoConversionProgressCallback)(C.sidecar_go_conversion_progress),
 		C.uintptr_t(progressHandle), &encoderNameBuffer[0], C.size_t(len(encoderNameBuffer)),
 		&hardwareAccelerated, &doublePassUsed, &errBuffer[0], C.size_t(len(errBuffer)))

@@ -299,7 +299,8 @@ int convert_video_file(const char *source_path, const char *output_path,
                        int video_bitrate_kbps, int audio_bitrate_kbps,
                        const char *encoder_preset, int preserve_hdr,
                        int allow_hardware_encoder,
-                       int double_pass_requested, const char *passlog_prefix,
+                       int double_pass_requested, int max_output_resolution,
+                       const char *passlog_prefix,
                        volatile int *cancel_flag,
                        VideoConversionProgressCallback progress_callback,
                        uintptr_t user_token, char *encoder_name,
@@ -309,6 +310,9 @@ int convert_video_file(const char *source_path, const char *output_path,
 int conversion_pin_current_thread(int core_id, void **state_out);
 void conversion_restore_thread_affinity(void *state);
 void conversion_get_cpu_counts(int *logical_out, int *physical_out);
+int conversion_compute_output_dimensions(int input_width, int input_height,
+                                         int max_output_resolution,
+                                         int *output_width, int *output_height);
 
 // Rescales decoded presentation timestamps into encoder time and guarantees
 // strictly increasing PTS for sources with duplicate frame timestamps.

@@ -302,6 +302,58 @@ func TestIntegration_ConvertVideoFallsBackToCPU(t *testing.T) {
 	}
 }
 
+func TestIntegration_Convert4KVideoScalesToSelectedResolution(t *testing.T) {
+	source := os.Getenv("GOTEDO_FFMPEG_4K_TEST_SOURCE")
+	if source == "" {
+		t.Skip("set GOTEDO_FFMPEG_4K_TEST_SOURCE to a 4K-or-higher video to run this conversion test")
+	}
+	client, _, closeServer := setupRealHardwareTestServer(t)
+	defer closeServer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	inputMetadata, err := client.GetMediaProperties(ctx, &proto.MetadataRequest{FilePath: source})
+	if err != nil {
+		t.Fatalf("could not probe 4K test source: %v", err)
+	}
+	if max(inputMetadata.GetWidth(), inputMetadata.GetHeight()) < 3840 {
+		t.Fatalf("test source is not 4K or higher: %dx%d", inputMetadata.GetWidth(), inputMetadata.GetHeight())
+	}
+
+	output := filepath.Join(t.TempDir(), "prepared-1080p.mp4")
+	request := conversionTestRequest(source, output)
+	request.MaxOutputResolution = 1080
+	stream, err := client.ConvertVideo(ctx, request)
+	if err != nil {
+		t.Fatalf("ConvertVideo RPC failed to start: %v", err)
+	}
+	completed := false
+	for {
+		update, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("4K conversion failed: %v", recvErr)
+		}
+		completed = completed || update.GetCompleted()
+	}
+	if !completed {
+		t.Fatal("4K conversion stream ended without completion")
+	}
+	outputMetadata, err := client.GetMediaProperties(ctx, &proto.MetadataRequest{FilePath: output})
+	if err != nil {
+		t.Fatalf("could not probe converted output: %v", err)
+	}
+	maxWidth, maxHeight := int32(1920), int32(1080)
+	if inputMetadata.GetHeight() > inputMetadata.GetWidth() {
+		maxWidth, maxHeight = maxHeight, maxWidth
+	}
+	if outputMetadata.GetWidth() > maxWidth || outputMetadata.GetHeight() > maxHeight {
+		t.Fatalf("output %dx%d exceeds selected 1080p bounds %dx%d", outputMetadata.GetWidth(), outputMetadata.GetHeight(), maxWidth, maxHeight)
+	}
+}
+
 func TestIntegration_ConvertHEVCHDRVideoThroughRPC(t *testing.T) {
 	if os.Getenv("FFMPEG_CONVERSION_E2E") != "1" {
 		t.Skip("set FFMPEG_CONVERSION_E2E=1 to run the full checked-in HEVC HDR conversion")

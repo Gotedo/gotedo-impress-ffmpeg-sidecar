@@ -377,17 +377,18 @@ func (x *ConversionCapacityResponse) GetPhysicalCores() int32 {
 }
 
 type VideoConversionRequest struct {
-	state              protoimpl.MessageState `protogen:"open.v1"`
-	JobId              string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	SourcePath         string                 `protobuf:"bytes,2,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
-	OutputPath         string                 `protobuf:"bytes,3,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
-	VideoBitrateKbps   int32                  `protobuf:"varint,4,opt,name=video_bitrate_kbps,json=videoBitrateKbps,proto3" json:"video_bitrate_kbps,omitempty"`
-	AudioBitrateKbps   int32                  `protobuf:"varint,5,opt,name=audio_bitrate_kbps,json=audioBitrateKbps,proto3" json:"audio_bitrate_kbps,omitempty"`
-	EncoderPreset      string                 `protobuf:"bytes,6,opt,name=encoder_preset,json=encoderPreset,proto3" json:"encoder_preset,omitempty"`
-	HdrHandling        string                 `protobuf:"bytes,7,opt,name=hdr_handling,json=hdrHandling,proto3" json:"hdr_handling,omitempty"` // "tone_map" or "preserve"
-	DoublePassEncoding bool                   `protobuf:"varint,8,opt,name=double_pass_encoding,json=doublePassEncoding,proto3" json:"double_pass_encoding,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	JobId               string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	SourcePath          string                 `protobuf:"bytes,2,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
+	OutputPath          string                 `protobuf:"bytes,3,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
+	VideoBitrateKbps    int32                  `protobuf:"varint,4,opt,name=video_bitrate_kbps,json=videoBitrateKbps,proto3" json:"video_bitrate_kbps,omitempty"`
+	AudioBitrateKbps    int32                  `protobuf:"varint,5,opt,name=audio_bitrate_kbps,json=audioBitrateKbps,proto3" json:"audio_bitrate_kbps,omitempty"`
+	EncoderPreset       string                 `protobuf:"bytes,6,opt,name=encoder_preset,json=encoderPreset,proto3" json:"encoder_preset,omitempty"`
+	HdrHandling         string                 `protobuf:"bytes,7,opt,name=hdr_handling,json=hdrHandling,proto3" json:"hdr_handling,omitempty"` // "tone_map" or "preserve"
+	DoublePassEncoding  bool                   `protobuf:"varint,8,opt,name=double_pass_encoding,json=doublePassEncoding,proto3" json:"double_pass_encoding,omitempty"`
+	MaxOutputResolution int32                  `protobuf:"varint,9,opt,name=max_output_resolution,json=maxOutputResolution,proto3" json:"max_output_resolution,omitempty"` // vertical resolution of 16:9 bounds for 4K+ sources; 0 preserves source size
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *VideoConversionRequest) Reset() {
@@ -474,6 +475,13 @@ func (x *VideoConversionRequest) GetDoublePassEncoding() bool {
 		return x.DoublePassEncoding
 	}
 	return false
+}
+
+func (x *VideoConversionRequest) GetMaxOutputResolution() int32 {
+	if x != nil {
+		return x.MaxOutputResolution
+	}
+	return 0
 }
 
 type VideoConversionProgress struct {
@@ -1948,7 +1956,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0emax_concurrent\x18\x01 \x01(\x05R\rmaxConcurrent\x12!\n" +
 	"\factive_slots\x18\x02 \x01(\x05R\vactiveSlots\x12!\n" +
 	"\flogical_cpus\x18\x03 \x01(\x05R\vlogicalCpus\x12%\n" +
-	"\x0ephysical_cores\x18\x04 \x01(\x05R\rphysicalCores\"\xc9\x02\n" +
+	"\x0ephysical_cores\x18\x04 \x01(\x05R\rphysicalCores\"\xfd\x02\n" +
 	"\x16VideoConversionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vsource_path\x18\x02 \x01(\tR\n" +
@@ -1959,7 +1967,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x12audio_bitrate_kbps\x18\x05 \x01(\x05R\x10audioBitrateKbps\x12%\n" +
 	"\x0eencoder_preset\x18\x06 \x01(\tR\rencoderPreset\x12!\n" +
 	"\fhdr_handling\x18\a \x01(\tR\vhdrHandling\x120\n" +
-	"\x14double_pass_encoding\x18\b \x01(\bR\x12doublePassEncoding\"\x8a\x02\n" +
+	"\x14double_pass_encoding\x18\b \x01(\bR\x12doublePassEncoding\x122\n" +
+	"\x15max_output_resolution\x18\t \x01(\x05R\x13maxOutputResolution\"\x8a\x02\n" +
 	"\x17VideoConversionProgress\x12\x1a\n" +
 	"\bprogress\x18\x01 \x01(\x01R\bprogress\x12\x14\n" +
 	"\x05stage\x18\x02 \x01(\tR\x05stage\x12\x1c\n" +

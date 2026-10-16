@@ -59,6 +59,7 @@ message VideoConversionRequest {
     string encoder_preset = 6;
     string hdr_handling = 7; // "tone_map" or "preserve"
     bool double_pass_encoding = 8;
+    int32 max_output_resolution = 9; // vertical resolution of 16:9 bounds for 4K+ sources; 0 preserves source size
 }
 
 message VideoConversionProgress {
