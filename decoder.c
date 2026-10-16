@@ -332,14 +332,8 @@ static int sws_coeff_id_from_colorspace(enum AVColorSpace spc)
  * Returns true when the source should be treated as HDR.
  *
  * Detection is based on transfer characteristics (PQ / HLG) or
- * BT.2020 primaries. This flag is used only to:
- *   - choose a higher-quality scaler (SWS_BICUBIC),
- *   - apply the correct colour-matrix conversion (BT.2020 → BT.709),
- *   - force the encoder to tag the output as BT.709 SDR.
- *
- * IMPORTANT: the current pipeline performs a *matrix conversion only*.
- * It does NOT perform perceptual tone-mapping of PQ/HLG content.
- * True tone-mapping requires zscale or libplacebo (see below).
+ * BT.2020 primaries. HDR input is sent through zscale + Hable tone mapping
+ * before the 8-bit H.264 encoder; SDR input stays on the swscale path.
  */
 static bool is_hdr_source(const AVCodecContext *dec)
 {
@@ -360,12 +354,134 @@ static bool is_hdr_source(const AVCodecContext *dec)
 
 /**
  * Returns 1 if the zscale filter is present in this FFmpeg build.
- * zscale is required for proper PQ/HLG tone-mapping.
- * When it is missing we fall back to the matrix-only path.
+ * zscale is required for proper PQ/HLG tone-mapping. If the complete graph
+ * is unavailable, HDR playback fails closed rather than producing washed-out
+ * matrix-only output.
  */
 static int zscale_available(void)
 {
   return avfilter_get_by_name("zscale") != NULL;
+}
+
+/* Convert one HDR frame to correctly tone-mapped BT.709 SDR. Keep the graph
+ * alive for the playback session: graph setup is deliberately not per-frame. */
+static int tone_map_hdr_frame(AVFilterGraph **graph,
+                              AVFilterContext **source,
+                              AVFilterContext **sink,
+                              AVFrame *input,
+                              AVFrame *output,
+                              AVRational time_base,
+                              int output_width,
+                              int output_height,
+                              enum AVPixelFormat output_format,
+                              uintptr_t go_token,
+                              int *reported_frame_processed)
+{
+  if (!graph || !source || !sink || !input || !output)
+    return AVERROR(EINVAL);
+  int ret = 0;
+
+  if (!*graph)
+  {
+    const AVFilter *buffer = avfilter_get_by_name("buffer");
+    const AVFilter *buffersink = avfilter_get_by_name("buffersink");
+    const char *format_name = av_get_pix_fmt_name(output_format);
+    if (!buffer || !buffersink || !zscale_available() ||
+        !avfilter_get_by_name("tonemap") || !format_name)
+      return AVERROR_FILTER_NOT_FOUND;
+
+    *graph = avfilter_graph_alloc();
+    if (!*graph)
+      return AVERROR(ENOMEM);
+
+    char args[256];
+    AVRational aspect = input->sample_aspect_ratio;
+    if (aspect.num <= 0 || aspect.den <= 0)
+      aspect = (AVRational){1, 1};
+    if (time_base.num <= 0 || time_base.den <= 0)
+      time_base = (AVRational){1, 90000};
+    snprintf(args, sizeof(args),
+             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+             input->width, input->height, input->format,
+             time_base.num, time_base.den, aspect.num, aspect.den);
+
+    ret = avfilter_graph_create_filter(source, buffer, "hdr_input", args, NULL, *graph);
+    if (ret < 0)
+      goto fail;
+    ret = avfilter_graph_create_filter(sink, buffersink, "sdr_output", NULL, NULL, *graph);
+    if (ret < 0)
+      goto fail;
+
+    /* The buffer source may not propagate per-frame HDR tags into the filter
+     * link (especially after a D3D11VA frame transfer). zscale otherwise sees
+     * an unspecified input transfer and fails with "no path between
+     * colorspaces". Declare the HDR input explicitly; infer PQ only when the
+     * stream is identified as HDR but omits its transfer characteristic. */
+    const char *transfer_in = "smpte2084";
+    if (input->color_trc == AVCOL_TRC_ARIB_STD_B67)
+      transfer_in = "arib-std-b67";
+    else if (input->color_trc == AVCOL_TRC_UNSPECIFIED)
+      LOG_WARN("C-ENC", "HDR frame has unspecified transfer; assuming PQ (SMPTE ST 2084) for tone mapping");
+
+    const char *matrix_in = input->colorspace == AVCOL_SPC_BT2020_CL ? "bt2020c" : "bt2020nc";
+    const char *range_in = input->color_range == AVCOL_RANGE_JPEG ? "full" : "limited";
+
+    char filters[768];
+    snprintf(filters, sizeof(filters),
+             "zscale=pin=bt2020:tin=%s:min=%s:rin=%s:t=linear:npl=100,format=gbrpf32le,"
+             "tonemap=tonemap=hable:desat=2,"
+             "zscale=p=bt709:t=bt709:m=bt709:r=limited:w=%d:h=%d,format=%s",
+             transfer_in, matrix_in, range_in, output_width, output_height, format_name);
+
+    AVFilterInOut *inputs = avfilter_inout_alloc();
+    AVFilterInOut *outputs = avfilter_inout_alloc();
+    if (!inputs || !outputs)
+    {
+      avfilter_inout_free(&inputs);
+      avfilter_inout_free(&outputs);
+      ret = AVERROR(ENOMEM);
+      goto fail;
+    }
+    outputs->name = av_strdup("in");
+    outputs->filter_ctx = *source;
+    outputs->pad_idx = 0;
+    outputs->next = NULL;
+    inputs->name = av_strdup("out");
+    inputs->filter_ctx = *sink;
+    inputs->pad_idx = 0;
+    inputs->next = NULL;
+    if (!inputs->name || !outputs->name)
+      ret = AVERROR(ENOMEM);
+    else
+      ret = avfilter_graph_parse_ptr(*graph, filters, &inputs, &outputs, NULL);
+    avfilter_inout_free(&inputs);
+    avfilter_inout_free(&outputs);
+    if (ret < 0)
+      goto fail;
+    ret = avfilter_graph_config(*graph, NULL);
+    if (ret < 0)
+      goto fail;
+  }
+
+  ret = av_buffersrc_add_frame_flags(*source, input, AV_BUFFERSRC_FLAG_KEEP_REF);
+  if (ret < 0)
+    return ret;
+  av_frame_unref(output);
+  ret = av_buffersink_get_frame(*sink, output);
+  if (ret < 0)
+    return ret;
+  if (reported_frame_processed && !*reported_frame_processed)
+  {
+    goHDRToneMapFrameProcessed((uintptr_t)go_token);
+    *reported_frame_processed = 1;
+  }
+  return output->height;
+
+fail:
+  avfilter_graph_free(graph);
+  *source = NULL;
+  *sink = NULL;
+  return ret;
 }
 
 /**
@@ -3622,6 +3738,10 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
   bool need_video_reencode = false;
   AVCodecContext *h264_enc_ctx = NULL;
   struct SwsContext *sws_ctx = NULL;
+  AVFilterGraph *hdr_filter_graph = NULL;
+  AVFilterContext *hdr_filter_source = NULL;
+  AVFilterContext *hdr_filter_sink = NULL;
+  int hdr_tonemap_reported_frame = 0;
   AVFrame *enc_video_frame = NULL;
   AVPacket *enc_video_pkt = NULL;
 
@@ -3750,38 +3870,33 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
         sws_flags = SWS_BICUBIC;
       }
 
-      sws_ctx = sws_getContext(
-          dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
-          init_src_fmt,
-          h264_enc_ctx->width, h264_enc_ctx->height, init_dst_fmt,
-          sws_flags, NULL, NULL, NULL);
+      if (!hdr)
+        sws_ctx = sws_getContext(
+            dec_ctx->video_dec_ctx->width, dec_ctx->video_dec_ctx->height,
+            init_src_fmt,
+            h264_enc_ctx->width, h264_enc_ctx->height, init_dst_fmt,
+            sws_flags, NULL, NULL, NULL);
 
-      if (!sws_ctx)
+      if (!hdr && !sws_ctx)
       {
         LOG_ERROR("C-MUX", "Failed to allocate sws_ctx for color conversion");
         ret = AVERROR(ENOMEM);
         goto cleanup;
       }
 
-      // Configure explicit color matrix mapping (crucial for HDR / BT.2020 -> BT.709 conversion)
-      int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
-      const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
-      const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
-      sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
+      // SDR sources use a direct matrix/scale path. HDR is routed through the
+      // linear-light tone-map graph below (never matrix-only through swscale).
+      if (!hdr)
+      {
+        int src_range = (dec_ctx->video_dec_ctx->color_range == AVCOL_RANGE_JPEG);
+        const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->video_dec_ctx->colorspace));
+        const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
+        sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
+      }
 
       if (hdr && !logged_hdr_path)
       {
-        if (zscale_available())
-        {
-          LOG_INFO("C-ENC", "HDR source detected. zscale is available in this FFmpeg build – "
-                            "matrix conversion active; true PQ/HLG tone-map can be added later via filter graph.");
-        }
-        else
-        {
-          LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
-                            "Applying BT.2020→BT.709 *matrix conversion only* (no perceptual tone-map). "
-                            "zscale/libplacebo not present in this FFmpeg build.");
-        }
+        LOG_INFO("C-ENC", "HDR source detected; the streaming path will apply zscale Hable tone mapping to BT.709 SDR.");
         logged_hdr_path = 1;
       }
 
@@ -4444,6 +4559,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             const AVPixFmtDescriptor *frame_desc = av_pix_fmt_desc_get(frame->format);
             bool is_hw_frame = (frame_desc && (frame_desc->flags & AV_PIX_FMT_FLAG_HWACCEL));
             bool is_direct_gpu_pass = (is_hw_frame &&
+                                       !is_hdr_source(dec_ctx->video_dec_ctx) &&
                                        frame->format == h264_enc_ctx->pix_fmt &&
                                        frame->width == h264_enc_ctx->width &&
                                        frame->height == h264_enc_ctx->height);
@@ -4460,7 +4576,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
             {
               if (!logged_swpath)
               {
-                LOG_INFO("C-ENC", "Software path active (HW transfer + sws_scale required)");
+                LOG_INFO("C-ENC", "Software color conversion path active (HW transfer + scaler/tone-map required)");
                 logged_swpath = 1;
               }
             }
@@ -4603,13 +4719,14 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 sws_flags = SWS_BICUBIC; /* better quality for HDR / large downscales */
               }
 
-              sws_ctx = sws_getCachedContext(
-                  sws_ctx,
-                  sw_frame->width, sw_frame->height, sw_frame->format,
-                  h264_enc_ctx->width, h264_enc_ctx->height, dst_pix_fmt,
-                  sws_flags, NULL, NULL, NULL);
+              if (!hdr)
+                sws_ctx = sws_getCachedContext(
+                    sws_ctx,
+                    sw_frame->width, sw_frame->height, sw_frame->format,
+                    h264_enc_ctx->width, h264_enc_ctx->height, dst_pix_fmt,
+                    sws_flags, NULL, NULL, NULL);
 
-              if (!sws_ctx)
+              if (!hdr && !sws_ctx)
               {
                 LOG_ERROR("C-MUX", "Failed to create a software scaler for %s -> %s",
                           av_get_pix_fmt_name(sw_frame->format),
@@ -4620,6 +4737,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                 goto cleanup;
               }
 
+              if (!hdr)
               {
                 /* Source matrix from the decoder; destination is BT.709 for
                  * 8-bit H.264. Distinct tables avoid the RGB intermediate. */
@@ -4635,34 +4753,63 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                          dst_table, dst_range,
                                          0, 1 << 16, 1 << 16);
 
-                if (hdr && !logged_hdr_path)
-                {
-                  if (zscale_available())
-                  {
-                    LOG_INFO("C-ENC", "HDR source detected. zscale is available in this FFmpeg build – "
-                                      "matrix conversion active; true PQ/HLG tone-map can be added later via filter graph.");
-                  }
-                  else
-                  {
-                    LOG_INFO("C-ENC", "HDR source detected (primaries/trc). "
-                                      "Applying BT.2020→BT.709 *matrix conversion only* (no perceptual tone-map). "
-                                      "zscale/libplacebo not present in this FFmpeg build.");
-                  }
-                  logged_hdr_path = 1;
-                }
               }
 
               // Colour conversion + encode
-              int scale_ret = sws_scale(sws_ctx,
-                                        (const uint8_t *const *)sw_frame->data, sw_frame->linesize,
-                                        0, sw_frame->height,
-                                        enc_video_frame->data, enc_video_frame->linesize);
+              int scale_ret = 0;
+              if (hdr)
+              {
+                /* Carry stream-level HDR tags into zscale if the decoder
+                 * omitted them from this individual frame. */
+                if (sw_frame->color_primaries == AVCOL_PRI_UNSPECIFIED)
+                  sw_frame->color_primaries = dec_ctx->video_dec_ctx->color_primaries;
+                if (sw_frame->color_trc == AVCOL_TRC_UNSPECIFIED)
+                  sw_frame->color_trc = dec_ctx->video_dec_ctx->color_trc;
+                if (sw_frame->colorspace == AVCOL_SPC_UNSPECIFIED)
+                  sw_frame->colorspace = dec_ctx->video_dec_ctx->colorspace;
+                if (sw_frame->color_range == AVCOL_RANGE_UNSPECIFIED)
+                  sw_frame->color_range = dec_ctx->video_dec_ctx->color_range;
+
+                AVFrame *tone_mapped = av_frame_alloc();
+                if (!tone_mapped)
+                  scale_ret = AVERROR(ENOMEM);
+                else
+                {
+                  scale_ret = tone_map_hdr_frame(&hdr_filter_graph,
+                                                 &hdr_filter_source,
+                                                 &hdr_filter_sink,
+                                                 sw_frame,
+                                                 tone_mapped,
+                                                 in_stream->time_base,
+                                                 h264_enc_ctx->width,
+                                                 h264_enc_ctx->height,
+                                                 dst_pix_fmt,
+                                                 go_token,
+                                                 &hdr_tonemap_reported_frame);
+                  if (scale_ret >= 0)
+                  {
+                    av_frame_unref(enc_video_frame);
+                    av_frame_move_ref(enc_video_frame, tone_mapped);
+                  }
+                  av_frame_free(&tone_mapped);
+                }
+              }
+              else
+              {
+                scale_ret = sws_scale(sws_ctx,
+                                      (const uint8_t *const *)sw_frame->data, sw_frame->linesize,
+                                      0, sw_frame->height,
+                                      enc_video_frame->data, enc_video_frame->linesize);
+              }
               if (scale_ret <= 0)
               {
-                LOG_ERROR("C-MUX", "Software scaling failed for current video frame");
+                if (hdr)
+                  LOG_ERROR("C-MUX", "HDR tone mapping to BT.709 SDR failed; refusing matrix-only output");
+                else
+                  LOG_ERROR("C-MUX", "Software scaling failed for current video frame");
                 if (sw_frame != frame)
                   av_frame_free(&sw_frame);
-                ret = AVERROR(EINVAL);
+                ret = scale_ret < 0 ? scale_ret : AVERROR(EINVAL);
                 goto cleanup;
               }
 
@@ -4884,6 +5031,8 @@ cleanup:
     av_freep(&resample_buf[0]); // Frees the contiguous memory block
   if (sws_ctx)
     sws_freeContext(sws_ctx);
+  if (hdr_filter_graph)
+    avfilter_graph_free(&hdr_filter_graph);
   if (h264_enc_ctx)
     avcodec_free_context(&h264_enc_ctx);
   if (aac_enc_ctx)

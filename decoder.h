@@ -16,6 +16,8 @@
 #include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <miniaudio.h>
 #include <string.h>
 #include <stdlib.h>

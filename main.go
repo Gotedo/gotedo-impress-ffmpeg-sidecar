@@ -45,6 +45,7 @@ type SessionContext struct {
 	doneOnce        sync.Once
 	CurrentPTS      float64
 	IsEOF           int32 // int32 for atomic operations
+	HDRToneMapUsed  int32 // set by C after an HDR frame exits the zscale/tonemap graph
 	Mu              sync.Mutex
 	playbackSession *PlaybackSession
 }
@@ -279,6 +280,18 @@ func goStreamWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	case <-session.Done:
 		return
 	}
+}
+
+//export goHDRToneMapFrameProcessed
+func goHDRToneMapFrameProcessed(userToken C.uintptr_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goHDRToneMapFrameProcessed: %v", r)
+		}
+	}()
+
+	session := cgo.Handle(userToken).Value().(*SessionContext)
+	atomic.StoreInt32(&session.HDRToneMapUsed, 1)
 }
 
 //export set_session_eof

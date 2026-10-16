@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -527,6 +529,67 @@ func TestIntegration_E2E_PlaybackSupportPolicyAndFirstChunk(t *testing.T) {
 				len(fragment.GetFmp4Chunk()), capabilities.GetStatus().String(),
 				capabilities.GetDecoderBackend(), capabilities.GetEncoderBackend(),
 				capabilities.GetEncoderWidth(), capabilities.GetEncoderHeight())
+			return
+		}
+	}
+}
+
+// TestIntegration_E2E_HDRZscaleToneMapping proves that real HDR transcoding
+// sends at least one decoded frame through the zscale + tonemap filter graph.
+// macOS normally uses native HEVC passthrough, so that platform does not need
+// this conversion and intentionally skips the test.
+func TestIntegration_E2E_HDRZscaleToneMapping(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS uses native HDR passthrough; HDR-to-SDR zscale conversion is not required")
+	}
+
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	metadataCtx, cancelMetadata := context.WithTimeout(context.Background(), 15*time.Second)
+	metadata, err := client.GetMediaProperties(metadataCtx, &proto.MetadataRequest{FilePath: mediaPath})
+	cancelMetadata()
+	if err != nil {
+		t.Fatalf("Could not inspect HDR test source: %v", err)
+	}
+	transfer := strings.ToLower(metadata.GetColorTransfer())
+	primaries := strings.ToLower(metadata.GetColorPrimaries())
+	colorSpace := strings.ToLower(metadata.GetColorSpace())
+	if !strings.Contains(transfer, "2084") && !strings.Contains(transfer, "b67") &&
+		!strings.Contains(primaries, "2020") && !strings.Contains(colorSpace, "2020") {
+		t.Fatalf("Test fixture is not identified as HDR (transfer=%q primaries=%q colorspace=%q)",
+			metadata.GetColorTransfer(), metadata.GetColorPrimaries(), metadata.GetColorSpace())
+	}
+
+	const targetID = "e2e-hdr-zscale-tonemap"
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelStream()
+	stream, err := client.StartStream(streamCtx, &proto.StreamRequest{
+		TargetId:         targetID,
+		FilePath:         mediaPath,
+		StreamMode:       proto.StreamMode_transcode,
+		Container:        proto.PassthroughContainerFormat_CONTAINER_FMP4,
+		ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_ALLOW_CPU,
+	})
+	if err != nil {
+		t.Fatalf("Could not start HDR transcode stream: %v", err)
+	}
+
+	var videoFragmentBytes int
+	for {
+		fragment, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("HDR transcode ended before a tone-mapped video fragment arrived: %v", recvErr)
+		}
+		videoFragmentBytes += len(fragment.GetFmp4Chunk())
+
+		session, active := getPlaybackSession(targetID)
+		if active && atomic.LoadInt32(&session.SessionCtx.HDRToneMapUsed) == 1 && videoFragmentBytes >= 4096 {
+			t.Logf("[HDR E2E] Confirmed zscale + Hable tonemap processed an HDR frame; received %d bytes of fMP4",
+				videoFragmentBytes)
 			return
 		}
 	}
