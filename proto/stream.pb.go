@@ -377,16 +377,17 @@ func (x *ConversionCapacityResponse) GetPhysicalCores() int32 {
 }
 
 type VideoConversionRequest struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	JobId            string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	SourcePath       string                 `protobuf:"bytes,2,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
-	OutputPath       string                 `protobuf:"bytes,3,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
-	VideoBitrateKbps int32                  `protobuf:"varint,4,opt,name=video_bitrate_kbps,json=videoBitrateKbps,proto3" json:"video_bitrate_kbps,omitempty"`
-	AudioBitrateKbps int32                  `protobuf:"varint,5,opt,name=audio_bitrate_kbps,json=audioBitrateKbps,proto3" json:"audio_bitrate_kbps,omitempty"`
-	EncoderPreset    string                 `protobuf:"bytes,6,opt,name=encoder_preset,json=encoderPreset,proto3" json:"encoder_preset,omitempty"`
-	HdrHandling      string                 `protobuf:"bytes,7,opt,name=hdr_handling,json=hdrHandling,proto3" json:"hdr_handling,omitempty"` // "tone_map" or "preserve"
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	JobId              string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	SourcePath         string                 `protobuf:"bytes,2,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
+	OutputPath         string                 `protobuf:"bytes,3,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
+	VideoBitrateKbps   int32                  `protobuf:"varint,4,opt,name=video_bitrate_kbps,json=videoBitrateKbps,proto3" json:"video_bitrate_kbps,omitempty"`
+	AudioBitrateKbps   int32                  `protobuf:"varint,5,opt,name=audio_bitrate_kbps,json=audioBitrateKbps,proto3" json:"audio_bitrate_kbps,omitempty"`
+	EncoderPreset      string                 `protobuf:"bytes,6,opt,name=encoder_preset,json=encoderPreset,proto3" json:"encoder_preset,omitempty"`
+	HdrHandling        string                 `protobuf:"bytes,7,opt,name=hdr_handling,json=hdrHandling,proto3" json:"hdr_handling,omitempty"` // "tone_map" or "preserve"
+	DoublePassEncoding bool                   `protobuf:"varint,8,opt,name=double_pass_encoding,json=doublePassEncoding,proto3" json:"double_pass_encoding,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *VideoConversionRequest) Reset() {
@@ -468,6 +469,13 @@ func (x *VideoConversionRequest) GetHdrHandling() string {
 	return ""
 }
 
+func (x *VideoConversionRequest) GetDoublePassEncoding() bool {
+	if x != nil {
+		return x.DoublePassEncoding
+	}
+	return false
+}
+
 type VideoConversionProgress struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Progress            float64                `protobuf:"fixed64,1,opt,name=progress,proto3" json:"progress,omitempty"` // 0..100
@@ -476,6 +484,7 @@ type VideoConversionProgress struct {
 	OutputPath          string                 `protobuf:"bytes,4,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
 	EncoderName         string                 `protobuf:"bytes,5,opt,name=encoder_name,json=encoderName,proto3" json:"encoder_name,omitempty"`
 	HardwareAccelerated bool                   `protobuf:"varint,6,opt,name=hardware_accelerated,json=hardwareAccelerated,proto3" json:"hardware_accelerated,omitempty"`
+	DoublePassUsed      bool                   `protobuf:"varint,7,opt,name=double_pass_used,json=doublePassUsed,proto3" json:"double_pass_used,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -548,6 +557,13 @@ func (x *VideoConversionProgress) GetEncoderName() string {
 func (x *VideoConversionProgress) GetHardwareAccelerated() bool {
 	if x != nil {
 		return x.HardwareAccelerated
+	}
+	return false
+}
+
+func (x *VideoConversionProgress) GetDoublePassUsed() bool {
+	if x != nil {
+		return x.DoublePassUsed
 	}
 	return false
 }
@@ -1932,7 +1948,7 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0emax_concurrent\x18\x01 \x01(\x05R\rmaxConcurrent\x12!\n" +
 	"\factive_slots\x18\x02 \x01(\x05R\vactiveSlots\x12!\n" +
 	"\flogical_cpus\x18\x03 \x01(\x05R\vlogicalCpus\x12%\n" +
-	"\x0ephysical_cores\x18\x04 \x01(\x05R\rphysicalCores\"\x97\x02\n" +
+	"\x0ephysical_cores\x18\x04 \x01(\x05R\rphysicalCores\"\xc9\x02\n" +
 	"\x16VideoConversionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vsource_path\x18\x02 \x01(\tR\n" +
@@ -1942,7 +1958,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x12video_bitrate_kbps\x18\x04 \x01(\x05R\x10videoBitrateKbps\x12,\n" +
 	"\x12audio_bitrate_kbps\x18\x05 \x01(\x05R\x10audioBitrateKbps\x12%\n" +
 	"\x0eencoder_preset\x18\x06 \x01(\tR\rencoderPreset\x12!\n" +
-	"\fhdr_handling\x18\a \x01(\tR\vhdrHandling\"\xe0\x01\n" +
+	"\fhdr_handling\x18\a \x01(\tR\vhdrHandling\x120\n" +
+	"\x14double_pass_encoding\x18\b \x01(\bR\x12doublePassEncoding\"\x8a\x02\n" +
 	"\x17VideoConversionProgress\x12\x1a\n" +
 	"\bprogress\x18\x01 \x01(\x01R\bprogress\x12\x14\n" +
 	"\x05stage\x18\x02 \x01(\tR\x05stage\x12\x1c\n" +
@@ -1950,7 +1967,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\voutput_path\x18\x04 \x01(\tR\n" +
 	"outputPath\x12!\n" +
 	"\fencoder_name\x18\x05 \x01(\tR\vencoderName\x121\n" +
-	"\x14hardware_accelerated\x18\x06 \x01(\bR\x13hardwareAccelerated\"\xaf\x02\n" +
+	"\x14hardware_accelerated\x18\x06 \x01(\bR\x13hardwareAccelerated\x12(\n" +
+	"\x10double_pass_used\x18\a \x01(\bR\x0edoublePassUsed\"\xaf\x02\n" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +

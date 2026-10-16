@@ -58,6 +58,7 @@ message VideoConversionRequest {
     int32 audio_bitrate_kbps = 5;
     string encoder_preset = 6;
     string hdr_handling = 7; // "tone_map" or "preserve"
+    bool double_pass_encoding = 8;
 }
 
 message VideoConversionProgress {
@@ -67,6 +68,7 @@ message VideoConversionProgress {
     string output_path = 4;
     string encoder_name = 5;
     bool hardware_accelerated = 6;
+    bool double_pass_used = 7;
 }
 
 enum PassthroughContainerFormat {

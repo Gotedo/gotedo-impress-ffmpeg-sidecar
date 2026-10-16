@@ -393,6 +393,14 @@ static int conversion_encoder_is_hardware(const char *name)
   return name && strcmp(name, "libx264") != 0;
 }
 
+static double conversion_progress_for_pass(double progress, int double_pass_mode,
+                                           int pass_number)
+{
+  if (double_pass_mode != 1 && pass_number != 2)
+    return progress;
+  return pass_number == 2 ? 50.0 + progress * 0.5 : progress * 0.5;
+}
+
 static const char *conversion_encoder_candidates[] = {
 #ifdef _WIN32
     "h264_nvenc", "h264_amf", "h264_qsv", "h264_mf", "libx264", NULL
@@ -433,14 +441,22 @@ static int conversion_open_h264_encoder(AVCodecContext **out_encoder,
                                         const char *encoder_preset,
                                         int preserve_hdr,
                                         int allow_hardware_encoder,
+                                        int double_pass_requested,
+                                        int pass_number,
+                                        const char *forced_encoder_name,
+                                        const char *passlog_prefix,
                                         char *encoder_name,
                                         size_t encoder_name_size,
-                                        int *hardware_accelerated)
+                                        int *hardware_accelerated,
+                                        int *double_pass_mode)
 {
   int last_error = AVERROR_ENCODER_NOT_FOUND;
   for (int i = 0; conversion_encoder_candidates[i] != NULL; i++)
   {
     const char *candidate = conversion_encoder_candidates[i];
+    if (forced_encoder_name && forced_encoder_name[0] &&
+        strcmp(candidate, forced_encoder_name) != 0)
+      continue;
     if (!allow_hardware_encoder && conversion_encoder_is_hardware(candidate))
       continue;
     const AVCodec *codec = avcodec_find_encoder_by_name(candidate);
@@ -450,71 +466,101 @@ static int conversion_open_h264_encoder(AVCodecContext **out_encoder,
     if (pixel_format == AV_PIX_FMT_NONE)
       continue;
 
-    AVCodecContext *encoder = avcodec_alloc_context3(codec);
-    if (!encoder)
-      return AVERROR(ENOMEM);
-    encoder->width = width;
-    encoder->height = height;
-    encoder->pix_fmt = pixel_format;
-    encoder->time_base = time_base;
-    encoder->framerate = framerate;
-    encoder->bit_rate = (int64_t)video_bitrate_kbps * 1000;
-    encoder->rc_max_rate = encoder->bit_rate;
-    encoder->rc_buffer_size = video_bitrate_kbps * 2000;
-    encoder->gop_size = 50;
-    encoder->color_range = preserve_hdr ? AVCOL_RANGE_UNSPECIFIED : AVCOL_RANGE_MPEG;
-    encoder->color_primaries = preserve_hdr ? AVCOL_PRI_UNSPECIFIED : AVCOL_PRI_BT709;
-    encoder->color_trc = preserve_hdr ? AVCOL_TRC_UNSPECIFIED : AVCOL_TRC_BT709;
-    encoder->colorspace = preserve_hdr ? AVCOL_SPC_UNSPECIFIED : AVCOL_SPC_BT709;
-    encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-
-    if (encoder->priv_data)
+    for (int attempt = 0; attempt < 2; attempt++)
     {
-      if (strcmp(candidate, "libx264") == 0)
-      {
-        av_opt_set(encoder->priv_data, "preset",
-                   encoder_preset && encoder_preset[0] ? encoder_preset : "fast", 0);
-        av_opt_set(encoder->priv_data, "profile", preserve_hdr ? "high10" : "high", 0);
-      }
-      else if (strcmp(candidate, "h264_nvenc") == 0)
-      {
-        int preset_index = 4;
-        const char *presets[] = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"};
-        for (int p = 0; p < 9; p++)
-          if (encoder_preset && strcmp(encoder_preset, presets[p]) == 0)
-            preset_index = 1 + (p * 6 / 8);
-        char preset[4];
-        snprintf(preset, sizeof(preset), "p%d", preset_index);
-        av_opt_set(encoder->priv_data, "preset", preset, 0);
-        av_opt_set(encoder->priv_data, "rc", "vbr", 0);
-      }
-      else if (strcmp(candidate, "h264_amf") == 0)
-      {
-        av_opt_set(encoder->priv_data, "quality",
-                   encoder_preset && (strcmp(encoder_preset, "slow") == 0 || strcmp(encoder_preset, "veryslow") == 0) ? "quality" : "speed", 0);
-      }
-      else if (strcmp(candidate, "h264_videotoolbox") == 0)
-      {
-        av_opt_set(encoder->priv_data, "realtime", "0", 0);
-        av_opt_set(encoder->priv_data, "allow_sw", "0", 0);
-      }
-    }
-    if (strcmp(candidate, "h264_qsv") == 0 && encoder->priv_data)
-      av_opt_set(encoder->priv_data, "preset", "medium", 0);
+      AVCodecContext *encoder = avcodec_alloc_context3(codec);
+      if (!encoder)
+        return AVERROR(ENOMEM);
+      encoder->width = width;
+      encoder->height = height;
+      encoder->pix_fmt = pixel_format;
+      encoder->time_base = time_base;
+      encoder->framerate = framerate;
+      encoder->bit_rate = (int64_t)video_bitrate_kbps * 1000;
+      encoder->rc_max_rate = encoder->bit_rate;
+      encoder->rc_buffer_size = video_bitrate_kbps * 2000;
+      encoder->gop_size = 50;
+      encoder->color_range = preserve_hdr ? AVCOL_RANGE_UNSPECIFIED : AVCOL_RANGE_MPEG;
+      encoder->color_primaries = preserve_hdr ? AVCOL_PRI_UNSPECIFIED : AVCOL_PRI_BT709;
+      encoder->color_trc = preserve_hdr ? AVCOL_TRC_UNSPECIFIED : AVCOL_TRC_BT709;
+      encoder->colorspace = preserve_hdr ? AVCOL_SPC_UNSPECIFIED : AVCOL_SPC_BT709;
+      encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    int ret = avcodec_open2(encoder, codec, NULL);
-    if (ret >= 0)
-    {
-      *out_encoder = encoder;
-      *out_codec = codec;
-      if (encoder_name && encoder_name_size)
-        snprintf(encoder_name, encoder_name_size, "%s", candidate);
-      if (hardware_accelerated)
-        *hardware_accelerated = conversion_encoder_is_hardware(candidate);
-      return 0;
+      if (encoder->priv_data)
+      {
+        if (strcmp(candidate, "libx264") == 0)
+        {
+          av_opt_set(encoder->priv_data, "preset",
+                     encoder_preset && encoder_preset[0] ? encoder_preset : "fast", 0);
+          av_opt_set(encoder->priv_data, "profile", preserve_hdr ? "high10" : "high", 0);
+        }
+        else if (strcmp(candidate, "h264_nvenc") == 0)
+        {
+          int preset_index = 4;
+          const char *presets[] = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"};
+          for (int p = 0; p < 9; p++)
+            if (encoder_preset && strcmp(encoder_preset, presets[p]) == 0)
+              preset_index = 1 + (p * 6 / 8);
+          char preset[4];
+          snprintf(preset, sizeof(preset), "p%d", preset_index);
+          av_opt_set(encoder->priv_data, "preset", preset, 0);
+          av_opt_set(encoder->priv_data, "rc", "vbr", 0);
+        }
+        else if (strcmp(candidate, "h264_amf") == 0)
+        {
+          av_opt_set(encoder->priv_data, "quality",
+                     encoder_preset && (strcmp(encoder_preset, "slow") == 0 || strcmp(encoder_preset, "veryslow") == 0) ? "quality" : "speed", 0);
+        }
+        else if (strcmp(candidate, "h264_videotoolbox") == 0)
+        {
+          av_opt_set(encoder->priv_data, "realtime", "0", 0);
+          av_opt_set(encoder->priv_data, "allow_sw", "0", 0);
+        }
+      }
+      if (strcmp(candidate, "h264_qsv") == 0 && encoder->priv_data)
+        av_opt_set(encoder->priv_data, "preset", "medium", 0);
+
+      int configured_double_pass_mode = 0;
+      if (double_pass_requested && attempt == 0 && encoder->priv_data)
+      {
+        if (strcmp(candidate, "libx264") == 0 && passlog_prefix && passlog_prefix[0])
+        {
+          if (av_opt_set(encoder->priv_data, "passlogfile", passlog_prefix, 0) >= 0)
+          {
+            encoder->flags |= pass_number == 2 ? AV_CODEC_FLAG_PASS2 : AV_CODEC_FLAG_PASS1;
+            configured_double_pass_mode = 1; // libx264's file-backed two-pass rate control.
+          }
+        }
+        else if (strcmp(candidate, "h264_nvenc") == 0 && pass_number != 2 &&
+                 av_opt_set(encoder->priv_data, "multipass", "fullres", 0) >= 0)
+        {
+          configured_double_pass_mode = 2; // NVENC performs both passes internally.
+        }
+      }
+
+      int ret = avcodec_open2(encoder, codec, NULL);
+      if (ret >= 0)
+      {
+        *out_encoder = encoder;
+        *out_codec = codec;
+        if (encoder_name && encoder_name_size)
+          snprintf(encoder_name, encoder_name_size, "%s", candidate);
+        if (hardware_accelerated)
+          *hardware_accelerated = conversion_encoder_is_hardware(candidate);
+        if (double_pass_mode)
+          *double_pass_mode = configured_double_pass_mode;
+        return 0;
+      }
+      last_error = ret;
+      avcodec_free_context(&encoder);
+
+      // Some NVENC drivers expose the multipass option but reject it for the
+      // active device/rate-control combination. Retry the same GPU encoder in
+      // single-pass mode before considering another encoder.
+      if (configured_double_pass_mode != 0 && attempt == 0)
+        continue;
+      break;
     }
-    last_error = ret;
-    avcodec_free_context(&encoder);
   }
   return last_error;
 }
@@ -584,10 +630,14 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                                    int video_bitrate_kbps, int audio_bitrate_kbps,
                                    const char *encoder_preset, int preserve_hdr,
                                    int allow_hardware_encoder,
+                                   int double_pass_requested, int pass_number,
+                                   const char *forced_encoder_name,
+                                   const char *passlog_prefix,
                                    volatile int *cancel_flag,
                                    VideoConversionProgressCallback progress_callback,
                                    uintptr_t user_token, char *encoder_name,
                                    size_t encoder_name_size, int *hardware_accelerated,
+                                   int *double_pass_mode,
                                    char *err_buf, size_t err_buf_size)
 {
   int ret = 0;
@@ -618,6 +668,8 @@ static int convert_video_file_once(const char *source_path, const char *output_p
     encoder_name[0] = '\0';
   if (hardware_accelerated)
     *hardware_accelerated = 0;
+  if (double_pass_mode)
+    *double_pass_mode = 0;
   if (!source_path || !source_path[0] || !output_path || !output_path[0])
     return AVERROR(EINVAL);
   if (video_bitrate_kbps < 100 || video_bitrate_kbps > 100000 ||
@@ -683,8 +735,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                                      frame_time_base, frame_rate,
                                      video_bitrate_kbps, encoder_preset,
                                      preserve_hdr, allow_hardware_encoder,
+                                     double_pass_requested, pass_number,
+                                     forced_encoder_name, passlog_prefix,
                                      encoder_name,
-                                     encoder_name_size, hardware_accelerated);
+                                     encoder_name_size, hardware_accelerated,
+                                     double_pass_mode);
   if (ret < 0)
     goto fail;
   ret = avformat_alloc_output_context2(&output, NULL, "mp4", output_path);
@@ -819,7 +874,9 @@ static int convert_video_file_once(const char *source_path, const char *output_p
       goto fail;
     }
   }
-  if (progress_callback && progress_callback(0.0, encoder_name,
+  if (progress_callback && progress_callback(conversion_progress_for_pass(
+                                                 0.0, double_pass_mode ? *double_pass_mode : 0,
+                                                 pass_number), encoder_name,
                                              hardware_accelerated ? *hardware_accelerated : 0,
                                              user_token) < 0)
   {
@@ -884,7 +941,9 @@ static int convert_video_file_once(const char *source_path, const char *output_p
           double percent = elapsed * 100.0 / duration_seconds;
           if (percent > 99.0)
             percent = 99.0;
-          if (progress_callback && progress_callback(percent, encoder_name,
+          if (progress_callback && progress_callback(conversion_progress_for_pass(
+                                                     percent, double_pass_mode ? *double_pass_mode : 0,
+                                                     pass_number), encoder_name,
                                                      hardware_accelerated ? *hardware_accelerated : 0,
                                                      user_token) < 0)
           {
@@ -1008,7 +1067,9 @@ static int convert_video_file_once(const char *source_path, const char *output_p
   ret = av_write_trailer(output);
   if (ret < 0)
     goto fail;
-  if (progress_callback && progress_callback(100.0, encoder_name,
+  if (progress_callback && progress_callback(conversion_progress_for_pass(
+                                                 100.0, double_pass_mode ? *double_pass_mode : 0,
+                                                 pass_number), encoder_name,
                                              hardware_accelerated ? *hardware_accelerated : 0,
                                              user_token) < 0)
   {
@@ -1049,10 +1110,12 @@ int convert_video_file(const char *source_path, const char *output_path,
                        int video_bitrate_kbps, int audio_bitrate_kbps,
                        const char *encoder_preset, int preserve_hdr,
                        int allow_hardware_encoder,
+                       int double_pass_requested, const char *passlog_prefix,
                        volatile int *cancel_flag,
                        VideoConversionProgressCallback progress_callback,
                        uintptr_t user_token, char *encoder_name,
                        size_t encoder_name_size, int *hardware_accelerated,
+                       int *double_pass_used,
                        char *err_buf, size_t err_buf_size)
 {
   // Keep the sidecar's selected hardware encoder for the complete queue
@@ -1060,11 +1123,59 @@ int convert_video_file(const char *source_path, const char *output_path,
   // can retry from the beginning and let the sidecar select hardware again.
   // Software encoding remains available through conversion_open_h264_encoder
   // when no permitted hardware encoder can be opened.
-  return convert_video_file_once(source_path, output_path,
-                                 video_bitrate_kbps, audio_bitrate_kbps,
-                                 encoder_preset, preserve_hdr,
-                                 allow_hardware_encoder, cancel_flag,
-                                 progress_callback, user_token, encoder_name,
-                                 encoder_name_size, hardware_accelerated,
-                                 err_buf, err_buf_size);
+  if (double_pass_used)
+    *double_pass_used = 0;
+  int pass_mode = 0;
+  int pass_number = double_pass_requested ? 1 : 0;
+  int ret = convert_video_file_once(source_path, output_path,
+                                    video_bitrate_kbps, audio_bitrate_kbps,
+                                    encoder_preset, preserve_hdr,
+                                    allow_hardware_encoder,
+                                    double_pass_requested, pass_number, NULL,
+                                    passlog_prefix, cancel_flag,
+                                    progress_callback, user_token, encoder_name,
+                                    encoder_name_size, hardware_accelerated,
+                                    &pass_mode, err_buf, err_buf_size);
+  if (ret < 0)
+    return ret;
+
+  if (pass_mode == 2)
+  {
+    if (double_pass_used)
+      *double_pass_used = 1;
+    return 0;
+  }
+  if (pass_mode != 1)
+    return 0;
+
+  char selected_encoder[64] = {0};
+  if (encoder_name && encoder_name_size)
+    snprintf(selected_encoder, sizeof(selected_encoder), "%s", encoder_name);
+  if (!selected_encoder[0])
+  {
+    conversion_set_error(err_buf, err_buf_size,
+                         "two-pass encoder selection did not return an encoder name",
+                         AVERROR_ENCODER_NOT_FOUND);
+    return AVERROR_ENCODER_NOT_FOUND;
+  }
+  if (remove(output_path) != 0)
+  {
+    int remove_error = AVERROR(errno);
+    conversion_set_error(err_buf, err_buf_size,
+                         "could not reset output between encoding passes", remove_error);
+    return remove_error;
+  }
+
+  int second_pass_mode = 0;
+  ret = convert_video_file_once(source_path, output_path,
+                                video_bitrate_kbps, audio_bitrate_kbps,
+                                encoder_preset, preserve_hdr,
+                                allow_hardware_encoder, 1, 2,
+                                selected_encoder, passlog_prefix, cancel_flag,
+                                progress_callback, user_token, encoder_name,
+                                encoder_name_size, hardware_accelerated,
+                                &second_pass_mode, err_buf, err_buf_size);
+  if (ret == 0 && double_pass_used)
+    *double_pass_used = second_pass_mode == 1;
+  return ret;
 }

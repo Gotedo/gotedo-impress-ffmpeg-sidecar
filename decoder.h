@@ -299,10 +299,12 @@ int convert_video_file(const char *source_path, const char *output_path,
                        int video_bitrate_kbps, int audio_bitrate_kbps,
                        const char *encoder_preset, int preserve_hdr,
                        int allow_hardware_encoder,
+                       int double_pass_requested, const char *passlog_prefix,
                        volatile int *cancel_flag,
                        VideoConversionProgressCallback progress_callback,
                        uintptr_t user_token, char *encoder_name,
                        size_t encoder_name_size, int *hardware_accelerated,
+                       int *double_pass_used,
                        char *err_buf, size_t err_buf_size);
 int conversion_pin_current_thread(int core_id, void **state_out);
 void conversion_restore_thread_affinity(void *state);

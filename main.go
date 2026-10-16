@@ -1096,9 +1096,18 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	cSource := C.CString(sourcePath)
 	cOutput := C.CString(outputPath)
 	cPreset := C.CString(req.GetEncoderPreset())
+	passlogPrefix := outputPath + ".passlog"
+	cPasslogPrefix := C.CString(passlogPrefix)
+	defer func() {
+		matches, _ := filepath.Glob(passlogPrefix + "*")
+		for _, match := range matches {
+			_ = os.Remove(match)
+		}
+	}()
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cOutput))
 	defer C.free(unsafe.Pointer(cPreset))
+	defer C.free(unsafe.Pointer(cPasslogPrefix))
 	errBuffer := make([]C.char, 1024)
 	encoderNameBuffer := make([]C.char, 64)
 	hardwareAccelerated := C.int(0)
@@ -1110,16 +1119,22 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	if os.Getenv("GOTEDO_TEST_MODE") == "1" && os.Getenv("GOTEDO_FFMPEG_FORCE_CPU_ENCODER") == "1" {
 		allowHardwareEncoder = 0
 	}
+	doublePassRequested := C.int(0)
+	if req.GetDoublePassEncoding() {
+		doublePassRequested = 1
+	}
+	doublePassUsed := C.int(0)
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	affinityState, _ := pinConversionThread(core)
 	defer restoreConversionThreadAffinity(affinityState)
 	ret := C.convert_video_file(cSource, cOutput,
 		C.int(req.GetVideoBitrateKbps()), C.int(req.GetAudioBitrateKbps()),
-		cPreset, preserveHDR, allowHardwareEncoder, cancelFlag,
+		cPreset, preserveHDR, allowHardwareEncoder,
+		doublePassRequested, cPasslogPrefix, cancelFlag,
 		(C.VideoConversionProgressCallback)(C.sidecar_go_conversion_progress),
 		C.uintptr_t(progressHandle), &encoderNameBuffer[0], C.size_t(len(encoderNameBuffer)),
-		&hardwareAccelerated, &errBuffer[0], C.size_t(len(errBuffer)))
+		&hardwareAccelerated, &doublePassUsed, &errBuffer[0], C.size_t(len(errBuffer)))
 	if ret < 0 {
 		if stream.Context().Err() != nil {
 			return status.FromContextError(stream.Context().Err()).Err()
@@ -1132,6 +1147,7 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	if err := stream.Send(&proto.VideoConversionProgress{
 		Progress: 100, Stage: "completed", Completed: true, OutputPath: outputPath,
 		EncoderName: C.GoString(&encoderNameBuffer[0]), HardwareAccelerated: hardwareAccelerated != 0,
+		DoublePassUsed: doublePassUsed != 0,
 	}); err != nil {
 		return err
 	}

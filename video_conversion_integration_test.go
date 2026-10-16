@@ -268,11 +268,14 @@ func TestIntegration_ConvertVideoFallsBackToCPU(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "prepared-cpu.mp4")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	stream, err := client.ConvertVideo(ctx, conversionTestRequest(source, output))
+	request := conversionTestRequest(source, output)
+	request.DoublePassEncoding = true
+	stream, err := client.ConvertVideo(ctx, request)
 	if err != nil {
 		t.Fatalf("ConvertVideo RPC failed to start: %v", err)
 	}
 	completed := false
+	doublePassUsed := false
 	encoderName := ""
 	hardwareAccelerated := true
 	for {
@@ -288,10 +291,14 @@ func TestIntegration_ConvertVideoFallsBackToCPU(t *testing.T) {
 			hardwareAccelerated = update.GetHardwareAccelerated()
 		}
 		completed = completed || update.GetCompleted()
+		doublePassUsed = doublePassUsed || update.GetDoublePassUsed()
 	}
-	t.Logf("conversion encoder=%s hardware_accelerated=%t", encoderName, hardwareAccelerated)
+	t.Logf("conversion encoder=%s hardware_accelerated=%t double_pass_used=%t", encoderName, hardwareAccelerated, doublePassUsed)
 	if !completed || encoderName != "libx264" || hardwareAccelerated {
 		t.Fatalf("expected completed CPU x264 conversion, got completed=%t encoder=%q hardware=%t", completed, encoderName, hardwareAccelerated)
+	}
+	if !doublePassUsed {
+		t.Fatal("expected libx264 to use two-pass encoding when requested")
 	}
 }
 
