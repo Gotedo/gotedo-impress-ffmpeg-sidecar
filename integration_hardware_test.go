@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"log"
 	"net"
@@ -11,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,6 +191,68 @@ func findFFprobe(t *testing.T) string {
 	}
 	t.Skip("ffprobe is required for fMP4 audio integration verification")
 	return ""
+}
+
+// TestIntegration_WindowsReleaseFFmpegCapabilityContract is the runtime half
+// of Dockerfile's config.h assertions. It runs against the FFmpeg executable
+// distributed with the Windows static libraries, so a release build cannot
+// accidentally omit the filters/codecs that native development exercised.
+func TestIntegration_WindowsReleaseFFmpegCapabilityContract(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows release FFmpeg capability contract")
+	}
+
+	candidates := []string{
+		os.Getenv("FFMPEG_BIN"),
+		filepath.Join("..", "..", "libs", "ffmpeg", "windows", "amd64", "bin", "ffmpeg.exe"),
+	}
+	if executable, err := exec.LookPath("ffmpeg"); err == nil {
+		candidates = append(candidates, executable)
+	}
+
+	var ffmpeg string
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			ffmpeg = candidate
+			break
+		}
+	}
+	if ffmpeg == "" {
+		t.Fatal("FFmpeg executable is required to validate the Windows release capability contract")
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command(ffmpeg, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("FFmpeg capability command %v failed: %v\n%s", args, err, output)
+		}
+		return strings.ToLower(string(output))
+	}
+
+	filters := run("-hide_banner", "-filters")
+	for _, filter := range []string{"zscale", "tonemap", "vpp_qsv", "scale_qsv"} {
+		if !strings.Contains(filters, filter) {
+			t.Fatalf("release FFmpeg is missing required Windows HDR/GPU filter %q", filter)
+		}
+	}
+
+	encoders := run("-hide_banner", "-encoders")
+	for _, encoder := range []string{"h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv"} {
+		if !strings.Contains(encoders, encoder) {
+			t.Fatalf("release FFmpeg is missing required Windows GPU encoder %q", encoder)
+		}
+	}
+
+	decoders := run("-hide_banner", "-decoders")
+	for _, decoder := range []string{"h264_qsv", "hevc_qsv"} {
+		if !strings.Contains(decoders, decoder) {
+			t.Fatalf("release FFmpeg is missing required Windows QSV decoder %q", decoder)
+		}
+	}
 }
 
 // -------------------------------------------------------------------------
@@ -532,6 +598,77 @@ func TestIntegration_E2E_PlaybackSupportPolicyAndFirstChunk(t *testing.T) {
 	}
 }
 
+// TestIntegration_E2E_HDRZscaleToneMapping proves that real HDR transcoding
+// sends at least one decoded frame through the zscale + tonemap filter graph.
+// macOS normally uses native HEVC passthrough, so that platform does not need
+// this conversion and intentionally skips the test.
+func TestIntegration_E2E_HDRZscaleToneMapping(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS uses native HDR passthrough; HDR-to-SDR zscale conversion is not required")
+	}
+
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	metadataCtx, cancelMetadata := context.WithTimeout(context.Background(), 15*time.Second)
+	metadata, err := client.GetMediaProperties(metadataCtx, &proto.MetadataRequest{FilePath: mediaPath})
+	cancelMetadata()
+	if err != nil {
+		t.Fatalf("Could not inspect HDR test source: %v", err)
+	}
+	transfer := strings.ToLower(metadata.GetColorTransfer())
+	primaries := strings.ToLower(metadata.GetColorPrimaries())
+	colorSpace := strings.ToLower(metadata.GetColorSpace())
+	if !strings.Contains(transfer, "2084") && !strings.Contains(transfer, "b67") &&
+		!strings.Contains(primaries, "2020") && !strings.Contains(colorSpace, "2020") {
+		t.Fatalf("Test fixture is not identified as HDR (transfer=%q primaries=%q colorspace=%q)",
+			metadata.GetColorTransfer(), metadata.GetColorPrimaries(), metadata.GetColorSpace())
+	}
+
+	const targetID = "e2e-hdr-zscale-tonemap"
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelStream()
+	stream, err := client.StartStream(streamCtx, &proto.StreamRequest{
+		TargetId:         targetID,
+		FilePath:         mediaPath,
+		StreamMode:       proto.StreamMode_transcode,
+		Container:        proto.PassthroughContainerFormat_CONTAINER_FMP4,
+		ProcessingPolicy: proto.ProcessingPolicy_PROCESSING_ALLOW_CPU,
+	})
+	if err != nil {
+		t.Fatalf("Could not start HDR transcode stream: %v", err)
+	}
+
+	// A single frame can pass the graph even when a later decoded D3D11VA
+	// transfer changes its colour metadata. Require two seconds of emitted
+	// media as well as a substantial payload, which proves the configured
+	// zscale graph remains usable beyond its initial frame.
+	var videoFragmentBytes int
+	const minimumToneMappedMediaSeconds = 2.0
+	for {
+		fragment, recvErr := stream.Recv()
+		if recvErr != nil {
+			t.Fatalf("HDR transcode ended before a tone-mapped video fragment arrived: %v", recvErr)
+		}
+		videoFragmentBytes += len(fragment.GetFmp4Chunk())
+
+		session, active := getPlaybackSession(targetID)
+		if active && atomic.LoadInt32(&session.SessionCtx.HDRToneMapUsed) == 1 && videoFragmentBytes >= 32*1024 {
+			session.SessionCtx.Mu.Lock()
+			mediaPTS := session.SessionCtx.CurrentPTS
+			session.SessionCtx.Mu.Unlock()
+			if mediaPTS >= minimumToneMappedMediaSeconds {
+				t.Logf("[HDR E2E] Confirmed sustained zscale + Hable tone mapping through %.2fs of media; received %d bytes of fMP4",
+					mediaPTS, videoFragmentBytes)
+				return
+			}
+		}
+	}
+}
+
 // TestIntegration_E2E_TranscodeCarriesAACPackets verifies the browser-facing
 // contract, not merely the source metadata: the emitted fMP4 must contain an
 // AAC stream and actual AAC access units after H.264 transcoding starts.
@@ -655,6 +792,52 @@ func TestIntegration_VideoScreenshotExtractionAndDiskWrite(t *testing.T) {
 	}
 
 	t.Logf("[SCREENSHOT SUCCESS] Thumbnail saved for visual inspection! Find it here:\n👉 %s", outputPath)
+}
+
+// HDR screenshots are JPEG/SDR by API contract, but must pass through the
+// same HDR tone-map as playback and retain the decoded source resolution.
+func TestIntegration_HDRScreenshotToneMapsAtSourceResolution(t *testing.T) {
+	client, _, cleanup := setupRealHardwareTestServer(t)
+	defer cleanup()
+
+	mediaPath, deleteMedia := generateExodusHDRTestMedia(t)
+	defer deleteMedia()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	metadata, err := client.GetMediaProperties(ctx, &proto.MetadataRequest{FilePath: mediaPath})
+	if err != nil {
+		t.Fatalf("could not inspect HDR screenshot fixture: %v", err)
+	}
+	transfer := strings.ToLower(metadata.GetColorTransfer())
+	primaries := strings.ToLower(metadata.GetColorPrimaries())
+	colorSpace := strings.ToLower(metadata.GetColorSpace())
+	if !strings.Contains(transfer, "2084") && !strings.Contains(transfer, "b67") &&
+		!strings.Contains(primaries, "2020") && !strings.Contains(colorSpace, "2020") {
+		t.Fatalf("screenshot fixture is not identified as HDR (transfer=%q primaries=%q colorspace=%q)",
+			metadata.GetColorTransfer(), metadata.GetColorPrimaries(), metadata.GetColorSpace())
+	}
+	resp, err := client.GetVideoScreenshot(ctx, &proto.ScreenshotRequest{
+		FilePath: mediaPath,
+		// Exercise the default thumbnail path. The sidecar must move this into
+		// the stream and decode through the effective timestamp rather than
+		// returning the first keyframe at the timeline origin.
+		TimeMs: 0,
+	})
+	if err != nil {
+		t.Fatalf("HDR screenshot extraction failed: %v", err)
+	}
+	if resp.GetMimeType() != "image/jpeg" {
+		t.Fatalf("expected SDR JPEG screenshot, got MIME type %q", resp.GetMimeType())
+	}
+	config, err := jpeg.DecodeConfig(bytes.NewReader(resp.GetImageData()))
+	if err != nil {
+		t.Fatalf("HDR screenshot is not a valid JPEG: %v", err)
+	}
+	if config.Width != 3840 || config.Height != 2160 {
+		t.Fatalf("HDR screenshot resolution changed: got %dx%d, want source 3840x2160",
+			config.Width, config.Height)
+	}
 }
 
 // -------------------------------------------------------------------------

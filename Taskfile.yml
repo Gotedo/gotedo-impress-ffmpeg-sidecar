@@ -6,6 +6,10 @@ vars:
   ARCH: '{{.ARCH | default ARCH}}'
   DEFAULT_FFMPEG_SRC_BASE: '{{.FFMPEG_SRC_BASE | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
   IS_TEST: '{{.IS_TEST}}'
+  # Must match Dockerfile's LLVM_MINGW_VERSION. Windows static archives carry
+  # C++/UCRT ABI assumptions from this compiler, so accepting an arbitrary
+  # system MinGW makes native results diverge from production releases.
+  LLVM_MINGW_VERSION: '20260616'
   # Evaluates to empty on Windows, skipping the proxy entirely
   APT_PROXY: '{{if eq OS "windows"}}{{else}}http://host.docker.internal:3142{{end}}'
 
@@ -160,12 +164,13 @@ tasks:
           CXX="{{.WINDOWS_MINGW_BIN}}/g++.exe" \
           PATH="{{.WINDOWS_MINGW_BIN}};$PATH" \
           {{end}}
+          GOCACHE="{{.TASKFILE_DIR}}/build_cache/go_build_cache/{{.GOOS}}/{{.GOARCH}}" \
           CGO_ENABLED=1 \
           CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include {{if eq .RELEASE "true"}}-DPRODUCTION{{end}}" \
           CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
           GOOS={{.GOOS}} \
           GOARCH={{.GOARCH}} \
-          go build {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
+          go build -buildvcs=false {{if eq .GOOS "windows"}}-ldflags="-H=windowsgui"{{end}} -o '{{.OUTFILE}}' "{{.TASKFILE_DIR}}"
 
           {{if eq .GOOS "darwin"}}
           echo ">>> Patching compiled binary dyld paths for macOS..."
@@ -179,9 +184,16 @@ tasks:
       OUT_DIR: '{{if .OUT_DIR}}{{.OUT_DIR}}{{else}}{{.DEFAULT_OUT_DIR}}{{end}}'
       GOOS: '{{.GOOS}}'
       GOARCH: '{{.GOARCH}}'
-      FFMPEG_SRC_BASE: '{{.FFMPEG_LIB_DIR | default (print .TASKFILE_DIR "/../../libs/ffmpeg") | clean}}'
+      # The parent application passes an absolute FFMPEG_LIB_DIR, whereas
+      # direct sidecar builds commonly pass a relative path.  Task may run
+      # with POSIX path semantics on Windows, so recognize both POSIX-absolute
+      # paths and Windows drive-qualified paths before applying this directory.
+      FFMPEG_SRC_BASE: '{{if .FFMPEG_LIB_DIR}}{{if or (isAbs .FFMPEG_LIB_DIR) (regexMatch "^[A-Za-z]:/" (.FFMPEG_LIB_DIR | toSlash))}}{{.FFMPEG_LIB_DIR | clean | toSlash}}{{else}}{{print .TASKFILE_DIR "/" .FFMPEG_LIB_DIR | clean | toSlash}}{{end}}{{else}}{{print .TASKFILE_DIR "/../../libs/ffmpeg" | clean | toSlash}}{{end}}'
       # Match the dynamic build directory to the target platform, not the host machine
-      FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean}}'
+      # CGO invokes a POSIX-like LLVM-MinGW driver even on Windows. Normalise
+      # this path before placing it in -I/-L flags; backslashes in a relative
+      # path are interpreted as escapes by that driver.
+      FFMPEG_SRC_DIR: '{{.FFMPEG_SRC_DIR | default (print .FFMPEG_SRC_BASE "/" .GOOS "/" .GOARCH) | clean | toSlash}}'
       # Keep the compression library as a normal linker flag. Appending the
       # resolved archive path made Go reject Windows integration-test flags
       # when FFMPEG_LIB_DIR was supplied as a relative path (..\\..\\libs).
@@ -200,22 +212,16 @@ tasks:
             exit 0
           fi
           set -- \
-            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/*/bin \
-            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/bin \
-            "${USERPROFILE}/scoop/apps/llvm-mingw/current/bin" \
-            "C:/llvm-mingw/bin" \
-            "${USERPROFILE}/scoop/apps/mingw/current/bin" \
-            "${USERPROFILE}/scoop/apps/gcc/current/bin" \
-            "C:/msys64/mingw64/bin" \
-            "C:/mingw64/bin" \
-            "C:/ProgramData/mingw64/mingw64/bin"
+            "$LOCALAPPDATA"/Microsoft/WinGet/Packages/MartinStorsjo.LLVM-MinGW.UCRT*/llvm-mingw-{{.LLVM_MINGW_VERSION}}-ucrt-x86_64/bin \
+            "${USERPROFILE}/scoop/apps/llvm-mingw/{{.LLVM_MINGW_VERSION}}/bin" \
+            "C:/llvm-mingw/llvm-mingw-{{.LLVM_MINGW_VERSION}}-ucrt-x86_64/bin"
           for p in "$@"; do
             if [ -f "$p/gcc.exe" ]; then
               echo "$p"
               exit 0
             fi
           done
-          echo "MinGW / LLVM-MinGW gcc.exe not found. Prefer installing LLVM-MinGW." >&2
+          echo "Pinned LLVM-MinGW {{.LLVM_MINGW_VERSION}} (UCRT x86_64) not found. Install the exact Dockerfile toolchain; do not use a different MinGW release." >&2
           exit 1
 
   # Native Platform Tasks
@@ -262,7 +268,7 @@ tasks:
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame
         -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv
         -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon
-        -lc++ -lpthread
+        -lc++ -lunwind -lpthread
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32
         -lmfplat -lmfuuid -lstrmiids -luuid
         -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi

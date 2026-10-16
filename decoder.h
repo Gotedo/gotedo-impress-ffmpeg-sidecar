@@ -16,6 +16,8 @@
 #include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <miniaudio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -135,6 +137,17 @@ typedef struct DemuxDecContext
   // Device backing hw_pix_fmt. This preserves decoder/encoder hardware
   // pairing (for example CUDA -> NVENC and D3D12VA -> h264_d3d12va).
   enum AVHWDeviceType hw_device_type;
+  int hw_device_index; // explicit adapter index when the platform exposes one
+
+  /* A verified preflight may supply this plan to StartStream. It is a hint,
+   * never a lock: if the device changes, normal candidate fallback remains
+   * available. Reusing it avoids repeating every failed adapter/backend trial
+   * immediately after the UI has already run the same probe. */
+  int preferred_hw_device_type;
+  int preferred_hw_device_index;
+  int preferred_encoder_width;
+  int preferred_encoder_height;
+  char preferred_encoder_name[64];
 
   // Audio Decoder State
   int audio_stream_idx;
@@ -243,6 +256,7 @@ typedef struct
   int32_t decoder_frame_format;
   int32_t encoder_width;
   int32_t encoder_height;
+  int32_t decoder_device_index;
   char decoder_backend[32];
   char encoder_backend[64];
   char failure_code[64];
@@ -252,6 +266,7 @@ typedef struct
 // Function prototypes
 int init_audio_resampler(DemuxDecContext *ctx);
 int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path);
+void apply_playback_probe_plan(DemuxDecContext *ctx, const CPlaybackSupport *support);
 void free_demux_dec_context(DemuxDecContext *ctx);
 
 int init_fmp4_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_ctx);

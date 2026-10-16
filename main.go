@@ -45,6 +45,7 @@ type SessionContext struct {
 	doneOnce        sync.Once
 	CurrentPTS      float64
 	IsEOF           int32 // int32 for atomic operations
+	HDRToneMapUsed  int32 // set by C after an HDR frame exits the zscale/tonemap graph
 	Mu              sync.Mutex
 	playbackSession *PlaybackSession
 }
@@ -87,6 +88,30 @@ type cachedPlaybackProbe struct {
 	modifiedAt int64
 	expiresAt  time.Time
 	support    C.CPlaybackSupport
+}
+
+// cachedPlaybackSupport returns a still-valid plan without performing another
+// GPU probe. StartStream uses it after the UI preflight so opening a stream
+// does not immediately retry every adapter/backend that has just failed.
+func cachedPlaybackSupport(filePath string, info os.FileInfo) (C.CPlaybackSupport, bool) {
+	var empty C.CPlaybackSupport
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return empty, false
+	}
+	key := filepath.Clean(absPath)
+	now := time.Now()
+
+	playbackProbeMu.Lock()
+	defer playbackProbeMu.Unlock()
+	cached, ok := playbackProbeCache[key]
+	if !ok || cached.size != info.Size() || cached.modifiedAt != info.ModTime().UnixNano() || !now.Before(cached.expiresAt) {
+		if ok {
+			delete(playbackProbeCache, key)
+		}
+		return empty, false
+	}
+	return cached.support, true
 }
 
 // probePlaybackSupport shares the expensive hardware probe between the UI's
@@ -281,6 +306,18 @@ func goStreamWriteCallback(buf *C.uchar, bufSize C.int, userToken C.uintptr_t) {
 	}
 }
 
+//export goHDRToneMapFrameProcessed
+func goHDRToneMapFrameProcessed(userToken C.uintptr_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goHDRToneMapFrameProcessed: %v", r)
+		}
+	}()
+
+	session := cgo.Handle(userToken).Value().(*SessionContext)
+	atomic.StoreInt32(&session.HDRToneMapUsed, 1)
+}
+
 //export set_session_eof
 func set_session_eof(token C.uintptr_t, isEof C.int) {
 	defer func() {
@@ -393,6 +430,9 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		return status.Errorf(codes.Internal, "failed to inspect media file: %v", statErr)
 	}
 
+	var preflightPlan C.CPlaybackSupport
+	hasPreflightPlan := false
+
 	// Transcoding must never silently fall back to CPU. The application performs
 	// this same preflight before opening the WebSocket, while this server-side
 	// check protects callers that bypass the application UI.
@@ -410,9 +450,15 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			reason := C.GoString(&support.reason[0])
 			return status.Errorf(codes.FailedPrecondition, "verified GPU playback unavailable (%s): %s; retry with processing_policy=PROCESSING_ALLOW_CPU after user confirmation", failureCode, reason)
 		}
+		preflightPlan = support
+		hasPreflightPlan = true
 		log.Printf("[SIDECAR] Verified GPU playback preflight passed for target=%s (native_zero_copy=%t)", targetID, support.native_gpu_supported != 0)
 	} else if streamMode == proto.StreamMode_transcode {
 		log.Printf("[SIDECAR] CPU fallback explicitly allowed for target=%s", targetID)
+		preflightPlan, hasPreflightPlan = cachedPlaybackSupport(filePath, fileInfo)
+		if hasPreflightPlan {
+			log.Printf("[SIDECAR] Reusing cached preflight plan for target=%s", targetID)
+		}
 	}
 
 	// PRE: Handle case where target already has an active playback
@@ -460,6 +506,9 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
 	decCtx.is_passthrough = isPassthrough
 	decCtx.container_type = containerType
+	if hasPreflightPlan {
+		C.apply_playback_probe_plan(decCtx, &preflightPlan)
+	}
 
 	cPath := C.CString(filePath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -744,7 +793,7 @@ func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string,
 	case "windows":
 		switch failureCode {
 		case "gpu_encode_unavailable":
-			recommendation = "If this is an NVIDIA system, install a driver that exposes NVENC API 13.1 (driver 610 or newer) and reboot; AMD systems require a current Adrenalin/AMF runtime, and Intel systems require a current graphics driver. A legacy GPU may not support that driver/API, in which case native GPU encoding cannot be enabled on this system."
+			recommendation = "Install the newest driver supported by the GPU and reboot. This sidecar is built against NVENC API 12.2 for compatibility with older supported drivers; if the probe still fails, the GPU or its driver does not expose a usable H.264 hardware encoder. AMD systems require a current Adrenalin/AMF runtime and Intel systems require a current graphics driver."
 		case "gpu_decode_capability":
 			recommendation = "Install the newest driver supported by the GPU and verify hardware decoding for this codec/profile, especially HEVC Main 10. A driver update cannot add missing decoder hardware; if this GPU lacks HEVC Main 10 support, use a newer GPU or CPU processing."
 		case "zero_copy_unavailable":
@@ -769,8 +818,6 @@ func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string,
 
 // GetVideoScreenshot extracts a single frame image out of a media asset layout.
 func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.ScreenshotRequest) (*proto.ScreenshotResponse, error) {
-	log.Printf("[SIDECAR] Extracting screenshot for file: %s at %d ms", req.GetFilePath(), req.GetTimeMs())
-
 	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
 		return nil, status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
 	}
@@ -779,6 +826,7 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 	if timeTargetMs <= 0 {
 		timeTargetMs = 1000 // Sane default to bypass initial black frames
 	}
+	log.Printf("[SIDECAR] Extracting screenshot for file: %s at effective timestamp %d ms (requested %d ms)", req.GetFilePath(), timeTargetMs, req.GetTimeMs())
 
 	cPath := C.CString(req.GetFilePath())
 	defer C.free(unsafe.Pointer(cPath))
@@ -930,6 +978,8 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 // StopStream is an explicit stop (alias to STOP control for convenience)
 func (s *ffmpegServer) StopStream(ctx context.Context, req *proto.StreamControlRequest) (*proto.StreamControlResponse, error) {
 	targetID := req.GetTargetId()
+	log.Printf("[VIDEO STOP TRACE] sidecar-stop-rpc-received target=%s", targetID)
 	unregisterPlayback(targetID)
+	log.Printf("[VIDEO STOP TRACE] sidecar-stop-rpc-complete target=%s", targetID)
 	return &proto.StreamControlResponse{Success: true, Message: "stream stopped"}, nil
 }

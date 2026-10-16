@@ -3,81 +3,86 @@
 FROM rust:1.93.1-slim-bookworm
 
 ARG APT_PROXY=""
+# This is also the required native Windows compiler release. Keep the native
+# Taskfile and the Docker cross-build pinned together: a static FFmpeg archive
+# must never be linked by an arbitrary, ABI-different MinGW installation.
+ARG LLVM_MINGW_VERSION=20260616
+ENV LLVM_MINGW_VERSION=${LLVM_MINGW_VERSION}
 
 # apt.llvm.org publishes mutable repository artifacts, so it must bypass the
 # local cache to keep package indexes and archives consistent.
 RUN if [ -n "$APT_PROXY" ] && [ "$APT_PROXY" != "false" ]; then \
-      echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy && \
-      echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy && \
-      echo 'Acquire::http::Proxy::apt.llvm.org "DIRECT";' >> /etc/apt/apt.conf.d/01proxy; \
+    echo "Acquire::HTTP::Proxy \"${APT_PROXY}\";" > /etc/apt/apt.conf.d/01proxy && \
+    echo 'Acquire::HTTPS::Proxy "false";' >> /etc/apt/apt.conf.d/01proxy && \
+    echo 'Acquire::http::Proxy::apt.llvm.org "DIRECT";' >> /etc/apt/apt.conf.d/01proxy; \
     fi
 
 # Install prerequisites to fetch external secure repositories
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  wget ca-certificates gnupg \
-  && rm -rf /var/lib/apt/lists/*
+    wget ca-certificates gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Add the official LLVM 20 repository key and source lists
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
-  echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
-  echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
+    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list && \
+    echo "deb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" >> /etc/apt/sources.list
 
 # -----------------------------------------------------------------------------
 # Base packages + FFmpeg-specific build tools
 # -----------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y --no-install-recommends \
-  # Cross compilers & toolchains (Linux & Windows)
-  gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-  gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
-  mingw-w64 \
-  # Native Base Utilities
-  git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
-  bison flex gperf gettext libglib2.0-dev file binfmt-support \
-  # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
-  clang-20 \
-  lld-20 \
-  llvm-20 \
-  llvm-20-linker-tools \
-  llvm-20-dev \
-  libclang-rt-20-dev \
-  # FFmpeg-specific Assemblers & Build Tools
-  nasm yasm ccache autoconf automake libtool texinfo \
-  libfreetype6-dev libharfbuzz-dev \
-  # Debugging Tools
-  nano vim \
-  && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    # Cross compilers & toolchains (Linux & Windows)
+    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+    gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
+    mingw-w64 \
+    # Native Base Utilities
+    git make cmake curl xz-utils bzip2 unzip python3-pip ninja-build pkg-config \
+    bison flex gperf gettext libglib2.0-dev file binfmt-support \
+    # Explicit LLVM 20 Toolchain & Darwin Compiler Runtime (Mandatory)
+    clang-20 \
+    lld-20 \
+    llvm-20 \
+    llvm-20-linker-tools \
+    llvm-20-dev \
+    libclang-rt-20-dev \
+    # FFmpeg-specific Assemblers & Build Tools
+    nasm yasm ccache autoconf automake libtool texinfo \
+    libfreetype6-dev libharfbuzz-dev \
+    # Debugging Tools
+    nano vim \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Go Toolchain for Sidecar Compilation
 ARG GO_VERSION=1.26.0
 RUN ARCH_SUFFIX=$(dpkg --print-architecture) && \
-  curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH_SUFFIX}.tar.gz" | tar -C /usr/local -xz
+    curl -L "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH_SUFFIX}.tar.gz" | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Generate Global LLVM 20 System Symlinks (Overriding default LLVM 14)
 RUN ln -sf /usr/bin/clang-20 /usr/bin/clang && \
-  ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
-  ln -sf /usr/bin/lld-20 /usr/bin/lld && \
-  ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
-  ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
-  ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
-  ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
-  ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
-  ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
+    ln -sf /usr/bin/clang++-20 /usr/bin/clang++ && \
+    ln -sf /usr/bin/lld-20 /usr/bin/lld && \
+    ln -sf /usr/bin/ld.lld-20 /usr/bin/ld.lld && \
+    ln -sf /usr/bin/llvm-ar-20 /usr/bin/llvm-ar && \
+    ln -sf /usr/bin/llvm-ranlib-20 /usr/bin/llvm-ranlib && \
+    ln -sf /usr/bin/llvm-nm-20 /usr/bin/llvm-nm && \
+    ln -sf /usr/bin/llvm-strip-20 /usr/bin/llvm-strip && \
+    ln -sf /usr/bin/llvm-strings-20 /usr/bin/llvm-strings
 
 # Install Meson (needed for dav1d, harfbuzz, etc.)
 RUN pip3 install meson --break-system-packages
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y patchelf && rm -rf /var/lib/apt/lists/*
 
 # LLVM tool symlinks
 RUN ln -s /usr/bin/llvm-install-name-tool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-install-name-tool && \
-  ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
-  ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
+    ln -s /usr/bin/llvm-otool-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/llvm-otool && \
+    ln -s /usr/bin/llvm-lipo-$(clang --version | grep -oE '[0-9]+' | head -1) /usr/bin/lipo
 
 # -----------------------------------------------------------------------------
 # Cache & Install LLVM-Mingw (Windows Toolchain) - identical caching pattern
@@ -87,8 +92,8 @@ RUN --mount=type=cache,target=/var/cache/llvm-mingw <<EOF
 set -e
 ARCH_SUFFIX=$(uname -m)
 [ "$ARCH_SUFFIX" = "x86_64" ] && URL_ARCH="x86_64" || URL_ARCH="aarch64"
-LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20260127/llvm-mingw-20260127-ucrt-ubuntu-22.04-${URL_ARCH}.tar.xz"
-CACHE_FILE="/var/cache/llvm-mingw/llvm-mingw-${URL_ARCH}.tar.xz"
+LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-${URL_ARCH}.tar.xz"
+CACHE_FILE="/var/cache/llvm-mingw/llvm-mingw-${LLVM_MINGW_VERSION}-${URL_ARCH}.tar.xz"
 INSTALL_DIR="/opt/llvm-mingw/${URL_ARCH}"
 mkdir -p /opt/llvm-mingw
 if [ ! -f "$CACHE_FILE" ]; then
@@ -131,9 +136,9 @@ EOF
 
 # Install patchelf for Linux relocatable SDK patching
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  apt-get update && apt-get install -y patchelf \
-  && rm -rf /var/lib/apt/lists/*
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y patchelf \
+    && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Cache & Build Apple compiler-rt (builtins) for macOS cross-compilation
@@ -300,7 +305,7 @@ EOF
 
 # Install gas-preprocessor for macOS assembly optimization parsing
 RUN curl -L https://github.com/FFmpeg/gas-preprocessor/raw/master/gas-preprocessor.pl -o /usr/local/bin/gas-preprocessor.pl && \
-  chmod +x /usr/local/bin/gas-preprocessor.pl
+    chmod +x /usr/local/bin/gas-preprocessor.pl
 
 # -----------------------------------------------------------------------------
 # The main builder script
@@ -429,7 +434,11 @@ case "${OS}-${ARCH}" in
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-libvpl"
             # NVIDIA + AMD (headers only; uses driver at runtime on the target PC)
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
-            FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
+            # vpp_qsv/scale_qsv are required for a true QSV decode -> VPP ->
+            # encode attempt. Keep them in the release cross-build: native
+            # Windows development must not expose a capability absent from
+            # the macOS/Docker-produced release binary.
+            FFMPEG_FILTERS="${FFMPEG_FILTERS},vpp_qsv,scale_qsv,scale_cuda,hwupload_cuda,hwdownload_cuda,overlay_cuda"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
         fi
         PROPERTIES="
@@ -471,7 +480,7 @@ growing_stack = false
             FFMPEG_DECODERS="${FFMPEG_DECODERS},h264_qsv,hevc_qsv"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-libvpl"
             FFMPEG_ENCODERS="${FFMPEG_ENCODERS},h264_nvenc,h264_amf,hevc_nvenc,hevc_amf"
-            FFMPEG_FILTERS="${FFMPEG_FILTERS},scale_cuda"
+            FFMPEG_FILTERS="${FFMPEG_FILTERS},vpp_qsv,scale_qsv,scale_cuda"
             FFMPEG_OS_FLAGS="${FFMPEG_OS_FLAGS} --enable-nvenc --enable-nvdec --enable-ffnvcodec --enable-amf"
         fi
         ;;
@@ -839,7 +848,7 @@ EOF
 # Build fingerprint / checksum
 # -----------------------------------------------------------------------------
 ENABLED_FEATURES="gpl,version3,static,pic,libx264,libx265,libvpx,libaom,libdav1d,libopus,libvorbis,libmp3lame,libwebp,libpng,libjpeg,libtiff,libass,zlib,bzlib,lzma,subtitles,image-export"
-BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${FFMPEG_DECODERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}|${ZIMG_VERSION}|${VPL_VERSION}"
+BUILD_FINGERPRINT="${FFMPEG_VERSION}|${OS}|${ARCH}|${ZLIB_VERSION}|${LIBPNG_VERSION}|${LIBJPEG_TURBO_VERSION}|${LIBWEBP_VERSION}|${TIFF_VERSION}|${FREETYPE_VERSION}|${HARFBUZZ_VERSION}|${BROTLI_VERSION}|${LIBDE265_VERSION}|${FRIBIDI_VERSION}|${EXPAT_VERSION}|${FONTCONFIG_VERSION}|${LIBASS_VERSION}|${OPUS_VERSION}|${LIBVPX_VERSION}|${X264_VERSION}|${X265_VERSION}|${DAV1D_VERSION}|${LAME_VERSION}|${ENABLED_FEATURES}|${MACOSX_DEPLOYMENT_TARGET:-10.15}|$(cat ${CROSS_FILE})|${LIBAOM_VERSION}|${LIBVORBIS_VERSION}|${LIBOGG_VERSION}|${BZIP2_VERSION}|${XZ_VERSION}|${FFMPEG_OS_FLAGS}|${MINIAUDIO_VERSION}|${FFMPEG_ENCODERS}|${FFMPEG_FILTERS}|${FFMPEG_DECODERS}|${NV_CODEC_HEADERS_VERSION}|${AMF_VERSION}|${ZIMG_VERSION}|${VPL_VERSION}|${LLVM_MINGW_VERSION}"
 CURRENT_CHECKSUM=$(echo "$BUILD_FINGERPRINT" | sha256sum | awk '{print $1}')
 
 if [ -f "/output/build.checksum" ]; then
@@ -1709,6 +1718,35 @@ if [[ "$ARCH" == "amd64" && "$OS" != "darwin" ]]; then
     done
 fi
 
+# These components are required by the sidecar's Windows HDR path.  Fail the
+# cross-build here rather than shipping a release binary which silently takes
+# an inferior CPU/matrix-only path despite a developer's native build working.
+if [[ "$OS" == "windows" && "$ARCH" == "amd64" ]]; then
+    echo ">>> Verifying Windows HDR/GPU release components in FFmpeg configuration..."
+    for feature in CONFIG_D3D11VA CONFIG_D3D12VA CONFIG_NVENC CONFIG_FFNVCODEC CONFIG_LIBVPL; do
+        if ! grep -q "^#define ${feature} 1$" config.h; then
+            echo "ERROR: FFmpeg configuration is missing ${feature}; refusing to produce a Windows GPU release artifact"
+            exit 1
+        fi
+    done
+    for component in \
+        CONFIG_ZSCALE_FILTER \
+        CONFIG_TONEMAP_FILTER \
+        CONFIG_H264_NVENC_ENCODER \
+        CONFIG_HEVC_NVENC_ENCODER \
+        CONFIG_H264_QSV_DECODER \
+        CONFIG_HEVC_QSV_DECODER \
+        CONFIG_H264_QSV_ENCODER \
+        CONFIG_HEVC_QSV_ENCODER \
+        CONFIG_VPP_QSV_FILTER \
+        CONFIG_SCALE_QSV_FILTER; do
+        if ! grep -q "^#define ${component} 1$" config_components.h; then
+            echo "ERROR: FFmpeg configuration is missing ${component}; refusing to produce a Windows GPU release artifact"
+            exit 1
+        fi
+    done
+fi
+
 # Temporarily rename the VERSION file if compiling on Windows
 HAS_VERSION_RENAME=false
 if [[ "$OS" == "windows" ]] && [[ -f "VERSION" ]]; then
@@ -1951,7 +1989,7 @@ case "${OS}-${ARCH}" in
         -lvpl \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
         -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon \
-        -lc++ \
+        -lc++ -lunwind \
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
         GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
@@ -1963,7 +2001,7 @@ case "${OS}-${ARCH}" in
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
         -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng16 -lbz2 -llzma -lbrotlidec -lbrotlicommon \
-        -lc++ \
+        -lc++ -lunwind \
         -lws2_32 -lbcrypt -lncrypt -lcrypt32 -lsecur32 -lmfplat -lmfuuid -lstrmiids -luuid -lwinmm -lole32 -luser32 -lgdi32 -lshlwapi -lpsapi -lpthread"
         # Declare windowsgui linker flag if OS is windows to hide terminal window
         GO_BUILDFLAGS="-ldflags=-s -w -H=windowsgui -extldflags=\"-static\""
