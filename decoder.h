@@ -185,6 +185,8 @@ typedef struct TranscodeContext
   volatile int suppress_output;
 } TranscodeContext;
 
+typedef int (*VideoConversionProgressCallback)(double progress, uintptr_t user_token);
+
 // Struct mapping exactly to our proto/Go expectations
 typedef struct
 {
@@ -286,6 +288,25 @@ int probe_playback_support(const char *file_path, CPlaybackSupport *support);
 
 // Extract a compressed image frame into a dynamically allocated buffer
 int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **out_buf, int *out_size);
+
+// Converts a source video to an H.264/AAC MP4 using the linked libav* APIs.
+// cancel_flag is an atomic integer shared with the Go RPC handler. Returns 0
+// on success or a negative AVERROR code; err_buf receives a readable detail.
+int convert_video_file(const char *source_path, const char *output_path,
+                       int video_bitrate_kbps, int audio_bitrate_kbps,
+                       const char *encoder_preset, int preserve_hdr,
+                       volatile int *cancel_flag,
+                       VideoConversionProgressCallback progress_callback,
+                       uintptr_t user_token, char *err_buf, size_t err_buf_size);
+
+// Shared HDR-to-SDR frame converter used by playback, screenshots, and file conversion.
+int tone_map_hdr_frame(AVFilterGraph **graph, AVFilterContext **source,
+                       AVFilterContext **sink, AVFrame *input, AVFrame *output,
+                       AVRational time_base, int output_width, int output_height,
+                       enum AVColorRange output_range, enum AVPixelFormat output_format,
+                       uintptr_t go_token, int *reported_frame_processed);
+int sidecar_go_conversion_progress(double progress, uintptr_t user_token);
+void request_video_conversion_cancel(volatile int *cancel_flag);
 
 int run_production_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token);
 

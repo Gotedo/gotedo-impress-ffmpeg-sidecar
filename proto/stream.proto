@@ -32,6 +32,27 @@ service FFmpegService {
 
     // Graceful shutdown RPC for the persistent sidecar
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+
+    // Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
+    // the client stream interrupts decoding and encoding in the native loop.
+    rpc ConvertVideo(VideoConversionRequest) returns (stream VideoConversionProgress);
+}
+
+message VideoConversionRequest {
+    string job_id = 1;
+    string source_path = 2;
+    string output_path = 3;
+    int32 video_bitrate_kbps = 4;
+    int32 audio_bitrate_kbps = 5;
+    string encoder_preset = 6;
+    string hdr_handling = 7; // "tone_map" or "preserve"
+}
+
+message VideoConversionProgress {
+    double progress = 1; // 0..100
+    string stage = 2;
+    bool completed = 3;
+    string output_path = 4;
 }
 
 enum PassthroughContainerFormat {

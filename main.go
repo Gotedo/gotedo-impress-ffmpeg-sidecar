@@ -32,6 +32,12 @@ type ffmpegServer struct {
 	proto.UnimplementedFFmpegServiceServer
 }
 
+type conversionProgressContext struct {
+	ctx    context.Context
+	stream proto.FFmpegService_ConvertVideoServer
+	err    error
+}
+
 // ChunkPayload bundles the binary fMP4 data with its extraction PTS
 type ChunkPayload struct {
 	Data []byte
@@ -316,6 +322,27 @@ func goHDRToneMapFrameProcessed(userToken C.uintptr_t) {
 
 	session := cgo.Handle(userToken).Value().(*SessionContext)
 	atomic.StoreInt32(&session.HDRToneMapUsed, 1)
+}
+
+//export goVideoConversionProgress
+func goVideoConversionProgress(progress C.double, userToken C.uintptr_t) C.int {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goVideoConversionProgress: %v", r)
+		}
+	}()
+	state := cgo.Handle(userToken).Value().(*conversionProgressContext)
+	if state.ctx.Err() != nil {
+		return -1
+	}
+	if err := state.stream.Send(&proto.VideoConversionProgress{
+		Progress: float64(progress),
+		Stage:    "converting",
+	}); err != nil {
+		state.err = err
+		return -1
+	}
+	return 0
 }
 
 //export set_session_eof
@@ -850,6 +877,110 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 		ImageData: imageData,
 		MimeType:  "image/jpeg",
 	}, nil
+}
+
+// ConvertVideo runs the offline conversion pipeline in this sidecar instance.
+// The caller uses a dedicated sidecar process so CPU-heavy conversion cannot
+// contend with playback decoding or encoding.
+func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream proto.FFmpegService_ConvertVideoServer) error {
+	if req.GetJobId() == "" || req.GetSourcePath() == "" || req.GetOutputPath() == "" {
+		return status.Error(codes.InvalidArgument, "job_id, source_path, and output_path are required")
+	}
+	if req.GetVideoBitrateKbps() < 100 || req.GetVideoBitrateKbps() > 100000 ||
+		req.GetAudioBitrateKbps() < 32 || req.GetAudioBitrateKbps() > 2048 {
+		return status.Error(codes.InvalidArgument, "conversion bitrates are outside the supported range")
+	}
+	switch req.GetEncoderPreset() {
+	case "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow":
+	default:
+		return status.Error(codes.InvalidArgument, "unsupported H.264 encoder preset")
+	}
+	if req.GetHdrHandling() != "tone_map" && req.GetHdrHandling() != "preserve" {
+		return status.Error(codes.InvalidArgument, "hdr_handling must be tone_map or preserve")
+	}
+	sourcePath, err := filepath.Abs(filepath.Clean(req.GetSourcePath()))
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid source path: %v", err)
+	}
+	outputPath, err := filepath.Abs(filepath.Clean(req.GetOutputPath()))
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid output path: %v", err)
+	}
+	if sourcePath == outputPath {
+		return status.Error(codes.InvalidArgument, "output path must differ from source path")
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() {
+		return status.Errorf(codes.NotFound, "video source is unavailable: %s", sourcePath)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return status.Errorf(codes.Internal, "could not create conversion output directory: %v", err)
+	}
+	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+		return status.Errorf(codes.Internal, "could not replace conversion output: %v", err)
+	}
+	conversionSucceeded := false
+	defer func() {
+		if !conversionSucceeded {
+			_ = os.Remove(outputPath)
+		}
+	}()
+
+	cancelFlag := (*C.int)(C.calloc(1, C.size_t(unsafe.Sizeof(C.int(0)))))
+	if cancelFlag == nil {
+		return status.Error(codes.ResourceExhausted, "could not allocate conversion control state")
+	}
+	defer C.free(unsafe.Pointer(cancelFlag))
+	watcherDone := make(chan struct{})
+	watcherExited := make(chan struct{})
+	go func() {
+		defer close(watcherExited)
+		select {
+		case <-stream.Context().Done():
+			C.request_video_conversion_cancel(cancelFlag)
+		case <-watcherDone:
+		}
+	}()
+	defer func() {
+		close(watcherDone)
+		<-watcherExited
+	}()
+
+	progressState := &conversionProgressContext{ctx: stream.Context(), stream: stream}
+	progressHandle := cgo.NewHandle(progressState)
+	defer progressHandle.Delete()
+	cSource := C.CString(sourcePath)
+	cOutput := C.CString(outputPath)
+	cPreset := C.CString(req.GetEncoderPreset())
+	defer C.free(unsafe.Pointer(cSource))
+	defer C.free(unsafe.Pointer(cOutput))
+	defer C.free(unsafe.Pointer(cPreset))
+	errBuffer := make([]C.char, 1024)
+	preserveHDR := C.int(0)
+	if req.GetHdrHandling() == "preserve" {
+		preserveHDR = 1
+	}
+	ret := C.convert_video_file(cSource, cOutput,
+		C.int(req.GetVideoBitrateKbps()), C.int(req.GetAudioBitrateKbps()),
+		cPreset, preserveHDR, cancelFlag,
+		(C.VideoConversionProgressCallback)(C.sidecar_go_conversion_progress),
+		C.uintptr_t(progressHandle), &errBuffer[0], C.size_t(len(errBuffer)))
+	if ret < 0 {
+		if stream.Context().Err() != nil {
+			return status.FromContextError(stream.Context().Err()).Err()
+		}
+		if progressState.err != nil {
+			return progressState.err
+		}
+		return status.Errorf(codes.Internal, "%s", C.GoString(&errBuffer[0]))
+	}
+	if err := stream.Send(&proto.VideoConversionProgress{
+		Progress: 100, Stage: "completed", Completed: true, OutputPath: outputPath,
+	}); err != nil {
+		return err
+	}
+	conversionSucceeded = true
+	return nil
 }
 
 // Shutdown RPC - graceful exit requested by manager

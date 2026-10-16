@@ -28,6 +28,7 @@ const (
 	FFmpegService_GetPlaybackSupport_FullMethodName = "/ffmpeg.FFmpegService/GetPlaybackSupport"
 	FFmpegService_GetVideoScreenshot_FullMethodName = "/ffmpeg.FFmpegService/GetVideoScreenshot"
 	FFmpegService_Shutdown_FullMethodName           = "/ffmpeg.FFmpegService/Shutdown"
+	FFmpegService_ConvertVideo_FullMethodName       = "/ffmpeg.FFmpegService/ConvertVideo"
 )
 
 // FFmpegServiceClient is the client API for FFmpegService service.
@@ -54,6 +55,9 @@ type FFmpegServiceClient interface {
 	GetVideoScreenshot(ctx context.Context, in *ScreenshotRequest, opts ...grpc.CallOption) (*ScreenshotResponse, error)
 	// Graceful shutdown RPC for the persistent sidecar
 	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
+	// Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
+	// the client stream interrupts decoding and encoding in the native loop.
+	ConvertVideo(ctx context.Context, in *VideoConversionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VideoConversionProgress], error)
 }
 
 type fFmpegServiceClient struct {
@@ -163,6 +167,25 @@ func (c *fFmpegServiceClient) Shutdown(ctx context.Context, in *ShutdownRequest,
 	return out, nil
 }
 
+func (c *fFmpegServiceClient) ConvertVideo(ctx context.Context, in *VideoConversionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VideoConversionProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &FFmpegService_ServiceDesc.Streams[1], FFmpegService_ConvertVideo_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[VideoConversionRequest, VideoConversionProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FFmpegService_ConvertVideoClient = grpc.ServerStreamingClient[VideoConversionProgress]
+
 // FFmpegServiceServer is the server API for FFmpegService service.
 // All implementations must embed UnimplementedFFmpegServiceServer
 // for forward compatibility.
@@ -187,6 +210,9 @@ type FFmpegServiceServer interface {
 	GetVideoScreenshot(context.Context, *ScreenshotRequest) (*ScreenshotResponse, error)
 	// Graceful shutdown RPC for the persistent sidecar
 	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
+	// Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
+	// the client stream interrupts decoding and encoding in the native loop.
+	ConvertVideo(*VideoConversionRequest, grpc.ServerStreamingServer[VideoConversionProgress]) error
 	mustEmbedUnimplementedFFmpegServiceServer()
 }
 
@@ -223,6 +249,9 @@ func (UnimplementedFFmpegServiceServer) GetVideoScreenshot(context.Context, *Scr
 }
 func (UnimplementedFFmpegServiceServer) Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Shutdown not implemented")
+}
+func (UnimplementedFFmpegServiceServer) ConvertVideo(*VideoConversionRequest, grpc.ServerStreamingServer[VideoConversionProgress]) error {
+	return status.Error(codes.Unimplemented, "method ConvertVideo not implemented")
 }
 func (UnimplementedFFmpegServiceServer) mustEmbedUnimplementedFFmpegServiceServer() {}
 func (UnimplementedFFmpegServiceServer) testEmbeddedByValue()                       {}
@@ -400,6 +429,17 @@ func _FFmpegService_Shutdown_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FFmpegService_ConvertVideo_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(VideoConversionRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FFmpegServiceServer).ConvertVideo(m, &grpc.GenericServerStream[VideoConversionRequest, VideoConversionProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type FFmpegService_ConvertVideoServer = grpc.ServerStreamingServer[VideoConversionProgress]
+
 // FFmpegService_ServiceDesc is the grpc.ServiceDesc for FFmpegService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -444,6 +484,11 @@ var FFmpegService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "StartStream",
 			Handler:       _FFmpegService_StartStream_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ConvertVideo",
+			Handler:       _FFmpegService_ConvertVideo_Handler,
 			ServerStreams: true,
 		},
 	},

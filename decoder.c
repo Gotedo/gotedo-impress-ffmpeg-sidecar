@@ -403,7 +403,7 @@ static void normalize_hdr_frame_color_metadata(AVFrame *frame)
 
 /* Convert one HDR frame to correctly tone-mapped BT.709 SDR. Keep the graph
  * alive for the playback session: graph setup is deliberately not per-frame. */
-static int tone_map_hdr_frame(AVFilterGraph **graph,
+int tone_map_hdr_frame(AVFilterGraph **graph,
                               AVFilterContext **source,
                               AVFilterContext **sink,
                               AVFrame *input,
@@ -536,7 +536,7 @@ static int tone_map_hdr_frame(AVFilterGraph **graph,
   ret = av_buffersink_get_frame(*sink, output);
   if (ret < 0)
     return ret;
-  if (reported_frame_processed && !*reported_frame_processed)
+  if (reported_frame_processed && !*reported_frame_processed && go_token != 0)
   {
     goHDRToneMapFrameProcessed((uintptr_t)go_token);
     *reported_frame_processed = 1;
