@@ -38,6 +38,8 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	lastProgress := -1.0
 	completed := false
 	progressCount := 0
+	encoderName := ""
+	hardwareAccelerated := false
 	for {
 		update, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -54,6 +56,10 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 		}
 		lastProgress = update.GetProgress()
 		progressCount++
+		if update.GetEncoderName() != "" {
+			encoderName = update.GetEncoderName()
+			hardwareAccelerated = update.GetHardwareAccelerated()
+		}
 		completed = completed || update.GetCompleted()
 	}
 	if progressCount < 2 {
@@ -61,6 +67,13 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	}
 	if !completed {
 		t.Fatal("conversion stream ended without a completed update")
+	}
+	if encoderName == "" {
+		t.Fatal("conversion did not report the selected H.264 encoder")
+	}
+	t.Logf("conversion encoder=%s hardware_accelerated=%t", encoderName, hardwareAccelerated)
+	if hardwareAccelerated && encoderName == "libx264" {
+		t.Fatal("conversion reported CPU x264 as hardware accelerated")
 	}
 	info, err := os.Stat(output)
 	if err != nil {
@@ -104,6 +117,43 @@ func TestIntegration_ConvertVideoRejectsInvalidRequests(t *testing.T) {
 	_, err = stream.Recv()
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound for missing source, got %v", err)
+	}
+}
+
+func TestIntegration_ConvertVideoFallsBackToCPU(t *testing.T) {
+	t.Setenv("GOTEDO_TEST_MODE", "1")
+	t.Setenv("GOTEDO_FFMPEG_FORCE_CPU_ENCODER", "1")
+	client, _, closeServer := setupRealHardwareTestServer(t)
+	defer closeServer()
+	source, cleanup := generateRealTestMedia(t)
+	defer cleanup()
+	output := filepath.Join(t.TempDir(), "prepared-cpu.mp4")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	stream, err := client.ConvertVideo(ctx, conversionTestRequest(source, output))
+	if err != nil {
+		t.Fatalf("ConvertVideo RPC failed to start: %v", err)
+	}
+	completed := false
+	encoderName := ""
+	hardwareAccelerated := true
+	for {
+		update, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("CPU fallback conversion failed: %v", recvErr)
+		}
+		if update.GetEncoderName() != "" {
+			encoderName = update.GetEncoderName()
+			hardwareAccelerated = update.GetHardwareAccelerated()
+		}
+		completed = completed || update.GetCompleted()
+	}
+	t.Logf("conversion encoder=%s hardware_accelerated=%t", encoderName, hardwareAccelerated)
+	if !completed || encoderName != "libx264" || hardwareAccelerated {
+		t.Fatalf("expected completed CPU x264 conversion, got completed=%t encoder=%q hardware=%t", completed, encoderName, hardwareAccelerated)
 	}
 }
 

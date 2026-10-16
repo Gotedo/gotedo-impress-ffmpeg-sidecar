@@ -845,6 +845,21 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
         continue;
       }
 
+      /* VideoToolbox's encoder frame pool cannot use the decoder's 10-bit
+       * HEVC surface format. Passing that format to av_hwframe_ctx_init()
+       * triggers an assertion inside FFmpeg on macOS instead of returning a
+       * recoverable error. This pipeline tone-maps HDR to 8-bit before encode,
+       * but does not yet upload the converted frame into a separate NV12
+       * VideoToolbox surface pool. Use the normal software fallback for these
+       * inputs until that explicit upload path exists. */
+      if (strcmp(candidates[i], "h264_videotoolbox") == 0 &&
+          (dec_ctx->video_dec_ctx->sw_pix_fmt == AV_PIX_FMT_YUV420P10LE ||
+           dec_ctx->video_dec_ctx->sw_pix_fmt == AV_PIX_FMT_P010LE))
+      {
+        LOG_INFO("C-ENC", "  Skipping h264_videotoolbox for unsupported 10-bit decoder surfaces; trying a compatible encoder");
+        continue;
+      }
+
       /* Pre-flight capability checks */
       if (strcmp(candidates[i], "h264_nvenc") == 0)
       {
@@ -2672,7 +2687,8 @@ void log_input_stream_properties(DemuxDecContext *ctx, const char *file_path)
   LOG_INFO("C-PROBE", "==================================================");
 }
 
-int probe_media_properties(const char *file_path, CMediaProperties *props)
+int probe_media_properties(const char *file_path, CMediaProperties *props,
+                           int include_packet_counts)
 {
   if (!file_path || !props)
     return -1;
@@ -2849,6 +2865,30 @@ int probe_media_properties(const char *file_path, CMediaProperties *props)
   else if (props->candidate_audio_mime[0] != '\0')
   {
     snprintf(props->candidate_full_mime, sizeof(props->candidate_full_mime), "%s", props->candidate_audio_mime);
+  }
+
+  if (include_packet_counts && props->has_audio)
+  {
+    AVPacket *packet = av_packet_alloc();
+    if (!packet)
+    {
+      avformat_close_input(&fmt_ctx);
+      return AVERROR(ENOMEM);
+    }
+    while ((ret = av_read_frame(fmt_ctx, packet)) >= 0)
+    {
+      if (packet->stream_index >= 0 &&
+          (unsigned int)packet->stream_index < fmt_ctx->nb_streams &&
+          fmt_ctx->streams[packet->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+        props->audio_packet_count++;
+      av_packet_unref(packet);
+    }
+    av_packet_free(&packet);
+    if (ret != AVERROR_EOF)
+    {
+      avformat_close_input(&fmt_ctx);
+      return ret;
+    }
   }
 
   // Context demolition cleanup

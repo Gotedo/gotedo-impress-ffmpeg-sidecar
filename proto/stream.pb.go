@@ -365,13 +365,15 @@ func (x *VideoConversionRequest) GetHdrHandling() string {
 }
 
 type VideoConversionProgress struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Progress      float64                `protobuf:"fixed64,1,opt,name=progress,proto3" json:"progress,omitempty"` // 0..100
-	Stage         string                 `protobuf:"bytes,2,opt,name=stage,proto3" json:"stage,omitempty"`
-	Completed     bool                   `protobuf:"varint,3,opt,name=completed,proto3" json:"completed,omitempty"`
-	OutputPath    string                 `protobuf:"bytes,4,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Progress            float64                `protobuf:"fixed64,1,opt,name=progress,proto3" json:"progress,omitempty"` // 0..100
+	Stage               string                 `protobuf:"bytes,2,opt,name=stage,proto3" json:"stage,omitempty"`
+	Completed           bool                   `protobuf:"varint,3,opt,name=completed,proto3" json:"completed,omitempty"`
+	OutputPath          string                 `protobuf:"bytes,4,opt,name=output_path,json=outputPath,proto3" json:"output_path,omitempty"`
+	EncoderName         string                 `protobuf:"bytes,5,opt,name=encoder_name,json=encoderName,proto3" json:"encoder_name,omitempty"`
+	HardwareAccelerated bool                   `protobuf:"varint,6,opt,name=hardware_accelerated,json=hardwareAccelerated,proto3" json:"hardware_accelerated,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *VideoConversionProgress) Reset() {
@@ -430,6 +432,20 @@ func (x *VideoConversionProgress) GetOutputPath() string {
 		return x.OutputPath
 	}
 	return ""
+}
+
+func (x *VideoConversionProgress) GetEncoderName() string {
+	if x != nil {
+		return x.EncoderName
+	}
+	return ""
+}
+
+func (x *VideoConversionProgress) GetHardwareAccelerated() bool {
+	if x != nil {
+		return x.HardwareAccelerated
+	}
+	return false
 }
 
 type StreamRequest struct {
@@ -1021,10 +1037,12 @@ func (x *DevicesResponse) GetDevices() []*AudioDevice {
 }
 
 type MetadataRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	FilePath string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
+	// Optional full-file packet scan for diagnostics and E2E validation.
+	IncludePacketCounts bool `protobuf:"varint,2,opt,name=include_packet_counts,json=includePacketCounts,proto3" json:"include_packet_counts,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *MetadataRequest) Reset() {
@@ -1062,6 +1080,13 @@ func (x *MetadataRequest) GetFilePath() string {
 		return x.FilePath
 	}
 	return ""
+}
+
+func (x *MetadataRequest) GetIncludePacketCounts() bool {
+	if x != nil {
+		return x.IncludePacketCounts
+	}
+	return false
 }
 
 type PlaybackSupportRequest struct {
@@ -1322,6 +1347,7 @@ type MetadataResponse struct {
 	CandidateVideoMime string `protobuf:"bytes,33,opt,name=candidate_video_mime,json=candidateVideoMime,proto3" json:"candidate_video_mime,omitempty"` // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0"' or 'video/mp4; codecs="avc1.64002a"'
 	CandidateAudioMime string `protobuf:"bytes,34,opt,name=candidate_audio_mime,json=candidateAudioMime,proto3" json:"candidate_audio_mime,omitempty"` // e.g., 'audio/mp4; codecs="mp4a.40.2"' or 'audio/webm; codecs="opus"'
 	CandidateFullMime  string `protobuf:"bytes,35,opt,name=candidate_full_mime,json=candidateFullMime,proto3" json:"candidate_full_mime,omitempty"`    // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0, mp4a.40.2"'
+	AudioPacketCount   int64  `protobuf:"varint,36,opt,name=audio_packet_count,json=audioPacketCount,proto3" json:"audio_packet_count,omitempty"`      // Populated only when requested
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1601,6 +1627,13 @@ func (x *MetadataResponse) GetCandidateFullMime() string {
 	return ""
 }
 
+func (x *MetadataResponse) GetAudioPacketCount() int64 {
+	if x != nil {
+		return x.AudioPacketCount
+	}
+	return 0
+}
+
 type ScreenshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FilePath      string                 `protobuf:"bytes,1,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
@@ -1799,13 +1832,15 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x12video_bitrate_kbps\x18\x04 \x01(\x05R\x10videoBitrateKbps\x12,\n" +
 	"\x12audio_bitrate_kbps\x18\x05 \x01(\x05R\x10audioBitrateKbps\x12%\n" +
 	"\x0eencoder_preset\x18\x06 \x01(\tR\rencoderPreset\x12!\n" +
-	"\fhdr_handling\x18\a \x01(\tR\vhdrHandling\"\x8a\x01\n" +
+	"\fhdr_handling\x18\a \x01(\tR\vhdrHandling\"\xe0\x01\n" +
 	"\x17VideoConversionProgress\x12\x1a\n" +
 	"\bprogress\x18\x01 \x01(\x01R\bprogress\x12\x14\n" +
 	"\x05stage\x18\x02 \x01(\tR\x05stage\x12\x1c\n" +
 	"\tcompleted\x18\x03 \x01(\bR\tcompleted\x12\x1f\n" +
 	"\voutput_path\x18\x04 \x01(\tR\n" +
-	"outputPath\"\xaf\x02\n" +
+	"outputPath\x12!\n" +
+	"\fencoder_name\x18\x05 \x01(\tR\vencoderName\x121\n" +
+	"\x14hardware_accelerated\x18\x06 \x01(\bR\x13hardwareAccelerated\"\xaf\x02\n" +
 	"\rStreamRequest\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1b\n" +
 	"\tfile_path\x18\x02 \x01(\tR\bfilePath\x12&\n" +
@@ -1850,9 +1885,10 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\n" +
 	"is_default\x18\x03 \x01(\bR\tisDefault\"@\n" +
 	"\x0fDevicesResponse\x12-\n" +
-	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices\".\n" +
+	"\adevices\x18\x01 \x03(\v2\x13.ffmpeg.AudioDeviceR\adevices\"b\n" +
 	"\x0fMetadataRequest\x12\x1b\n" +
-	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"5\n" +
+	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x122\n" +
+	"\x15include_packet_counts\x18\x02 \x01(\bR\x13includePacketCounts\"5\n" +
 	"\x16PlaybackSupportRequest\x12\x1b\n" +
 	"\tfile_path\x18\x01 \x01(\tR\bfilePath\"\x83\x06\n" +
 	"\x17PlaybackSupportResponse\x125\n" +
@@ -1874,7 +1910,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"cpuWarning\x120\n" +
 	"\x14encoder_frame_tested\x18\x0f \x01(\bR\x12encoderFrameTested\x12#\n" +
 	"\rencoder_width\x18\x10 \x01(\x05R\fencoderWidth\x12%\n" +
-	"\x0eencoder_height\x18\x11 \x01(\x05R\rencoderHeight\"\xd3\t\n" +
+	"\x0eencoder_height\x18\x11 \x01(\x05R\rencoderHeight\"\x81\n" +
+	"\n" +
 	"\x10MetadataResponse\x12\x1f\n" +
 	"\vformat_name\x18\x01 \x01(\tR\n" +
 	"formatName\x12(\n" +
@@ -1917,7 +1954,8 @@ const file_proto_stream_proto_rawDesc = "" +
 	"\x0eaudio_bit_rate\x18  \x01(\x03R\faudioBitRate\x120\n" +
 	"\x14candidate_video_mime\x18! \x01(\tR\x12candidateVideoMime\x120\n" +
 	"\x14candidate_audio_mime\x18\" \x01(\tR\x12candidateAudioMime\x12.\n" +
-	"\x13candidate_full_mime\x18# \x01(\tR\x11candidateFullMime\"I\n" +
+	"\x13candidate_full_mime\x18# \x01(\tR\x11candidateFullMime\x12,\n" +
+	"\x12audio_packet_count\x18$ \x01(\x03R\x10audioPacketCount\"I\n" +
 	"\x11ScreenshotRequest\x12\x1b\n" +
 	"\tfile_path\x18\x01 \x01(\tR\bfilePath\x12\x17\n" +
 	"\atime_ms\x18\x02 \x01(\x03R\x06timeMs\"P\n" +

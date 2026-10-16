@@ -30,12 +30,15 @@ import (
 
 type ffmpegServer struct {
 	proto.UnimplementedFFmpegServiceServer
+	conversionMu sync.Mutex
 }
 
 type conversionProgressContext struct {
-	ctx    context.Context
-	stream proto.FFmpegService_ConvertVideoServer
-	err    error
+	ctx                 context.Context
+	stream              proto.FFmpegService_ConvertVideoServer
+	encoderName         string
+	hardwareAccelerated bool
+	err                 error
 }
 
 // ChunkPayload bundles the binary fMP4 data with its extraction PTS
@@ -325,19 +328,23 @@ func goHDRToneMapFrameProcessed(userToken C.uintptr_t) {
 }
 
 //export goVideoConversionProgress
-func goVideoConversionProgress(progress C.double, userToken C.uintptr_t) C.int {
+func goVideoConversionProgress(progress C.double, encoderName *C.char, hardwareAccelerated C.int, userToken C.uintptr_t) C.int {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[SIDECAR] Recovered from invalid cgo.Handle in goVideoConversionProgress: %v", r)
 		}
 	}()
 	state := cgo.Handle(userToken).Value().(*conversionProgressContext)
+	state.encoderName = C.GoString(encoderName)
+	state.hardwareAccelerated = hardwareAccelerated != 0
 	if state.ctx.Err() != nil {
 		return -1
 	}
 	if err := state.stream.Send(&proto.VideoConversionProgress{
-		Progress: float64(progress),
-		Stage:    "converting",
+		Progress:            float64(progress),
+		Stage:               "converting",
+		EncoderName:         state.encoderName,
+		HardwareAccelerated: state.hardwareAccelerated,
 	}); err != nil {
 		state.err = err
 		return -1
@@ -399,8 +406,9 @@ func main() {
 	var listener net.Listener
 	var err error
 
-	if runtime.GOOS == "windows" {
-		// Windows: Listen on TCP
+	useTCP := runtime.GOOS == "windows" || os.Getenv("GOTEDO_FFMPEG_SIDECAR_USE_TCP") == "1"
+	if useTCP {
+		// Windows and isolated integration tests: Listen on TCP.
 		listener, err = net.Listen("tcp", *addr)
 		if err != nil {
 			log.Fatalf("Failed to bind TCP Address: %v", err)
@@ -428,13 +436,13 @@ func main() {
 		log.Println("Stopping gRPC sidecar server safely...")
 		grpcServer.GracefulStop()
 
-		if runtime.GOOS != "windows" {
+		if !useTCP {
 			_ = os.Remove(*addr)
 		}
 		os.Exit(0)
 	}()
 
-	log.Printf("FFmpeg Go-gRPC Sidecar listening on UDS: %s", *addr)
+	log.Printf("FFmpeg Go-gRPC Sidecar serving at %s", *addr)
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("gRPC server run failure: %v", err)
 	}
@@ -694,7 +702,11 @@ func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.Metada
 	var cProps C.CMediaProperties
 
 	// 3. Invoke the C-Prober compilation engine
-	ret := C.probe_media_properties(cPath, &cProps)
+	includePacketCounts := C.int(0)
+	if req.GetIncludePacketCounts() {
+		includePacketCounts = 1
+	}
+	ret := C.probe_media_properties(cPath, &cProps, includePacketCounts)
 	if ret < 0 {
 		return nil, status.Errorf(codes.Internal, "FFmpeg native prober failed with code: %d", int(ret))
 	}
@@ -739,6 +751,7 @@ func (s *ffmpegServer) GetMediaProperties(ctx context.Context, req *proto.Metada
 		SampleRate:         int32(cProps.sample_rate),
 		ChannelLayout:      C.GoString(&cProps.channel_layout[0]),
 		AudioBitRate:       int64(cProps.audio_bit_rate),
+		AudioPacketCount:   int64(cProps.audio_packet_count),
 
 		CandidateVideoMime: C.GoString(&cProps.candidate_video_mime[0]),
 		CandidateAudioMime: C.GoString(&cProps.candidate_audio_mime[0]),
@@ -883,6 +896,10 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 // The caller uses a dedicated sidecar process so CPU-heavy conversion cannot
 // contend with playback decoding or encoding.
 func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream proto.FFmpegService_ConvertVideoServer) error {
+	if !s.conversionMu.TryLock() {
+		return status.Error(codes.ResourceExhausted, "this sidecar is already processing a video conversion")
+	}
+	defer s.conversionMu.Unlock()
 	if req.GetJobId() == "" || req.GetSourcePath() == "" || req.GetOutputPath() == "" {
 		return status.Error(codes.InvalidArgument, "job_id, source_path, and output_path are required")
 	}
@@ -956,15 +973,22 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	defer C.free(unsafe.Pointer(cOutput))
 	defer C.free(unsafe.Pointer(cPreset))
 	errBuffer := make([]C.char, 1024)
+	encoderNameBuffer := make([]C.char, 64)
+	hardwareAccelerated := C.int(0)
 	preserveHDR := C.int(0)
 	if req.GetHdrHandling() == "preserve" {
 		preserveHDR = 1
 	}
+	allowHardwareEncoder := C.int(1)
+	if os.Getenv("GOTEDO_TEST_MODE") == "1" && os.Getenv("GOTEDO_FFMPEG_FORCE_CPU_ENCODER") == "1" {
+		allowHardwareEncoder = 0
+	}
 	ret := C.convert_video_file(cSource, cOutput,
 		C.int(req.GetVideoBitrateKbps()), C.int(req.GetAudioBitrateKbps()),
-		cPreset, preserveHDR, cancelFlag,
+		cPreset, preserveHDR, allowHardwareEncoder, cancelFlag,
 		(C.VideoConversionProgressCallback)(C.sidecar_go_conversion_progress),
-		C.uintptr_t(progressHandle), &errBuffer[0], C.size_t(len(errBuffer)))
+		C.uintptr_t(progressHandle), &encoderNameBuffer[0], C.size_t(len(encoderNameBuffer)),
+		&hardwareAccelerated, &errBuffer[0], C.size_t(len(errBuffer)))
 	if ret < 0 {
 		if stream.Context().Err() != nil {
 			return status.FromContextError(stream.Context().Err()).Err()
@@ -976,6 +1000,7 @@ func (s *ffmpegServer) ConvertVideo(req *proto.VideoConversionRequest, stream pr
 	}
 	if err := stream.Send(&proto.VideoConversionProgress{
 		Progress: 100, Stage: "completed", Completed: true, OutputPath: outputPath,
+		EncoderName: C.GoString(&encoderNameBuffer[0]), HardwareAccelerated: hardwareAccelerated != 0,
 	}); err != nil {
 		return err
 	}

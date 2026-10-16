@@ -53,6 +53,8 @@ message VideoConversionProgress {
     string stage = 2;
     bool completed = 3;
     string output_path = 4;
+    string encoder_name = 5;
+    bool hardware_accelerated = 6;
 }
 
 enum PassthroughContainerFormat {
@@ -136,6 +138,8 @@ message DevicesResponse {
 
 message MetadataRequest {
     string file_path = 1;
+    // Optional full-file packet scan for diagnostics and E2E validation.
+    bool include_packet_counts = 2;
 }
 
 message PlaybackSupportRequest {
@@ -215,6 +219,7 @@ message MetadataResponse {
     string candidate_video_mime = 33; // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0"' or 'video/mp4; codecs="avc1.64002a"'
     string candidate_audio_mime = 34; // e.g., 'audio/mp4; codecs="mp4a.40.2"' or 'audio/webm; codecs="opus"'
     string candidate_full_mime  = 35; // e.g., 'video/mp4; codecs="hvc1.2.4.L153.B0, mp4a.40.2"'
+    int64 audio_packet_count = 36; // Populated only when requested
 }
 
 message ScreenshotRequest {

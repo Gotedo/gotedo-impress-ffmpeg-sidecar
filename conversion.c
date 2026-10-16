@@ -1,10 +1,13 @@
 #include "decoder.h"
 #include "_cgo_export.h"
 #include <errno.h>
+#include <stdio.h>
 
-int sidecar_go_conversion_progress(double progress, uintptr_t user_token)
+int sidecar_go_conversion_progress(double progress, const char *encoder_name,
+                                   int hardware_accelerated, uintptr_t user_token)
 {
-  return goVideoConversionProgress(progress, user_token);
+	return goVideoConversionProgress(progress, (char *)encoder_name,
+	                                 hardware_accelerated, user_token);
 }
 
 void request_video_conversion_cancel(volatile int *cancel_flag)
@@ -211,6 +214,137 @@ static void conversion_set_error(char *buffer, size_t buffer_size,
   snprintf(buffer, buffer_size, "%s: %s (%d)", operation, detail, error_code);
 }
 
+static int conversion_encoder_is_hardware(const char *name)
+{
+  return name && strcmp(name, "libx264") != 0;
+}
+
+static const char *conversion_encoder_candidates[] = {
+#ifdef _WIN32
+    "h264_nvenc", "h264_amf", "h264_qsv", "h264_mf", "libx264", NULL
+#elif defined(__APPLE__)
+    "h264_videotoolbox", "libx264", NULL
+#else
+    "h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf", "libx264", NULL
+#endif
+};
+
+static enum AVPixelFormat conversion_encoder_pixel_format(const AVCodec *codec,
+                                                           int preserve_hdr)
+{
+  const enum AVPixelFormat *formats = NULL;
+  int ret = avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_PIX_FORMAT,
+                                         0, (const void **)&formats, NULL);
+  if (ret < 0 || !formats)
+    return preserve_hdr ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
+
+  const enum AVPixelFormat hdr_formats[] = {
+      AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_P010LE, AV_PIX_FMT_NONE};
+  const enum AVPixelFormat sdr_formats[] = {
+      AV_PIX_FMT_YUV420P, AV_PIX_FMT_NV12, AV_PIX_FMT_NONE};
+  const enum AVPixelFormat *preferred = preserve_hdr ? hdr_formats : sdr_formats;
+  for (int p = 0; preferred[p] != AV_PIX_FMT_NONE; p++)
+    for (int i = 0; formats[i] != AV_PIX_FMT_NONE; i++)
+      if (formats[i] == preferred[p])
+        return formats[i];
+  return AV_PIX_FMT_NONE;
+}
+
+static int conversion_open_h264_encoder(AVCodecContext **out_encoder,
+                                        const AVCodec **out_codec,
+                                        int width, int height,
+                                        AVRational time_base,
+                                        AVRational framerate,
+                                        int video_bitrate_kbps,
+                                        const char *encoder_preset,
+                                        int preserve_hdr,
+                                        int allow_hardware_encoder,
+                                        char *encoder_name,
+                                        size_t encoder_name_size,
+                                        int *hardware_accelerated)
+{
+  int last_error = AVERROR_ENCODER_NOT_FOUND;
+  for (int i = 0; conversion_encoder_candidates[i] != NULL; i++)
+  {
+    const char *candidate = conversion_encoder_candidates[i];
+    if (!allow_hardware_encoder && conversion_encoder_is_hardware(candidate))
+      continue;
+    const AVCodec *codec = avcodec_find_encoder_by_name(candidate);
+    if (!codec)
+      continue;
+    enum AVPixelFormat pixel_format = conversion_encoder_pixel_format(codec, preserve_hdr);
+    if (pixel_format == AV_PIX_FMT_NONE)
+      continue;
+
+    AVCodecContext *encoder = avcodec_alloc_context3(codec);
+    if (!encoder)
+      return AVERROR(ENOMEM);
+    encoder->width = width;
+    encoder->height = height;
+    encoder->pix_fmt = pixel_format;
+    encoder->time_base = time_base;
+    encoder->framerate = framerate;
+    encoder->bit_rate = (int64_t)video_bitrate_kbps * 1000;
+    encoder->rc_max_rate = encoder->bit_rate;
+    encoder->rc_buffer_size = video_bitrate_kbps * 2000;
+    encoder->gop_size = 50;
+    encoder->color_range = preserve_hdr ? AVCOL_RANGE_UNSPECIFIED : AVCOL_RANGE_MPEG;
+    encoder->color_primaries = preserve_hdr ? AVCOL_PRI_UNSPECIFIED : AVCOL_PRI_BT709;
+    encoder->color_trc = preserve_hdr ? AVCOL_TRC_UNSPECIFIED : AVCOL_TRC_BT709;
+    encoder->colorspace = preserve_hdr ? AVCOL_SPC_UNSPECIFIED : AVCOL_SPC_BT709;
+    encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+    if (encoder->priv_data)
+    {
+      if (strcmp(candidate, "libx264") == 0)
+      {
+        av_opt_set(encoder->priv_data, "preset",
+                   encoder_preset && encoder_preset[0] ? encoder_preset : "slow", 0);
+        av_opt_set(encoder->priv_data, "profile", preserve_hdr ? "high10" : "high", 0);
+      }
+      else if (strcmp(candidate, "h264_nvenc") == 0)
+      {
+        int preset_index = 4;
+        const char *presets[] = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"};
+        for (int p = 0; p < 9; p++)
+          if (encoder_preset && strcmp(encoder_preset, presets[p]) == 0)
+            preset_index = 1 + (p * 6 / 8);
+        char preset[4];
+        snprintf(preset, sizeof(preset), "p%d", preset_index);
+        av_opt_set(encoder->priv_data, "preset", preset, 0);
+        av_opt_set(encoder->priv_data, "rc", "vbr", 0);
+      }
+      else if (strcmp(candidate, "h264_amf") == 0)
+      {
+        av_opt_set(encoder->priv_data, "quality",
+                   encoder_preset && (strcmp(encoder_preset, "slow") == 0 || strcmp(encoder_preset, "veryslow") == 0) ? "quality" : "speed", 0);
+      }
+      else if (strcmp(candidate, "h264_videotoolbox") == 0)
+      {
+        av_opt_set(encoder->priv_data, "realtime", "0", 0);
+        av_opt_set(encoder->priv_data, "allow_sw", "0", 0);
+      }
+    }
+    if (strcmp(candidate, "h264_qsv") == 0 && encoder->priv_data)
+      av_opt_set(encoder->priv_data, "preset", "medium", 0);
+
+    int ret = avcodec_open2(encoder, codec, NULL);
+    if (ret >= 0)
+    {
+      *out_encoder = encoder;
+      *out_codec = codec;
+      if (encoder_name && encoder_name_size)
+        snprintf(encoder_name, encoder_name_size, "%s", candidate);
+      if (hardware_accelerated)
+        *hardware_accelerated = conversion_encoder_is_hardware(candidate);
+      return 0;
+    }
+    last_error = ret;
+    avcodec_free_context(&encoder);
+  }
+  return last_error;
+}
+
 static int conversion_scale_video_frame(AVFrame *decoded, AVFrame *scaled,
                                         AVCodecContext *decoder,
                                         AVCodecContext *encoder,
@@ -272,12 +406,15 @@ static int conversion_scale_video_frame(AVFrame *decoded, AVFrame *scaled,
   return 0;
 }
 
-int convert_video_file(const char *source_path, const char *output_path,
-                       int video_bitrate_kbps, int audio_bitrate_kbps,
-                       const char *encoder_preset, int preserve_hdr,
-                       volatile int *cancel_flag,
-                       VideoConversionProgressCallback progress_callback,
-                       uintptr_t user_token, char *err_buf, size_t err_buf_size)
+static int convert_video_file_once(const char *source_path, const char *output_path,
+                                   int video_bitrate_kbps, int audio_bitrate_kbps,
+                                   const char *encoder_preset, int preserve_hdr,
+                                   int allow_hardware_encoder,
+                                   volatile int *cancel_flag,
+                                   VideoConversionProgressCallback progress_callback,
+                                   uintptr_t user_token, char *encoder_name,
+                                   size_t encoder_name_size, int *hardware_accelerated,
+                                   char *err_buf, size_t err_buf_size)
 {
   int ret = 0;
   AVFormatContext *input = NULL, *output = NULL;
@@ -302,6 +439,10 @@ int convert_video_file(const char *source_path, const char *output_path,
 
   if (err_buf && err_buf_size)
     err_buf[0] = '\0';
+  if (encoder_name && encoder_name_size)
+    encoder_name[0] = '\0';
+  if (hardware_accelerated)
+    *hardware_accelerated = 0;
   if (!source_path || !source_path[0] || !output_path || !output_path[0])
     return AVERROR(EINVAL);
   if (video_bitrate_kbps < 100 || video_bitrate_kbps > 100000 ||
@@ -350,48 +491,27 @@ int convert_video_file(const char *source_path, const char *output_path,
   if (ret < 0 || (ret = avcodec_open2(video_decoder, decoder, NULL)) < 0)
     goto fail;
 
-  const AVCodec *video_codec = avcodec_find_encoder_by_name("libx264");
-  if (!video_codec)
-    video_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-  if (!video_codec)
-  {
-    ret = AVERROR_ENCODER_NOT_FOUND;
-    goto fail;
-  }
-  video_encoder = avcodec_alloc_context3(video_codec);
-  if (!video_encoder)
-  {
-    ret = AVERROR(ENOMEM);
-    goto fail;
-  }
-  video_encoder->width = video_decoder->width;
-  video_encoder->height = video_decoder->height;
-  video_encoder->width &= ~1;
-  video_encoder->height &= ~1;
-  if (video_encoder->width < 2 || video_encoder->height < 2)
+  const AVCodec *video_codec = NULL;
+  int target_width = video_decoder->width & ~1;
+  int target_height = video_decoder->height & ~1;
+  AVRational frame_rate = video_input_stream->avg_frame_rate.num > 0 && video_input_stream->avg_frame_rate.den > 0
+                              ? video_input_stream->avg_frame_rate
+                              : (AVRational){25, 1};
+  AVRational frame_time_base = av_inv_q(frame_rate);
+  if (target_width < 2 || target_height < 2)
   {
     ret = AVERROR(EINVAL);
     goto fail;
   }
-  video_encoder->pix_fmt = preserve_hdr ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
-  video_encoder->time_base = video_input_stream->avg_frame_rate.num > 0 && video_input_stream->avg_frame_rate.den > 0
-                                 ? av_inv_q(video_input_stream->avg_frame_rate)
-                                 : (AVRational){1, 25};
-  video_encoder->framerate = av_inv_q(video_encoder->time_base);
-  video_encoder->bit_rate = (int64_t)video_bitrate_kbps * 1000;
-  video_encoder->rc_max_rate = video_encoder->bit_rate;
-  video_encoder->rc_buffer_size = video_bitrate_kbps * 2000;
-  video_encoder->gop_size = 2 * video_encoder->framerate.num / video_encoder->framerate.den;
-  if (video_encoder->gop_size < 1)
-    video_encoder->gop_size = 50;
-  video_encoder->color_range = preserve_hdr ? video_decoder->color_range : AVCOL_RANGE_MPEG;
-  video_encoder->color_primaries = preserve_hdr ? video_decoder->color_primaries : AVCOL_PRI_BT709;
-  video_encoder->color_trc = preserve_hdr ? video_decoder->color_trc : AVCOL_TRC_BT709;
-  video_encoder->colorspace = preserve_hdr ? video_decoder->colorspace : AVCOL_SPC_BT709;
-  video_encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-  av_opt_set(video_encoder->priv_data, "preset",
-             encoder_preset && encoder_preset[0] ? encoder_preset : "slow", 0);
-  av_opt_set(video_encoder->priv_data, "profile", preserve_hdr ? "high10" : "high", 0);
+  ret = conversion_open_h264_encoder(&video_encoder, &video_codec,
+                                     target_width, target_height,
+                                     frame_time_base, frame_rate,
+                                     video_bitrate_kbps, encoder_preset,
+                                     preserve_hdr, allow_hardware_encoder,
+                                     encoder_name,
+                                     encoder_name_size, hardware_accelerated);
+  if (ret < 0)
+    goto fail;
   ret = avformat_alloc_output_context2(&output, NULL, "mp4", output_path);
   if (ret < 0 || !output)
   {
@@ -399,9 +519,6 @@ int convert_video_file(const char *source_path, const char *output_path,
       ret = AVERROR_MUXER_NOT_FOUND;
     goto fail;
   }
-  ret = avcodec_open2(video_encoder, video_codec, NULL);
-  if (ret < 0)
-    goto fail;
   if (output->oformat->flags & AVFMT_GLOBALHEADER)
   {
     video_encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -422,8 +539,16 @@ int convert_video_file(const char *source_path, const char *output_path,
   {
     const AVCodec *audio_decoder_codec = avcodec_find_decoder(audio_input_stream->codecpar->codec_id);
     const AVCodec *audio_encoder_codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-    if (audio_decoder_codec && audio_encoder_codec)
+    if (!audio_decoder_codec)
     {
+      ret = AVERROR_DECODER_NOT_FOUND;
+      goto fail;
+    }
+    if (!audio_encoder_codec)
+    {
+      ret = AVERROR_ENCODER_NOT_FOUND;
+      goto fail;
+    }
       audio_decoder = avcodec_alloc_context3(audio_decoder_codec);
       audio_encoder = avcodec_alloc_context3(audio_encoder_codec);
       if (!audio_decoder || !audio_encoder)
@@ -483,7 +608,6 @@ int convert_video_file(const char *source_path, const char *output_path,
         ret = AVERROR(ENOMEM);
         goto fail;
       }
-    }
   }
   ret = avio_open(&output->pb, output_path, AVIO_FLAG_WRITE);
   if (ret < 0)
@@ -520,7 +644,9 @@ int convert_video_file(const char *source_path, const char *output_path,
       goto fail;
     }
   }
-  if (progress_callback && progress_callback(0.0, user_token) < 0)
+  if (progress_callback && progress_callback(0.0, encoder_name,
+                                             hardware_accelerated ? *hardware_accelerated : 0,
+                                             user_token) < 0)
   {
     ret = AVERROR_EXIT;
     goto fail;
@@ -576,7 +702,9 @@ int convert_video_file(const char *source_path, const char *output_path,
           double percent = elapsed * 100.0 / duration_seconds;
           if (percent > 99.0)
             percent = 99.0;
-          if (progress_callback && progress_callback(percent, user_token) < 0)
+          if (progress_callback && progress_callback(percent, encoder_name,
+                                                     hardware_accelerated ? *hardware_accelerated : 0,
+                                                     user_token) < 0)
           {
             ret = AVERROR_EXIT;
             goto fail;
@@ -691,7 +819,9 @@ int convert_video_file(const char *source_path, const char *output_path,
   ret = av_write_trailer(output);
   if (ret < 0)
     goto fail;
-  if (progress_callback && progress_callback(100.0, user_token) < 0)
+  if (progress_callback && progress_callback(100.0, encoder_name,
+                                             hardware_accelerated ? *hardware_accelerated : 0,
+                                             user_token) < 0)
   {
     ret = AVERROR_EXIT;
     goto fail;
@@ -724,4 +854,41 @@ cleanup:
   av_audio_fifo_free(audio_fifo);
   avfilter_graph_free(&hdr_graph);
   return ret;
+}
+
+int convert_video_file(const char *source_path, const char *output_path,
+                       int video_bitrate_kbps, int audio_bitrate_kbps,
+                       const char *encoder_preset, int preserve_hdr,
+                       int allow_hardware_encoder,
+                       volatile int *cancel_flag,
+                       VideoConversionProgressCallback progress_callback,
+                       uintptr_t user_token, char *encoder_name,
+                       size_t encoder_name_size, int *hardware_accelerated,
+                       char *err_buf, size_t err_buf_size)
+{
+  int ret = convert_video_file_once(source_path, output_path,
+                                    video_bitrate_kbps, audio_bitrate_kbps,
+                                    encoder_preset, preserve_hdr,
+                                    allow_hardware_encoder, cancel_flag,
+                                    progress_callback, user_token, encoder_name,
+                                    encoder_name_size, hardware_accelerated,
+                                    err_buf, err_buf_size);
+  if (ret >= 0 || !allow_hardware_encoder || !hardware_accelerated ||
+      !*hardware_accelerated || ret == AVERROR_EXIT ||
+      (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_ACQUIRE) != 0))
+    return ret;
+
+  // Hardware encoders can open successfully and still fail on the first
+  // frames because of device or input-specific constraints. Drop that partial
+  // file and retry the whole job with libx264 before reporting failure.
+  (void)remove(output_path);
+  *hardware_accelerated = 0;
+  if (encoder_name && encoder_name_size > 0)
+    encoder_name[0] = '\0';
+  return convert_video_file_once(source_path, output_path,
+                                 video_bitrate_kbps, audio_bitrate_kbps,
+                                 encoder_preset, preserve_hdr, 0, cancel_flag,
+                                 progress_callback, user_token, encoder_name,
+                                 encoder_name_size, hardware_accelerated,
+                                 err_buf, err_buf_size);
 }

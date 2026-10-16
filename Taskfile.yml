@@ -134,6 +134,12 @@ tasks:
   build_base:
     internal: true
     dir: '{{.TASKFILE_DIR}}' # Force compilation directory to always be here
+    env:
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
     cmds:
       - |
         {{if and (eq OS "windows") (eq .GOOS "windows")}}
@@ -145,6 +151,19 @@ tasks:
         {{end}}
         if [ "{{.IS_TEST}}" = "true" ]; then
           echo ">>> Running integration tests for {{.GOOS}}/{{.GOARCH}}..."
+          {{if eq .GOOS "darwin"}}
+          TEST_BINARY="{{.TASKFILE_DIR}}/build_cache/test_bin/sidecar_test_{{.GOOS}}_{{.GOARCH}}" && \
+          mkdir -p "$(dirname "$TEST_BINARY")" && \
+          GOCACHE="{{.TASKFILE_DIR}}/build_cache/go_build_cache/{{.GOOS}}/{{.GOARCH}}" \
+          CGO_ENABLED=1 \
+          CGO_CFLAGS="-I{{.FFMPEG_SRC_DIR}}/include" \
+          CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
+          GOOS={{.GOOS}} \
+          GOARCH={{.GOARCH}} \
+          go test -race -count=1 -c -o "$TEST_BINARY" ./ && \
+          install_name_tool -change "libz.1.dylib" "/usr/lib/libz.1.dylib" "$TEST_BINARY" && \
+          "$TEST_BINARY" -test.v -test.count=1 -test.run "{{.TEST_RUN}}"
+          {{else}}
           {{if eq OS "windows"}}
           CC="{{.WINDOWS_MINGW_BIN}}/gcc.exe" \
           CXX="{{.WINDOWS_MINGW_BIN}}/g++.exe" \
@@ -156,7 +175,8 @@ tasks:
           CGO_LDFLAGS="-L{{.FFMPEG_SRC_DIR}}/lib {{.LDFLAGS_EXTRA}}" \
           GOOS={{.GOOS}} \
           GOARCH={{.GOARCH}} \
-          go test -v -race -count=1 ./ -run TestIntegration_
+          go test -v -race -count=1 ./ -run "{{.TEST_RUN}}"
+          {{end}}
         else
           echo "Building sidecar for {{.GOOS}}/{{.GOARCH}} using FFmpeg libs from {{.FFMPEG_SRC_DIR}}..."
           {{if eq OS "windows"}}
@@ -205,6 +225,12 @@ tasks:
       RESOLVED_FILE_NAME: '{{.OUT_FILE_NAME | default .DEFAULT_FILE_NAME}}'
       OUTFILE: '{{.OUT_DIR}}/{{.RESOLVED_FILE_NAME}}{{if and (eq .GOOS "windows") (not (hasSuffix ".exe" .RESOLVED_FILE_NAME))}}.exe{{end}}'
       IS_TEST: '{{.IS_TEST | default "false"}}'
+      TEST_RUN: '{{.TEST_RUN | default "TestIntegration_"}}'
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
       RELEASE: '{{.RELEASE}}'
       WINDOWS_MINGW_BIN:
         sh: |
@@ -233,6 +259,13 @@ tasks:
       GOOS: darwin
       GOARCH: '{{.GOARCH | default "arm64"}}'
       FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+      IS_TEST: '{{.IS_TEST}}'
+      TEST_RUN: '{{.TEST_RUN}}'
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
       RELEASE: '{{.RELEASE}}'
       # We link swresample, our static dependencies, compression formats, and macOS engine frameworks
       LDFLAGS_EXTRA: >-
@@ -248,6 +281,13 @@ tasks:
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
           FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+          IS_TEST: '{{.IS_TEST}}'
+          TEST_RUN: '{{.TEST_RUN}}'
+          FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+          GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+          GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+          GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+          GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
           RELEASE: '{{.RELEASE}}'
 
   build:native:windows:
@@ -258,6 +298,13 @@ tasks:
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOARCH: '{{.GOARCH | default "amd64"}}'
       FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+      IS_TEST: '{{.IS_TEST}}'
+      TEST_RUN: '{{.TEST_RUN | default "TestIntegration_"}}'
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
       RELEASE: '{{.RELEASE}}'
       # Windows requires Winsock and threading libraries
       # Miniaudio calls winmm/ole32. FFmpeg calls sockets, crypto APIs, and media engine foundations.
@@ -281,6 +328,13 @@ tasks:
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
           FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+          IS_TEST: '{{.IS_TEST}}'
+          TEST_RUN: '{{.TEST_RUN}}'
+          FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+          GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+          GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+          GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+          GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
           RELEASE: '{{.RELEASE}}'
 
   build:native:linux:
@@ -291,6 +345,13 @@ tasks:
       OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
       GOOS: linux
       GOARCH: '{{.GOARCH | default "amd64"}}'
+      IS_TEST: '{{.IS_TEST}}'
+      TEST_RUN: '{{.TEST_RUN | default "TestIntegration_"}}'
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
       RELEASE: '{{.RELEASE}}'
       # Linux requires standard pthread and math libraries for static linking
       # Miniaudio uses lasound. We add math, standard threading, and dependency libraries.
@@ -308,6 +369,13 @@ tasks:
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
           FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+          IS_TEST: '{{.IS_TEST}}'
+          TEST_RUN: '{{.TEST_RUN}}'
+          FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+          GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+          GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+          GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+          GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
           RELEASE: '{{.RELEASE}}'
 
   # The run task now maps dynamically based on passed arguments
@@ -351,6 +419,11 @@ tasks:
       FFMPEG_LIB_ARCH_DIR: '{{.FFMPEG_LIB_DIR}}/{{.TARGET_OS}}/{{.TARGET_ARCH}}'
       MACOSX_DEPLOYMENT_TARGET: '{{.MACOSX_DEPLOYMENT_TARGET}}'
       RELEASE: '{{.RELEASE | default "false"}}'
+      FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+      GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+      GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+      GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+      GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
     deps:
       - task: generate:proto
     cmds:
@@ -364,6 +437,13 @@ tasks:
           OUT_DIR: '{{.OUT_DIR}}'
           OUT_FILE_NAME: '{{.OUT_FILE_NAME}}'
           FFMPEG_LIB_DIR: '{{.FFMPEG_LIB_DIR}}'
+          IS_TEST: '{{.IS_TEST}}'
+          TEST_RUN: '{{.TEST_RUN}}'
+          FFMPEG_CONVERSION_E2E: '{{.FFMPEG_CONVERSION_E2E}}'
+          GOTEDO_TEST_MODE: '{{.GOTEDO_TEST_MODE}}'
+          GOTEDO_FFMPEG_SIDECAR_PATH: '{{.GOTEDO_FFMPEG_SIDECAR_PATH}}'
+          GOTEDO_FFMPEG_SIDECAR_USE_TCP: '{{.GOTEDO_FFMPEG_SIDECAR_USE_TCP}}'
+          GOTEDO_FFMPEG_FORCE_CPU_ENCODER: '{{.GOTEDO_FFMPEG_FORCE_CPU_ENCODER}}'
           RELEASE: '{{.RELEASE}}'
     preconditions:
       # Cross-platform directory & contents check (works on macOS, Linux, and Windows PowerShell/cmd)

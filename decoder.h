@@ -185,7 +185,8 @@ typedef struct TranscodeContext
   volatile int suppress_output;
 } TranscodeContext;
 
-typedef int (*VideoConversionProgressCallback)(double progress, uintptr_t user_token);
+typedef int (*VideoConversionProgressCallback)(double progress, const char *encoder_name,
+                                              int hardware_accelerated, uintptr_t user_token);
 
 // Struct mapping exactly to our proto/Go expectations
 typedef struct
@@ -236,6 +237,7 @@ typedef struct
   int32_t sample_rate;
   char channel_layout[64];
   int64_t audio_bit_rate;
+  int64_t audio_packet_count;
 
   // Candidate Browser MIME Codec Strings
   char candidate_video_mime[128];
@@ -280,7 +282,8 @@ void free_fmp4_muxer(AVFormatContext *out_fmt_ctx);
 int get_miniaudio_devices(NativeAudioDevice *devices, int max_devices);
 
 // Probes a file and fills out the CMediaProperties memory layout
-int probe_media_properties(const char *file_path, CMediaProperties *props);
+int probe_media_properties(const char *file_path, CMediaProperties *props,
+                           int include_packet_counts);
 
 // Opens the real decoder/encoder path, decodes a sample frame, and reports
 // whether native GPU playback is actually available without starting a stream.
@@ -295,9 +298,12 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 int convert_video_file(const char *source_path, const char *output_path,
                        int video_bitrate_kbps, int audio_bitrate_kbps,
                        const char *encoder_preset, int preserve_hdr,
+                       int allow_hardware_encoder,
                        volatile int *cancel_flag,
                        VideoConversionProgressCallback progress_callback,
-                       uintptr_t user_token, char *err_buf, size_t err_buf_size);
+                       uintptr_t user_token, char *encoder_name,
+                       size_t encoder_name_size, int *hardware_accelerated,
+                       char *err_buf, size_t err_buf_size);
 
 // Shared HDR-to-SDR frame converter used by playback, screenshots, and file conversion.
 int tone_map_hdr_frame(AVFilterGraph **graph, AVFilterContext **source,
@@ -305,7 +311,8 @@ int tone_map_hdr_frame(AVFilterGraph **graph, AVFilterContext **source,
                        AVRational time_base, int output_width, int output_height,
                        enum AVColorRange output_range, enum AVPixelFormat output_format,
                        uintptr_t go_token, int *reported_frame_processed);
-int sidecar_go_conversion_progress(double progress, uintptr_t user_token);
+int sidecar_go_conversion_progress(double progress, const char *encoder_name,
+                                   int hardware_accelerated, uintptr_t user_token);
 void request_video_conversion_cancel(volatile int *cancel_flag);
 
 int run_production_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token);

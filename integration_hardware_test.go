@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"image/jpeg"
 	"io"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,16 +32,30 @@ import (
 func setupRealHardwareTestServer(t *testing.T) (proto.FFmpegServiceClient, string, func()) {
 	t.Helper()
 
-	// TCP on loopback keeps this integration harness portable to sandboxed
-	// environments where creating Unix domain sockets is restricted.
-	endpoint := "127.0.0.1:0"
-	network := "tcp"
-
-	listener, err := net.Listen(network, endpoint)
+	// Use the application's Unix-domain IPC on Unix hosts. Windows uses loopback
+	// TCP because the sidecar manager uses TCP there as well.
+	network := "unix"
+	address := "127.0.0.1:0"
+	if runtime.GOOS == "windows" || os.Getenv("GOTEDO_FFMPEG_SIDECAR_USE_TCP") == "1" {
+		network = "tcp"
+	} else {
+		// macOS limits Unix-domain socket paths to a short fixed length. Testing
+		// under t.TempDir() can exceed that limit because its path includes a long
+		// per-test directory name.
+		socketDir, err := os.MkdirTemp("/tmp", "ff-")
+		if err != nil {
+			t.Fatalf("failed to create short socket directory: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+		address = filepath.Join(socketDir, "i.sock")
+	}
+	listener, err := net.Listen(network, address)
 	if err != nil {
 		t.Fatalf("[HARDWARE TEST SETUP] Failed to bind local test listener: %v", err)
 	}
-	address := listener.Addr().String()
+	if network == "tcp" {
+		address = listener.Addr().String()
+	}
 
 	grpcServer := grpc.NewServer()
 	srv := &ffmpegServer{}
@@ -55,9 +67,16 @@ func setupRealHardwareTestServer(t *testing.T) (proto.FFmpegServiceClient, strin
 		}
 	}()
 
-	// Establish real client channel
+	// Establish a real client channel over the selected local IPC transport.
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	dialTarget := address
-	conn, err := grpc.Dial(dialTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if network == "unix" {
+		dialTarget = "passthrough:///integration"
+		dialOptions = append(dialOptions, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", address)
+		}))
+	}
+	conn, err := grpc.Dial(dialTarget, dialOptions...)
 	if err != nil {
 		grpcServer.Stop()
 		listener.Close()
@@ -155,29 +174,6 @@ func generateExodusHDRTestMedia(t *testing.T) (string, func()) {
 	}
 
 	return absPath, func() {}
-}
-
-func findFFprobe(t *testing.T) string {
-	t.Helper()
-
-	candidates := []string{
-		os.Getenv("FFPROBE_BIN"),
-		filepath.Join("..", "..", "libs", "ffmpeg", "windows", "amd64", "bin", "ffprobe.exe"),
-	}
-	if executable, err := exec.LookPath("ffprobe"); err == nil {
-		candidates = append(candidates, executable)
-	}
-
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
-		}
-	}
-	t.Skip("ffprobe is required for fMP4 audio integration verification")
-	return ""
 }
 
 // -------------------------------------------------------------------------
@@ -594,11 +590,10 @@ func TestIntegration_E2E_HDRZscaleToneMapping(t *testing.T) {
 	}
 }
 
-// TestIntegration_E2E_TranscodeCarriesAACPackets verifies the browser-facing
-// contract, not merely the source metadata: the emitted fMP4 must contain an
-// AAC stream and actual AAC access units after H.264 transcoding starts.
-func TestIntegration_E2E_TranscodeCarriesAACPackets(t *testing.T) {
-	ffprobe := findFFprobe(t)
+// TestIntegration_E2E_TranscodeCarriesAAC verifies the browser-facing output
+// contract by asking the sidecar's native media prober to inspect captured
+// fMP4 emitted by the H.264 transcode pipeline.
+func TestIntegration_E2E_TranscodeCarriesAAC(t *testing.T) {
 	client, _, cleanup := setupRealHardwareTestServer(t)
 	defer cleanup()
 
@@ -618,9 +613,10 @@ func TestIntegration_E2E_TranscodeCarriesAACPackets(t *testing.T) {
 		t.Fatalf("Could not start transcode stream for AAC verification: %v", err)
 	}
 
-	// Preserve complete AVIO writes. The first init segment plus this amount of
-	// media includes a keyframe fragment and its interleaved AAC packets.
-	const minimumCaptureBytes = 512 * 1024
+	// Preserve complete AVIO writes long enough to include multiple fragmented
+	// MP4 media fragments. A byte threshold of 512 KiB can be reached by video
+	// packets before the muxer has emitted a complete AAC-bearing fragment.
+	const minimumCaptureBytes = 3 * 1024 * 1024
 	capture := make([]byte, 0, minimumCaptureBytes)
 	for len(capture) < minimumCaptureBytes {
 		fragment, recvErr := stream.Recv()
@@ -636,39 +632,29 @@ func TestIntegration_E2E_TranscodeCarriesAACPackets(t *testing.T) {
 		t.Fatalf("Could not write captured fMP4 stream: %v", err)
 	}
 
-	streamJSON, err := exec.Command(ffprobe, "-v", "error", "-show_streams", "-of", "json", capturePath).Output()
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelProbe()
+	metadata, err := client.GetMediaProperties(probeCtx, &proto.MetadataRequest{
+		FilePath:            capturePath,
+		IncludePacketCounts: true,
+	})
 	if err != nil {
-		t.Fatalf("ffprobe could not inspect captured fMP4 streams: %v", err)
+		t.Fatalf("sidecar could not inspect captured fMP4 media properties: %v", err)
 	}
-	var streams struct {
-		Streams []struct {
-			CodecType string `json:"codec_type"`
-			CodecName string `json:"codec_name"`
-		} `json:"streams"`
+	if !metadata.GetHasVideo() || metadata.GetVideoCodec() != "h264" {
+		t.Fatalf("captured fMP4 does not contain the expected H.264 video stream: has_video=%t codec=%q",
+			metadata.GetHasVideo(), metadata.GetVideoCodec())
 	}
-	if err := json.Unmarshal(streamJSON, &streams); err != nil {
-		t.Fatalf("Could not parse ffprobe stream report: %v", err)
+	if !metadata.GetHasAudio() || metadata.GetAudioCodec() != "aac" {
+		t.Fatalf("captured H.264 fMP4 does not contain the expected AAC audio stream: has_audio=%t codec=%q",
+			metadata.GetHasAudio(), metadata.GetAudioCodec())
 	}
-	for _, streamInfo := range streams.Streams {
-		if streamInfo.CodecType == "audio" && streamInfo.CodecName == "aac" {
-			packetJSON, packetErr := exec.Command(ffprobe, "-v", "error", "-select_streams", "a", "-show_packets", "-of", "json", capturePath).Output()
-			if packetErr != nil {
-				t.Fatalf("ffprobe could not inspect captured AAC packets: %v", packetErr)
-			}
-			var packets struct {
-				Packets []json.RawMessage `json:"packets"`
-			}
-			if err := json.Unmarshal(packetJSON, &packets); err != nil {
-				t.Fatalf("Could not parse ffprobe AAC packet report: %v", err)
-			}
-			if len(packets.Packets) == 0 {
-				t.Fatal("Captured fMP4 declares AAC but contains no AAC packets")
-			}
-			t.Logf("[AUDIO E2E] Verified AAC stream with %d captured packets", len(packets.Packets))
-			return
-		}
+	if metadata.GetAudioPacketCount() == 0 {
+		t.Fatal("captured fMP4 declares AAC but sidecar found no audio packets")
 	}
-	t.Fatal("Captured H.264 fMP4 stream does not declare an AAC audio track")
+	t.Logf("[AUDIO E2E] Sidecar probe verified output streams: video=%s audio=%s (%d Hz, %d channels, %d packets)",
+		metadata.GetVideoCodec(), metadata.GetAudioCodec(), metadata.GetSampleRate(),
+		metadata.GetAudioChannels(), metadata.GetAudioPacketCount())
 }
 
 // -------------------------------------------------------------------------
