@@ -978,6 +978,8 @@ func (s *ffmpegServer) ControlStream(ctx context.Context, req *proto.ControlRequ
 // StopStream is an explicit stop (alias to STOP control for convenience)
 func (s *ffmpegServer) StopStream(ctx context.Context, req *proto.StreamControlRequest) (*proto.StreamControlResponse, error) {
 	targetID := req.GetTargetId()
+	log.Printf("[VIDEO STOP TRACE] sidecar-stop-rpc-received target=%s", targetID)
 	unregisterPlayback(targetID)
+	log.Printf("[VIDEO STOP TRACE] sidecar-stop-rpc-complete target=%s", targetID)
 	return &proto.StreamControlResponse{Success: true, Message: "stream stopped"}, nil
 }
