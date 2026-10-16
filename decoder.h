@@ -305,6 +305,15 @@ int convert_video_file(const char *source_path, const char *output_path,
                        size_t encoder_name_size, int *hardware_accelerated,
                        char *err_buf, size_t err_buf_size);
 
+// Rescales decoded presentation timestamps into encoder time and guarantees
+// strictly increasing PTS for sources with duplicate frame timestamps.
+int64_t conversion_rescale_monotonic_pts(int64_t input_pts,
+                                         int input_time_base_num,
+                                         int input_time_base_den,
+                                         int output_time_base_num,
+                                         int output_time_base_den,
+                                         int64_t *last_output_pts);
+
 // Shared HDR-to-SDR frame converter used by playback, screenshots, and file conversion.
 int tone_map_hdr_frame(AVFilterGraph **graph, AVFilterContext **source,
                        AVFilterContext **sink, AVFrame *input, AVFrame *output,

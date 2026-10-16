@@ -214,6 +214,31 @@ static void conversion_set_error(char *buffer, size_t buffer_size,
   snprintf(buffer, buffer_size, "%s: %s (%d)", operation, detail, error_code);
 }
 
+int64_t conversion_rescale_monotonic_pts(int64_t input_pts,
+                                         int input_time_base_num,
+                                         int input_time_base_den,
+                                         int output_time_base_num,
+                                         int output_time_base_den,
+                                         int64_t *last_output_pts)
+{
+  if (input_pts == AV_NOPTS_VALUE || input_time_base_num <= 0 ||
+      input_time_base_den <= 0 || output_time_base_num <= 0 ||
+      output_time_base_den <= 0)
+    return AV_NOPTS_VALUE;
+
+  AVRational input_time_base = {input_time_base_num, input_time_base_den};
+  AVRational output_time_base = {output_time_base_num, output_time_base_den};
+  int64_t output_pts = av_rescale_q(input_pts, input_time_base, output_time_base);
+  if (last_output_pts && *last_output_pts != AV_NOPTS_VALUE &&
+      output_pts <= *last_output_pts)
+  {
+    output_pts = *last_output_pts == INT64_MAX ? INT64_MAX : *last_output_pts + 1;
+  }
+  if (last_output_pts)
+    *last_output_pts = output_pts;
+  return output_pts;
+}
+
 static int conversion_encoder_is_hardware(const char *name)
 {
   return name && strcmp(name, "libx264") != 0;
@@ -433,6 +458,7 @@ static int convert_video_file_once(const char *source_path, const char *output_p
   int hdr_frame_reported = 0;
   int video_index = -1, audio_index = -1;
   int64_t first_video_pts = AV_NOPTS_VALUE, video_duration = 0;
+  int64_t last_video_output_pts = AV_NOPTS_VALUE;
   int64_t audio_next_pts = 0;
   double duration_seconds = 0.0, last_progress = -1.0;
   ConversionInterrupt interrupt = {cancel_flag};
@@ -687,8 +713,15 @@ static int convert_video_file_once(const char *source_path, const char *output_p
           frame_pts = video_duration;
         else if (first_video_pts != AV_NOPTS_VALUE)
           frame_pts -= first_video_pts;
-        video_frame->pts = av_rescale_q(frame_pts, video_input_stream->time_base,
-                                        video_encoder->time_base);
+        video_frame->pts = conversion_rescale_monotonic_pts(
+            frame_pts, video_input_stream->time_base.num,
+            video_input_stream->time_base.den, video_encoder->time_base.num,
+            video_encoder->time_base.den, &last_video_output_pts);
+        if (video_frame->pts == AV_NOPTS_VALUE)
+        {
+          ret = AVERROR(EINVAL);
+          goto fail;
+        }
         video_duration = frame_pts + 1;
         ret = conversion_encode_frame(video_encoder, output, video_output_stream,
                                       video_frame, encoded_packet);
@@ -755,8 +788,15 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                             : video_duration;
     if (first_video_pts != AV_NOPTS_VALUE)
       frame_pts -= first_video_pts;
-    video_frame->pts = av_rescale_q(frame_pts, video_input_stream->time_base,
-                                    video_encoder->time_base);
+    video_frame->pts = conversion_rescale_monotonic_pts(
+        frame_pts, video_input_stream->time_base.num,
+        video_input_stream->time_base.den, video_encoder->time_base.num,
+        video_encoder->time_base.den, &last_video_output_pts);
+    if (video_frame->pts == AV_NOPTS_VALUE)
+    {
+      ret = AVERROR(EINVAL);
+      goto fail;
+    }
     ret = conversion_encode_frame(video_encoder, output, video_output_stream,
                                   video_frame, encoded_packet);
     av_frame_unref(decoded_frame);
@@ -866,28 +906,15 @@ int convert_video_file(const char *source_path, const char *output_path,
                        size_t encoder_name_size, int *hardware_accelerated,
                        char *err_buf, size_t err_buf_size)
 {
-  int ret = convert_video_file_once(source_path, output_path,
-                                    video_bitrate_kbps, audio_bitrate_kbps,
-                                    encoder_preset, preserve_hdr,
-                                    allow_hardware_encoder, cancel_flag,
-                                    progress_callback, user_token, encoder_name,
-                                    encoder_name_size, hardware_accelerated,
-                                    err_buf, err_buf_size);
-  if (ret >= 0 || !allow_hardware_encoder || !hardware_accelerated ||
-      !*hardware_accelerated || ret == AVERROR_EXIT ||
-      (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_ACQUIRE) != 0))
-    return ret;
-
-  // Hardware encoders can open successfully and still fail on the first
-  // frames because of device or input-specific constraints. Drop that partial
-  // file and retry the whole job with libx264 before reporting failure.
-  (void)remove(output_path);
-  *hardware_accelerated = 0;
-  if (encoder_name && encoder_name_size > 0)
-    encoder_name[0] = '\0';
+  // Keep the sidecar's selected hardware encoder for the complete queue
+  // attempt. If it fails after opening, return the error so the durable queue
+  // can retry from the beginning and let the sidecar select hardware again.
+  // Software encoding remains available through conversion_open_h264_encoder
+  // when no permitted hardware encoder can be opened.
   return convert_video_file_once(source_path, output_path,
                                  video_bitrate_kbps, audio_bitrate_kbps,
-                                 encoder_preset, preserve_hdr, 0, cancel_flag,
+                                 encoder_preset, preserve_hdr,
+                                 allow_hardware_encoder, cancel_flag,
                                  progress_callback, user_token, encoder_name,
                                  encoder_name_size, hardware_accelerated,
                                  err_buf, err_buf_size);

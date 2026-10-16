@@ -41,6 +41,16 @@ type conversionProgressContext struct {
 	err                 error
 }
 
+// rescaleConversionPTS exposes the C timestamp normalizer to focused Go tests.
+func rescaleConversionPTS(inputPTS int64, inputTBNum, inputTBDen, outputTBNum, outputTBDen int, lastOutputPTS int64) (int64, int64) {
+	last := C.int64_t(lastOutputPTS)
+	output := C.conversion_rescale_monotonic_pts(
+		C.int64_t(inputPTS), C.int(inputTBNum), C.int(inputTBDen),
+		C.int(outputTBNum), C.int(outputTBDen), &last,
+	)
+	return int64(output), int64(last)
+}
+
 // ChunkPayload bundles the binary fMP4 data with its extraction PTS
 type ChunkPayload struct {
 	Data []byte

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -91,6 +92,55 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	}
 	if metadata.GetDurationMs() <= 0 {
 		t.Fatalf("converted output has no duration: %d", metadata.GetDurationMs())
+	}
+}
+
+func TestIntegration_ConvertVideoRetryReselectsHardwareEncoder(t *testing.T) {
+	client, _, closeServer := setupRealHardwareTestServer(t)
+	defer closeServer()
+	source, cleanup := generateRealTestMedia(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var firstEncoder string
+	var firstHardware bool
+	for attempt := 1; attempt <= 2; attempt++ {
+		request := conversionTestRequest(source, filepath.Join(t.TempDir(), fmt.Sprintf("retry-%d.mp4", attempt)))
+		request.JobId = fmt.Sprintf("integration-retry-%d", attempt)
+		stream, err := client.ConvertVideo(ctx, request)
+		if err != nil {
+			t.Fatalf("conversion attempt %d failed to start: %v", attempt, err)
+		}
+		encoderName := ""
+		hardwareAccelerated := false
+		completed := false
+		for {
+			update, recvErr := stream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				t.Fatalf("conversion attempt %d failed: %v", attempt, recvErr)
+			}
+			if update.GetEncoderName() != "" {
+				encoderName = update.GetEncoderName()
+				hardwareAccelerated = update.GetHardwareAccelerated()
+			}
+			completed = completed || update.GetCompleted()
+		}
+		if !completed || encoderName == "" {
+			t.Fatalf("attempt %d did not complete with a reported encoder: completed=%t encoder=%q", attempt, completed, encoderName)
+		}
+		if attempt == 1 {
+			firstEncoder, firstHardware = encoderName, hardwareAccelerated
+			continue
+		}
+		if encoderName != firstEncoder || hardwareAccelerated != firstHardware {
+			t.Fatalf("retry changed encoder selection: first=%q hardware=%t retry=%q hardware=%t",
+				firstEncoder, firstHardware, encoderName, hardwareAccelerated)
+		}
+		t.Logf("retry reused encoder=%s hardware_accelerated=%t", encoderName, hardwareAccelerated)
 	}
 }
 
