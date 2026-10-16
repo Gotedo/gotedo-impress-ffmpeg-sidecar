@@ -324,7 +324,7 @@ static int conversion_open_h264_encoder(AVCodecContext **out_encoder,
       if (strcmp(candidate, "libx264") == 0)
       {
         av_opt_set(encoder->priv_data, "preset",
-                   encoder_preset && encoder_preset[0] ? encoder_preset : "slow", 0);
+                   encoder_preset && encoder_preset[0] ? encoder_preset : "fast", 0);
         av_opt_set(encoder->priv_data, "profile", preserve_hdr ? "high10" : "high", 0);
       }
       else if (strcmp(candidate, "h264_nvenc") == 0)
