@@ -2455,7 +2455,7 @@ int init_passthrough_muxer(AVFormatContext **out_fmt_ctx, TranscodeContext *tx_c
 
     // Configure fMP4 fragment flags required for MSE compatibility and delayed moov writing
     av_opt_set((*out_fmt_ctx)->priv_data, "movflags",
-               "empty_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
+               "empty_moov+delay_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
   }
 
   // FORCE SHIFT NEGATIVE PTS/DTS TO ZERO
@@ -2522,7 +2522,7 @@ int write_fmp4_header(AVFormatContext *out_fmt_ctx)
   AVDictionary *opts = NULL;
 
   // Ensure FFmpeg fMP4 muxer explicitly handles negative CTS offsets
-  ret = av_dict_set(&opts, "movflags", "empty_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
+  ret = av_dict_set(&opts, "movflags", "empty_moov+delay_moov+default_base_moof+frag_keyframe+separate_moof+negative_cts_offsets+omit_tfhd_offset", 0);
   if (ret < 0)
   {
     return ret;
