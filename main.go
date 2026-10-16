@@ -90,6 +90,30 @@ type cachedPlaybackProbe struct {
 	support    C.CPlaybackSupport
 }
 
+// cachedPlaybackSupport returns a still-valid plan without performing another
+// GPU probe. StartStream uses it after the UI preflight so opening a stream
+// does not immediately retry every adapter/backend that has just failed.
+func cachedPlaybackSupport(filePath string, info os.FileInfo) (C.CPlaybackSupport, bool) {
+	var empty C.CPlaybackSupport
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return empty, false
+	}
+	key := filepath.Clean(absPath)
+	now := time.Now()
+
+	playbackProbeMu.Lock()
+	defer playbackProbeMu.Unlock()
+	cached, ok := playbackProbeCache[key]
+	if !ok || cached.size != info.Size() || cached.modifiedAt != info.ModTime().UnixNano() || !now.Before(cached.expiresAt) {
+		if ok {
+			delete(playbackProbeCache, key)
+		}
+		return empty, false
+	}
+	return cached.support, true
+}
+
 // probePlaybackSupport shares the expensive hardware probe between the UI's
 // preflight and StartStream's enforcement check. File identity includes size
 // and nanosecond mtime so replacing a video at the same path invalidates it.
@@ -406,6 +430,9 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 		return status.Errorf(codes.Internal, "failed to inspect media file: %v", statErr)
 	}
 
+	var preflightPlan C.CPlaybackSupport
+	hasPreflightPlan := false
+
 	// Transcoding must never silently fall back to CPU. The application performs
 	// this same preflight before opening the WebSocket, while this server-side
 	// check protects callers that bypass the application UI.
@@ -423,9 +450,15 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			reason := C.GoString(&support.reason[0])
 			return status.Errorf(codes.FailedPrecondition, "verified GPU playback unavailable (%s): %s; retry with processing_policy=PROCESSING_ALLOW_CPU after user confirmation", failureCode, reason)
 		}
+		preflightPlan = support
+		hasPreflightPlan = true
 		log.Printf("[SIDECAR] Verified GPU playback preflight passed for target=%s (native_zero_copy=%t)", targetID, support.native_gpu_supported != 0)
 	} else if streamMode == proto.StreamMode_transcode {
 		log.Printf("[SIDECAR] CPU fallback explicitly allowed for target=%s", targetID)
+		preflightPlan, hasPreflightPlan = cachedPlaybackSupport(filePath, fileInfo)
+		if hasPreflightPlan {
+			log.Printf("[SIDECAR] Reusing cached preflight plan for target=%s", targetID)
+		}
 	}
 
 	// PRE: Handle case where target already has an active playback
@@ -473,6 +506,9 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 	decCtx := (*C.DemuxDecContext)(C.calloc(1, C.size_t(unsafe.Sizeof(C.DemuxDecContext{}))))
 	decCtx.is_passthrough = isPassthrough
 	decCtx.container_type = containerType
+	if hasPreflightPlan {
+		C.apply_playback_probe_plan(decCtx, &preflightPlan)
+	}
 
 	cPath := C.CString(filePath)
 	defer C.free(unsafe.Pointer(cPath))
@@ -757,7 +793,7 @@ func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string,
 	case "windows":
 		switch failureCode {
 		case "gpu_encode_unavailable":
-			recommendation = "If this is an NVIDIA system, install a driver that exposes NVENC API 13.1 (driver 610 or newer) and reboot; AMD systems require a current Adrenalin/AMF runtime, and Intel systems require a current graphics driver. A legacy GPU may not support that driver/API, in which case native GPU encoding cannot be enabled on this system."
+			recommendation = "Install the newest driver supported by the GPU and reboot. This sidecar is built against NVENC API 12.2 for compatibility with older supported drivers; if the probe still fails, the GPU or its driver does not expose a usable H.264 hardware encoder. AMD systems require a current Adrenalin/AMF runtime and Intel systems require a current graphics driver."
 		case "gpu_decode_capability":
 			recommendation = "Install the newest driver supported by the GPU and verify hardware decoding for this codec/profile, especially HEVC Main 10. A driver update cannot add missing decoder hardware; if this GPU lacks HEVC Main 10 support, use a newer GPU or CPU processing."
 		case "zero_copy_unavailable":

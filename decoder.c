@@ -47,8 +47,11 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
     /* NVENC – never use x264-style names */
     av_opt_set(priv, "preset", "p4", 0); /* balanced quality (p1–p7) */
     av_opt_set(priv, "tune", "ll", 0);   /* low-latency tune */
-    av_opt_set(priv, "rc", "constqp", 0);
-    av_opt_set_int(priv, "qp", 19, 0);
+    /* CQP ignores AVCodecContext.bit_rate and rc_max_rate. Use CBR so the
+     * explicit projection/network rate cap is honoured by NVENC as well as
+     * libx264 and Media Foundation. */
+    av_opt_set(priv, "rc", "cbr", 0);
+    av_opt_set_int(priv, "rc-lookahead", 0, 0);
     av_opt_set_int(priv, "zerolatency", 1, 0);
     av_opt_set(priv, "profile", "main", 0);
     return;
@@ -83,7 +86,9 @@ static void apply_low_latency_encoder_opts(AVCodecContext *enc)
  * Prefer the decoder's HW surface only when the encoder size already
  * matches (true zero-copy) AND the encoder can actually consume it.
  * h264_mf is known to produce garbage when given D3D11 surfaces, so it
- * is forced onto system-memory formats (NV12 / yuv420p).
+ * is forced onto system-memory formats (NV12 / yuv420p). NVENC can only
+ * consume CUDA frames for a native hardware path; a D3D11 surface (possibly
+ * backed by a different GPU) must be downloaded and converted first.
  *
  * Additional hardening:
  * - GPU encoders (nvenc / amf / d3d12va \ldots) may accept the decoder’s
@@ -104,7 +109,20 @@ static enum AVPixelFormat pick_encoder_pix_fmt(AVCodecContext *enc, DemuxDecCont
 
   /* h264_mf cannot reliably consume D3D11 / D3D12 surfaces.
    * Always feed it system memory. */
-  bool force_software = (codec_name && strcmp(codec_name, "h264_mf") == 0);
+  bool nvenc_native_compatible = false;
+  if (codec_name && strcmp(codec_name, "h264_nvenc") == 0 && dec_ctx &&
+      dec_ctx->video_dec_ctx && dec_ctx->hw_device_type == AV_HWDEVICE_TYPE_CUDA)
+  {
+    /* H.264 NVENC accepts 8-bit CUDA surfaces, but not the 10-bit Main10
+     * surface commonly produced by HEVC HDR decode. Those frames must be
+     * tone-mapped/converted to NV12 before NVENC, even on a single NVIDIA GPU. */
+    enum AVPixelFormat decoder_sw_fmt = dec_ctx->video_dec_ctx->sw_pix_fmt;
+    nvenc_native_compatible = decoder_sw_fmt == AV_PIX_FMT_NV12 ||
+                              decoder_sw_fmt == AV_PIX_FMT_YUV420P;
+  }
+  bool force_software = codec_name &&
+                        (strcmp(codec_name, "h264_mf") == 0 ||
+                         (strcmp(codec_name, "h264_nvenc") == 0 && !nvenc_native_compatible));
 
   int same_size = !force_software &&
                   dec_ctx &&
@@ -363,6 +381,26 @@ static int zscale_available(void)
   return avfilter_get_by_name("zscale") != NULL;
 }
 
+/* A buffer source fixes its negotiated color space and range when the graph is
+ * configured.  D3D11VA transfers occasionally leave those fields unspecified
+ * on an individual frame even though the stream metadata is HDR.  Normalise
+ * them before the first frame configures the graph and before every submission
+ * thereafter: changing either property mid-stream makes the buffer source
+ * reject the frame. */
+static void normalize_hdr_frame_color_metadata(AVFrame *frame)
+{
+  if (!frame)
+    return;
+  if (frame->color_primaries == AVCOL_PRI_UNSPECIFIED)
+    frame->color_primaries = AVCOL_PRI_BT2020;
+  if (frame->color_trc == AVCOL_TRC_UNSPECIFIED)
+    frame->color_trc = AVCOL_TRC_SMPTE2084;
+  if (frame->colorspace == AVCOL_SPC_UNSPECIFIED)
+    frame->colorspace = AVCOL_SPC_BT2020_NCL;
+  if (frame->color_range == AVCOL_RANGE_UNSPECIFIED)
+    frame->color_range = AVCOL_RANGE_MPEG;
+}
+
 /* Convert one HDR frame to correctly tone-mapped BT.709 SDR. Keep the graph
  * alive for the playback session: graph setup is deliberately not per-frame. */
 static int tone_map_hdr_frame(AVFilterGraph **graph,
@@ -373,6 +411,7 @@ static int tone_map_hdr_frame(AVFilterGraph **graph,
                               AVRational time_base,
                               int output_width,
                               int output_height,
+                              enum AVColorRange output_range,
                               enum AVPixelFormat output_format,
                               uintptr_t go_token,
                               int *reported_frame_processed)
@@ -380,6 +419,8 @@ static int tone_map_hdr_frame(AVFilterGraph **graph,
   if (!graph || !source || !sink || !input || !output)
     return AVERROR(EINVAL);
   int ret = 0;
+
+  normalize_hdr_frame_color_metadata(input);
 
   if (!*graph)
   {
@@ -408,6 +449,30 @@ static int tone_map_hdr_frame(AVFilterGraph **graph,
     ret = avfilter_graph_create_filter(source, buffer, "hdr_input", args, NULL, *graph);
     if (ret < 0)
       goto fail;
+
+    /* Do not rely on per-frame metadata to negotiate the source link.  It is
+     * too late after avfilter_graph_config(), and FFmpeg correctly reports
+     * "Changing video frame properties on the fly" when the first transferred
+     * D3D11VA frame supplies BT.2020/limited after an unknown source link was
+     * configured.  These parameters make the graph invariant explicit. */
+    AVBufferSrcParameters *source_params = av_buffersrc_parameters_alloc();
+    if (!source_params)
+    {
+      ret = AVERROR(ENOMEM);
+      goto fail;
+    }
+    source_params->format = input->format;
+    source_params->time_base = time_base;
+    source_params->width = input->width;
+    source_params->height = input->height;
+    source_params->sample_aspect_ratio = aspect;
+    source_params->color_space = input->colorspace;
+    source_params->color_range = input->color_range;
+    ret = av_buffersrc_parameters_set(*source, source_params);
+    av_free(source_params);
+    if (ret < 0)
+      goto fail;
+
     ret = avfilter_graph_create_filter(sink, buffersink, "sdr_output", NULL, NULL, *graph);
     if (ret < 0)
       goto fail;
@@ -426,12 +491,13 @@ static int tone_map_hdr_frame(AVFilterGraph **graph,
     const char *matrix_in = input->colorspace == AVCOL_SPC_BT2020_CL ? "bt2020c" : "bt2020nc";
     const char *range_in = input->color_range == AVCOL_RANGE_JPEG ? "full" : "limited";
 
+    const char *range_out = output_range == AVCOL_RANGE_JPEG ? "full" : "limited";
     char filters[768];
     snprintf(filters, sizeof(filters),
              "zscale=pin=bt2020:tin=%s:min=%s:rin=%s:t=linear:npl=100,format=gbrpf32le,"
              "tonemap=tonemap=hable:desat=2,"
-             "zscale=p=bt709:t=bt709:m=bt709:r=limited:w=%d:h=%d,format=%s",
-             transfer_in, matrix_in, range_in, output_width, output_height, format_name);
+             "zscale=p=bt709:t=bt709:m=bt709:r=%s:w=%d:h=%d,format=%s",
+             transfer_in, matrix_in, range_in, range_out, output_width, output_height, format_name);
 
     AVFilterInOut *inputs = avfilter_inout_alloc();
     AVFilterInOut *outputs = avfilter_inout_alloc();
@@ -662,6 +728,23 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     candidates[candidate_count++] = "libx264";
   }
 
+  /* Reuse a recently verified preflight plan first. It is a performance hint
+   * only; a failure naturally falls through to every other candidate. */
+  if (dec_ctx->preferred_encoder_name[0] != '\0')
+  {
+    for (int i = 0; i < candidate_count; i++)
+    {
+      if (strcmp(candidates[i], dec_ctx->preferred_encoder_name) == 0)
+      {
+        const char *preferred_encoder = candidates[i];
+        memmove(&candidates[1], &candidates[0], (size_t)i * sizeof(candidates[0]));
+        candidates[0] = preferred_encoder;
+        LOG_INFO("C-ENC", "Trying cached preflight encoder plan first: %s", preferred_encoder);
+        break;
+      }
+    }
+  }
+
   const int src_width = dec_ctx->video_dec_ctx->width;
   const int src_height = dec_ctx->video_dec_ctx->height;
   const float aspect = (float)src_width / (float)src_height;
@@ -708,6 +791,23 @@ static int init_h264_encoder(DemuxDecContext *dec_ctx, AVCodecContext **out_enc_
     w &= ~1;
     h &= ~1;
     resolutions[res_count++] = (ResCandidate){w, h, "1080p"};
+  }
+
+  if (dec_ctx->preferred_encoder_width > 0 && dec_ctx->preferred_encoder_height > 0)
+  {
+    for (int i = 0; i < res_count; i++)
+    {
+      if (resolutions[i].w == dec_ctx->preferred_encoder_width &&
+          resolutions[i].h == dec_ctx->preferred_encoder_height)
+      {
+        ResCandidate preferred_resolution = resolutions[i];
+        memmove(&resolutions[1], &resolutions[0], (size_t)i * sizeof(resolutions[0]));
+        resolutions[0] = preferred_resolution;
+        LOG_INFO("C-ENC", "Trying cached preflight resolution first: %dx%d",
+                 preferred_resolution.w, preferred_resolution.h);
+        break;
+      }
+    }
   }
 
   int last_err = AVERROR_ENCODER_NOT_FOUND;
@@ -903,6 +1003,20 @@ static void copy_playback_probe_text(char *dst, size_t dst_size, const char *src
   snprintf(dst, dst_size, "%s", src);
 }
 
+void apply_playback_probe_plan(DemuxDecContext *ctx, const CPlaybackSupport *support)
+{
+  if (!ctx || !support)
+    return;
+
+  ctx->preferred_hw_device_type = support->decoder_device_type;
+  ctx->preferred_hw_device_index = support->decoder_device_index;
+  ctx->preferred_encoder_width = support->encoder_width;
+  ctx->preferred_encoder_height = support->encoder_height;
+  copy_playback_probe_text(ctx->preferred_encoder_name,
+                          sizeof(ctx->preferred_encoder_name),
+                          support->encoder_backend);
+}
+
 static bool is_hardware_encoder_name(const char *name)
 {
   if (!name)
@@ -1032,6 +1146,9 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
   AVFrame *converted = NULL;
   AVFrame *transferred = NULL;
   struct SwsContext *sws_ctx = NULL;
+  AVFilterGraph *hdr_graph = NULL;
+  AVFilterContext *hdr_source = NULL;
+  AVFilterContext *hdr_sink = NULL;
   int result = AVERROR(EAGAIN);
 
   if (!encoded)
@@ -1039,7 +1156,8 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
 
   const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get((enum AVPixelFormat)decoded->format);
   bool decoded_is_hw = desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
-  bool direct = decoded_is_hw &&
+  bool is_hdr_input = is_hdr_source(ctx->video_dec_ctx);
+  bool direct = !is_hdr_input && decoded_is_hw &&
                 decoded->format == enc->pix_fmt &&
                 decoded->width == enc->width &&
                 decoded->height == enc->height;
@@ -1087,18 +1205,44 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
       result = AVERROR(ENOMEM);
       goto cleanup;
     }
-    converted->format = target_fmt;
-    converted->width = enc->width;
-    converted->height = enc->height;
-    converted->pts = decoded->pts;
 
-    if (av_frame_get_buffer(converted, 32) < 0)
+    if (is_hdr_input)
     {
-      result = AVERROR(ENOMEM);
-      goto cleanup;
+      /* The live path never sends HDR Main10 frames directly to an H.264
+       * encoder. Exercise the exact zscale + Hable transform during
+       * preflight so an unavailable/bad HDR graph cannot be reported as a
+       * valid GPU-assisted plan. */
+      if (((AVFrame *)source)->color_primaries == AVCOL_PRI_UNSPECIFIED)
+        ((AVFrame *)source)->color_primaries = ctx->video_dec_ctx->color_primaries;
+      if (((AVFrame *)source)->color_trc == AVCOL_TRC_UNSPECIFIED)
+        ((AVFrame *)source)->color_trc = ctx->video_dec_ctx->color_trc;
+      if (((AVFrame *)source)->colorspace == AVCOL_SPC_UNSPECIFIED)
+        ((AVFrame *)source)->colorspace = ctx->video_dec_ctx->colorspace;
+      if (((AVFrame *)source)->color_range == AVCOL_RANGE_UNSPECIFIED)
+        ((AVFrame *)source)->color_range = ctx->video_dec_ctx->color_range;
+
+      result = tone_map_hdr_frame(&hdr_graph, &hdr_source, &hdr_sink,
+                                  (AVFrame *)source, converted,
+                                  ctx->fmt_ctx->streams[ctx->video_stream_idx]->time_base,
+                                  enc->width, enc->height, AVCOL_RANGE_MPEG,
+                                  target_fmt, 0, NULL);
+      if (result < 0)
+        goto cleanup;
+      converted->pts = decoded->pts;
     }
-
+    else
     {
+      converted->format = target_fmt;
+      converted->width = enc->width;
+      converted->height = enc->height;
+      converted->pts = decoded->pts;
+
+      if (av_frame_get_buffer(converted, 32) < 0)
+      {
+        result = AVERROR(ENOMEM);
+        goto cleanup;
+      }
+
       sws_ctx = sws_getCachedContext(sws_ctx,
                                      source->width, source->height,
                                      (enum AVPixelFormat)source->format,
@@ -1122,30 +1266,50 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
     source = converted;
   }
 
-  ((AVFrame *)source)->pts = 0;
-  result = avcodec_send_frame(enc, source);
-  if (result < 0)
-    goto cleanup;
-
-  for (;;)
+  /* Some hardware encoders (notably NVENC) buffer the first input frame
+   * before producing output. A one-frame probe incorrectly rejects these
+   * otherwise usable candidates. Feed a small bounded set of references to
+   * the already-decoded frame, with monotonic timestamps, and drain after
+   * each send. This is startup-only work and never runs per playback packet. */
+  enum { MAX_ENCODER_PROBE_FRAMES = 8 };
+  int64_t probe_pts_step = av_rescale_q(1, av_inv_q(enc->framerate), enc->time_base);
+  if (probe_pts_step <= 0)
+    probe_pts_step = 1;
+  for (int i = 0; i < MAX_ENCODER_PROBE_FRAMES; i++)
   {
-    int packet_ret = avcodec_receive_packet(enc, encoded);
-    if (packet_ret == 0)
+    AVFrame *probe_frame = av_frame_clone(source);
+    if (!probe_frame)
     {
-      if (encoded->size > 0)
-      {
-        result = 0;
-        goto cleanup;
-      }
-      av_packet_unref(encoded);
-      continue;
+      result = AVERROR(ENOMEM);
+      goto cleanup;
     }
-    if (packet_ret == AVERROR(EAGAIN) || packet_ret == AVERROR_EOF)
-      break;
-    result = packet_ret;
-    goto cleanup;
+    probe_frame->pts = (int64_t)i * probe_pts_step;
+    result = avcodec_send_frame(enc, probe_frame);
+    av_frame_free(&probe_frame);
+    if (result < 0)
+      goto cleanup;
+
+    for (;;)
+    {
+      int packet_ret = avcodec_receive_packet(enc, encoded);
+      if (packet_ret == 0)
+      {
+        if (encoded->size > 0)
+        {
+          result = 0;
+          goto cleanup;
+        }
+        av_packet_unref(encoded);
+        continue;
+      }
+      if (packet_ret == AVERROR(EAGAIN) || packet_ret == AVERROR_EOF)
+        break;
+      result = packet_ret;
+      goto cleanup;
+    }
   }
 
+  result = AVERROR(EAGAIN);
   /* Media Foundation commonly buffers its first input frame.  Its previous
    * one-frame probe therefore reported EAGAIN and discarded a usable GPU
    * encoder. Drain only this disposable MF probe; do not flush QSV/NVENC,
@@ -1173,7 +1337,8 @@ static int probe_encoder_frame_only(DemuxDecContext *ctx, AVCodecContext *enc, c
     }
   }
 
-  /* Low-latency encoders should emit the first packet immediately. */
+  /* No output after the bounded startup probe means this encoder candidate
+   * is not verified for the selected input path. */
   result = AVERROR(EAGAIN);
 
 cleanup:
@@ -1181,6 +1346,7 @@ cleanup:
   av_frame_free(&converted);
   av_frame_free(&transferred);
   sws_freeContext(sws_ctx);
+  avfilter_graph_free(&hdr_graph);
   return result;
 }
 
@@ -1409,6 +1575,7 @@ int probe_playback_support(const char *file_path, CPlaybackSupport *support)
   support->hardware_decode_supported = decoded_hw_frame;
   support->decoder_device_type = dec_ctx.hw_device_type;
   support->decoder_frame_format = dec_ctx.hw_pix_fmt;
+  support->decoder_device_index = dec_ctx.hw_device_index;
 
   if (decoded_hw_frame)
     copy_playback_probe_text(support->decoder_backend, sizeof(support->decoder_backend),
@@ -1551,32 +1718,40 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *avctx, const enum AVPixe
 {
   DemuxDecContext *ctx = avctx ? (DemuxDecContext *)avctx->opaque : NULL;
   const enum AVPixelFormat *p;
-  enum AVPixelFormat first_hw = AV_PIX_FMT_NONE;
 
   for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++)
   {
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
-    LOG_INFO("C-DEC", "Decoder proposed pixel format: %s (%d)", av_get_pix_fmt_name(*p), *p);
-
     if (ctx && *p == ctx->hw_pix_fmt)
     {
       LOG_INFO("C-DEC", "Matched Hardware Pixel Format: %s", av_get_pix_fmt_name(*p));
       return *p;
     }
-
-    if (first_hw == AV_PIX_FMT_NONE && desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
-      first_hw = *p;
   }
 
-  if (first_hw != AV_PIX_FMT_NONE)
+  /* A decoder can offer several hardware formats, but only the format that
+   * belongs to the device context we created is safe. Returning an arbitrary
+   * offered hardware format causes the noisy "does not match type context"
+   * failures seen when a CUDA/D3D11/QSV trial is crossed with another
+   * adapter. Fail this trial deterministically and let the outer selector try
+   * the next backend/device instead. */
+  if (ctx && ctx->hw_pix_fmt != AV_PIX_FMT_NONE)
   {
-    LOG_INFO("C-DEC", "Matched Hardware Pixel Format: %s", av_get_pix_fmt_name(first_hw));
-    if (ctx)
-      ctx->hw_pix_fmt = first_hw;
-    return first_hw;
+    LOG_WARN("C-DEC", "Hardware decoder did not offer the requested %s surface; rejecting this backend",
+             av_get_pix_fmt_name(ctx->hw_pix_fmt));
+    /* Return a software format so this trial yields one frame and the outer
+     * validator can reject it. Returning AV_PIX_FMT_NONE makes some FFmpeg
+     * decoders retry format negotiation for every packet, causing the huge
+     * CUDA/D3D11 warning floods seen in the playback log. */
+    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++)
+    {
+      const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+      if (!desc || !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL))
+        return *p;
+    }
+    return *pix_fmts;
   }
 
-  LOG_WARN("C-DEC", "No matching hardware pixel format found. Falling back to software format.");
+  /* Software decoder path: retain FFmpeg's preferred software format. */
   return *pix_fmts;
 }
 
@@ -1706,6 +1881,7 @@ static int try_dedicated_qsv_decoder(DemuxDecContext *ctx, const AVCodec *source
     trial_decoder->thread_type = 0;
     ctx->hw_pix_fmt = qsv_pix_fmt;
     ctx->hw_device_type = AV_HWDEVICE_TYPE_QSV;
+    ctx->hw_device_index = (int)device_index - 1; /* NULL/default is -1 */
     ctx->video_dec_ctx = trial_decoder;
 
     LOG_INFO("C-DEC", "Trying dedicated QSV decoder %s, device=%s, pixel format=%s",
@@ -1723,6 +1899,7 @@ static int try_dedicated_qsv_decoder(DemuxDecContext *ctx, const AVCodec *source
       avcodec_free_context(&ctx->video_dec_ctx);
       ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
       ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+      ctx->hw_device_index = -1;
       continue;
     }
 
@@ -1733,6 +1910,7 @@ static int try_dedicated_qsv_decoder(DemuxDecContext *ctx, const AVCodec *source
       avcodec_free_context(&ctx->video_dec_ctx);
       ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
       ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+      ctx->hw_device_index = -1;
       continue;
     }
 
@@ -1775,6 +1953,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
   // Do not set it again in the passthrough short-circuit or the fail: path. AV_PIX_FMT_NONE is not a heap object.
   ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
   ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+  ctx->hw_device_index = -1;
 
   // CAUTION: Disabled to avoid overriding the values set in Go
   // ctx->is_passthrough = 0;
@@ -1869,6 +2048,14 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
        * creation, so unsupported machines fall through safely. */
       enum AVHWDeviceType preferred[32] = {0};
       int preferred_count = 0;
+      if (ctx->preferred_hw_device_type != AV_HWDEVICE_TYPE_NONE)
+      {
+        append_unique_hw_type(preferred, &preferred_count,
+                              (enum AVHWDeviceType)ctx->preferred_hw_device_type);
+        LOG_INFO("C-DEC", "Trying cached preflight decoder backend first: %s (adapter=%d)",
+                 av_hwdevice_get_type_name((enum AVHWDeviceType)ctx->preferred_hw_device_type),
+                 ctx->preferred_hw_device_index);
+      }
 #ifdef _WIN32
       const int has_nvenc_runtime = nvenc_likely_available();
       const int has_amf_runtime = amf_runtime_available();
@@ -1945,6 +2132,21 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
           const int device_count = 1;
 #endif
 
+          if (match->device_type == (enum AVHWDeviceType)ctx->preferred_hw_device_type)
+          {
+            for (int candidate = 0; candidate < device_count; candidate++)
+            {
+              int candidate_index = device_names[candidate] ? atoi(device_names[candidate]) : -1;
+              if (candidate_index == ctx->preferred_hw_device_index)
+              {
+                const char *cached_device = device_names[candidate];
+                device_names[candidate] = device_names[0];
+                device_names[0] = cached_device;
+                break;
+              }
+            }
+          }
+
           for (int device_index = 0;
                device_index < device_count && !hardware_decoder_selected;
                device_index++)
@@ -1989,6 +2191,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
             trial_decoder->thread_type = 0;
             ctx->hw_pix_fmt = match->pix_fmt;
             ctx->hw_device_type = match->device_type;
+            ctx->hw_device_index = device_names[device_index] ? atoi(device_names[device_index]) : -1;
             ctx->video_dec_ctx = trial_decoder;
 
             LOG_INFO("C-DEC", "Trying hardware acceleration type: %d (%s), device=%s, pixel format %s",
@@ -2005,6 +2208,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
               avcodec_free_context(&ctx->video_dec_ctx);
               ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
               ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+              ctx->hw_device_index = -1;
               continue;
             }
 
@@ -2019,6 +2223,7 @@ int open_input_and_decoders(DemuxDecContext *ctx, const char *input_path)
               avcodec_free_context(&ctx->video_dec_ctx);
               ctx->hw_pix_fmt = AV_PIX_FMT_NONE;
               ctx->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+              ctx->hw_device_index = -1;
               continue;
             }
 
@@ -2659,13 +2864,21 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   *out_size = 0;
 
   AVFormatContext *fmt_ctx = NULL;
+  AVCodecContext *dec_ctx = NULL;
+  AVCodecContext *enc_ctx = NULL;
+  AVPacket *pkt = NULL;
+  AVPacket *enc_pkt = NULL;
+  AVFrame *frame = NULL;
+  AVFrame *output_frame = NULL;
+  struct SwsContext *sws_ctx = NULL;
+  AVFilterGraph *hdr_graph = NULL;
+  AVFilterContext *hdr_source = NULL;
+  AVFilterContext *hdr_sink = NULL;
+  int result = -1;
   if (avformat_open_input(&fmt_ctx, file_path, NULL, NULL) < 0)
     return -1;
   if (avformat_find_stream_info(fmt_ctx, NULL) < 0)
-  {
-    avformat_close_input(&fmt_ctx);
-    return -1;
-  }
+    goto cleanup;
 
   // 1. Locate primary video track
   int video_stream_idx = -1;
@@ -2680,8 +2893,8 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
   if (video_stream_idx == -1)
   {
-    avformat_close_input(&fmt_ctx);
-    return -2; // No video stream found
+    result = -2;
+    goto cleanup;
   }
 
   AVStream *stream = fmt_ctx->streams[video_stream_idx];
@@ -2691,11 +2904,15 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   const AVCodec *decoder = avcodec_find_decoder(codec_par->codec_id);
   if (!decoder)
   {
-    avformat_close_input(&fmt_ctx);
-    return -3;
+    result = -3;
+    goto cleanup;
   }
-  AVCodecContext *dec_ctx = avcodec_alloc_context3(decoder);
-  avcodec_parameters_to_context(dec_ctx, codec_par);
+  dec_ctx = avcodec_alloc_context3(decoder);
+  if (!dec_ctx || avcodec_parameters_to_context(dec_ctx, codec_par) < 0)
+  {
+    result = -3;
+    goto cleanup;
+  }
 
   // Enable multi-threaded decoding to prevent 4K/HDR bottlenecks
   dec_ctx->thread_count = 0;
@@ -2703,9 +2920,8 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
 
   if (avcodec_open2(dec_ctx, decoder, NULL) < 0)
   {
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -4;
+    result = -4;
+    goto cleanup;
   }
 
   // 3. Compute stream specific seek timestamp bounds
@@ -2716,16 +2932,20 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
   // Seek to the closest keyframe before or at the requested timeline point
   if (avformat_seek_file(fmt_ctx, video_stream_idx, INT64_MIN, seek_target, seek_target, AVSEEK_FLAG_BACKWARD) < 0)
   {
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -5;
+    result = -5;
+    goto cleanup;
   }
 
   // Flush decoder state variables after a seek event
   avcodec_flush_buffers(dec_ctx);
 
-  AVPacket *pkt = av_packet_alloc();
-  AVFrame *frame = av_frame_alloc();
+  pkt = av_packet_alloc();
+  frame = av_frame_alloc();
+  if (!pkt || !frame)
+  {
+    result = -7;
+    goto cleanup;
+  }
   int frame_decoded = 0;
 
   // 4. Extraction decoding pump loop
@@ -2745,102 +2965,130 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     }
     av_packet_unref(pkt);
   }
-  av_packet_free(&pkt);
-
   if (!frame_decoded)
   {
-    av_frame_free(&frame);
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -6; // Failed to decode a usable frame
+    result = -6;
+    goto cleanup;
   }
 
-  // Setup SwsContext for color-space and bit-depth normalization (fixes HDR/10-bit color tinting & distortion)
-  struct SwsContext *sws_ctx = sws_getContext(
-      dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt,
-      dec_ctx->width, dec_ctx->height, AV_PIX_FMT_YUV420P,
-      SWS_BILINEAR, NULL, NULL, NULL);
-
-  if (!sws_ctx)
-  {
-    av_frame_free(&frame);
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -7;
-  }
-
-  int src_range = (dec_ctx->color_range == AVCOL_RANGE_JPEG);
-  const int *src_inv_table = sws_getCoefficients(sws_coeff_id_from_colorspace(dec_ctx->colorspace));
-  const int *dst_inv_table = sws_getCoefficients(SWS_CS_ITU709);
-  sws_setColorspaceDetails(sws_ctx, src_inv_table, src_range, dst_inv_table, 0, 0, 1 << 16, 1 << 16);
-
-  AVFrame *scaled_frame = av_frame_alloc();
-  if (!scaled_frame)
-  {
-    sws_freeContext(sws_ctx);
-    av_frame_free(&frame);
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -7;
-  }
-  scaled_frame->format = AV_PIX_FMT_YUV420P;
-  scaled_frame->width = dec_ctx->width;
-  scaled_frame->height = dec_ctx->height;
-
-  if (av_frame_get_buffer(scaled_frame, 32) < 0)
-  {
-    sws_freeContext(sws_ctx);
-    av_frame_free(&scaled_frame);
-    av_frame_free(&frame);
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -7;
-  }
-
-  sws_scale(sws_ctx, (const uint8_t *const *)frame->data, frame->linesize,
-            0, dec_ctx->height, scaled_frame->data, scaled_frame->linesize);
-
-  // 5. Setup internal MJPEG image encoder pipeline
+  // JPEG is an 8-bit SDR image format. HDR inputs therefore use exactly the
+  // same Hable/zscale tone-map as transcoded playback, while preserving the
+  // decoded source dimensions (including 4K). SDR inputs use matrix/range
+  // conversion only. The JPEG is full-range, as expected by image viewers.
   const AVCodec *encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
   if (!encoder)
   {
-    sws_freeContext(sws_ctx);
-    av_frame_free(&scaled_frame);
-    av_frame_free(&frame);
-    avcodec_free_context(&dec_ctx);
-    avformat_close_input(&fmt_ctx);
-    return -7;
+    result = -7;
+    goto cleanup;
   }
 
-  AVCodecContext *enc_ctx = avcodec_alloc_context3(encoder);
-  enc_ctx->width = dec_ctx->width;
-  enc_ctx->height = dec_ctx->height;
-  // Set format matching standard MJPEG requirements (YUVJ420P or YUV420P depending on compilation)
+  enc_ctx = avcodec_alloc_context3(encoder);
+  if (!enc_ctx)
+  {
+    result = -7;
+    goto cleanup;
+  }
+  enc_ctx->width = frame->width;
+  enc_ctx->height = frame->height;
   enc_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
   enc_ctx->time_base = (AVRational){1, 25};
+  enc_ctx->color_primaries = AVCOL_PRI_BT709;
+  enc_ctx->color_trc = AVCOL_TRC_BT709;
+  enc_ctx->colorspace = AVCOL_SPC_BT709;
+  enc_ctx->color_range = AVCOL_RANGE_JPEG;
 
   if (avcodec_open2(enc_ctx, encoder, NULL) < 0)
   {
     enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // Try fallback if YUVJ420P is constrained
+    enc_ctx->color_range = AVCOL_RANGE_MPEG;
     if (avcodec_open2(enc_ctx, encoder, NULL) < 0)
     {
-      avcodec_free_context(&enc_ctx);
-      sws_freeContext(sws_ctx);
-      av_frame_free(&scaled_frame);
-      av_frame_free(&frame);
-      avcodec_free_context(&dec_ctx);
-      avformat_close_input(&fmt_ctx);
-      return -8;
+      result = -8;
+      goto cleanup;
     }
   }
 
-  // Ensure our frame format matches encoder expectations or enforce color ranges
-  scaled_frame->format = enc_ctx->pix_fmt;
+  output_frame = av_frame_alloc();
+  if (!output_frame)
+  {
+    result = -7;
+    goto cleanup;
+  }
+  if (is_hdr_source(dec_ctx))
+  {
+    if (frame->color_primaries == AVCOL_PRI_UNSPECIFIED)
+      frame->color_primaries = dec_ctx->color_primaries;
+    if (frame->color_trc == AVCOL_TRC_UNSPECIFIED)
+      frame->color_trc = dec_ctx->color_trc;
+    if (frame->colorspace == AVCOL_SPC_UNSPECIFIED)
+      frame->colorspace = dec_ctx->colorspace;
+    if (frame->color_range == AVCOL_RANGE_UNSPECIFIED)
+      frame->color_range = dec_ctx->color_range;
 
-  AVPacket *enc_pkt = av_packet_alloc();
+    int tone_map_ret = tone_map_hdr_frame(&hdr_graph, &hdr_source, &hdr_sink,
+                                          frame, output_frame, stream->time_base,
+                                          frame->width, frame->height,
+                                          enc_ctx->color_range, enc_ctx->pix_fmt,
+                                          0, NULL);
+    if (tone_map_ret < 0)
+    {
+      LOG_ERROR("C-SCREENSHOT", "HDR screenshot tone mapping failed (%d); refusing washed-out matrix-only capture", tone_map_ret);
+      result = -9;
+      goto cleanup;
+    }
+  }
+  else
+  {
+    sws_ctx = sws_getContext(frame->width, frame->height, (enum AVPixelFormat)frame->format,
+                             frame->width, frame->height, enc_ctx->pix_fmt,
+                             SWS_BILINEAR, NULL, NULL, NULL);
+    if (!sws_ctx)
+    {
+      result = -7;
+      goto cleanup;
+    }
+    enum AVColorSpace input_space = frame->colorspace != AVCOL_SPC_UNSPECIFIED
+                                        ? frame->colorspace
+                                        : dec_ctx->colorspace;
+    enum AVColorRange input_range = frame->color_range != AVCOL_RANGE_UNSPECIFIED
+                                        ? frame->color_range
+                                        : dec_ctx->color_range;
+    int dst_range = enc_ctx->color_range == AVCOL_RANGE_JPEG;
+    const int *src_table = sws_getCoefficients(sws_coeff_id_from_colorspace(input_space));
+    const int *dst_table = sws_getCoefficients(SWS_CS_ITU709);
+    sws_setColorspaceDetails(sws_ctx, src_table, input_range == AVCOL_RANGE_JPEG,
+                             dst_table, dst_range, 0, 1 << 16, 1 << 16);
+
+    output_frame->format = enc_ctx->pix_fmt;
+    output_frame->width = frame->width;
+    output_frame->height = frame->height;
+    output_frame->pts = frame->pts;
+    if (av_frame_get_buffer(output_frame, 32) < 0 ||
+        sws_scale(sws_ctx, (const uint8_t *const *)frame->data, frame->linesize,
+                  0, frame->height, output_frame->data, output_frame->linesize) <= 0)
+    {
+      result = -7;
+      goto cleanup;
+    }
+  }
+
+  /* Keep color metadata on the still consistent with the tone-mapped pixels
+   * and full/limited JPEG range, even when the filter sink did not propagate
+   * every frame property to the encoder. */
+  output_frame->color_primaries = AVCOL_PRI_BT709;
+  output_frame->color_trc = AVCOL_TRC_BT709;
+  output_frame->colorspace = AVCOL_SPC_BT709;
+  output_frame->color_range = enc_ctx->color_range;
+
+  enc_pkt = av_packet_alloc();
+  if (!enc_pkt)
+  {
+    result = -7;
+    goto cleanup;
+  }
   int encode_success = 0;
 
-  if (avcodec_send_frame(enc_ctx, scaled_frame) >= 0)
+  if (avcodec_send_frame(enc_ctx, output_frame) >= 0)
   {
     if (avcodec_receive_packet(enc_ctx, enc_pkt) >= 0)
     {
@@ -2855,16 +3103,20 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     }
   }
 
-  // Final multi-context teardown and cleanup routines
+  result = encode_success ? 0 : -9;
+
+cleanup:
+  if (hdr_graph)
+    avfilter_graph_free(&hdr_graph);
   av_packet_free(&enc_pkt);
   sws_freeContext(sws_ctx);
-  av_frame_free(&scaled_frame);
+  av_frame_free(&output_frame);
   av_frame_free(&frame);
   avcodec_free_context(&enc_ctx);
   avcodec_free_context(&dec_ctx);
   avformat_close_input(&fmt_ctx);
-
-  return encode_success ? 0 : -9;
+  av_packet_free(&pkt);
+  return result;
 }
 
 /**
@@ -4783,6 +5035,7 @@ int run_streaming_mux_and_play(DemuxDecContext *dec_ctx, uintptr_t go_token)
                                                  in_stream->time_base,
                                                  h264_enc_ctx->width,
                                                  h264_enc_ctx->height,
+                                                 AVCOL_RANGE_MPEG,
                                                  dst_pix_fmt,
                                                  go_token,
                                                  &hdr_tonemap_reported_frame);

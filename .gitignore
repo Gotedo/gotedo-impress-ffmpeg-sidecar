@@ -6,3 +6,4 @@ dist
 .task/
 test_*.mp4
 *.mkv
+.gocache
