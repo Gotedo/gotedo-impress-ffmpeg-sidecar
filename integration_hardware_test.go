@@ -819,7 +819,10 @@ func TestIntegration_HDRScreenshotToneMapsAtSourceResolution(t *testing.T) {
 	}
 	resp, err := client.GetVideoScreenshot(ctx, &proto.ScreenshotRequest{
 		FilePath: mediaPath,
-		TimeMs:   1000,
+		// Exercise the default thumbnail path. The sidecar must move this into
+		// the stream and decode through the effective timestamp rather than
+		// returning the first keyframe at the timeline origin.
+		TimeMs: 0,
 	})
 	if err != nil {
 		t.Fatalf("HDR screenshot extraction failed: %v", err)

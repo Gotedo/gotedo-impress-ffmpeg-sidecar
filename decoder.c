@@ -2924,9 +2924,27 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     goto cleanup;
   }
 
-  // 3. Compute stream specific seek timestamp bounds
+  // 3. Compute stream specific seek timestamp bounds. A zero request is
+  // intentionally moved into the stream so thumbnails do not capture a
+  // decoder/keyframe black lead-in. Keep the target inside short clips too.
+  int64_t effective_time_ms = time_ms > 0 ? time_ms : 1000;
+  int64_t duration_ms = 0;
+  if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0)
+    duration_ms = av_rescale_q(stream->duration, stream->time_base, (AVRational){1, 1000});
+  else if (fmt_ctx->duration != AV_NOPTS_VALUE && fmt_ctx->duration > 0)
+    duration_ms = av_rescale_q(fmt_ctx->duration, AV_TIME_BASE_Q, (AVRational){1, 1000});
+
+  if (duration_ms > 0)
+  {
+    // Leave a small tail margin so the request remains decodable even when
+    // the clip is shorter than the normal 1-second thumbnail offset.
+    int64_t safe_max_ms = duration_ms > 200 ? duration_ms - 100 : duration_ms / 2;
+    if (safe_max_ms > 0 && effective_time_ms > safe_max_ms)
+      effective_time_ms = safe_max_ms;
+  }
+
   // Convert ms to stream time base units: units = (ms / 1000) / time_base
-  int64_t seek_target = (int64_t)(time_ms * (int64_t)AV_TIME_BASE / 1000);
+  int64_t seek_target = (int64_t)(effective_time_ms * (int64_t)AV_TIME_BASE / 1000);
   seek_target = av_rescale_q(seek_target, AV_TIME_BASE_Q, stream->time_base);
 
   // Seek to the closest keyframe before or at the requested timeline point
@@ -2947,6 +2965,7 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     goto cleanup;
   }
   int frame_decoded = 0;
+  int target_frame_reached = 0;
 
   // 4. Extraction decoding pump loop
   while (av_read_frame(fmt_ctx, pkt) >= 0)
@@ -2955,15 +2974,24 @@ int extract_video_screenshot(const char *file_path, int64_t time_ms, uint8_t **o
     {
       if (avcodec_send_packet(dec_ctx, pkt) >= 0)
       {
-        if (avcodec_receive_frame(dec_ctx, frame) >= 0)
+        while (avcodec_receive_frame(dec_ctx, frame) >= 0)
         {
           frame_decoded = 1;
-          av_packet_unref(pkt);
-          break;
+          // Seeking lands on a keyframe before the requested timestamp. Do
+          // not return that first frame: continue decoding until the actual
+          // requested point so a black lead-in cannot become the thumbnail.
+          if (frame->best_effort_timestamp == AV_NOPTS_VALUE ||
+              frame->best_effort_timestamp >= seek_target)
+          {
+            target_frame_reached = 1;
+            break;
+          }
         }
       }
     }
     av_packet_unref(pkt);
+    if (target_frame_reached)
+      break;
   }
   if (!frame_decoded)
   {

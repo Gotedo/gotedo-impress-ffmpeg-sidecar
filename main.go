@@ -818,8 +818,6 @@ func playbackSupportGuidance(failureCode, decoderBackend, encoderBackend string,
 
 // GetVideoScreenshot extracts a single frame image out of a media asset layout.
 func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.ScreenshotRequest) (*proto.ScreenshotResponse, error) {
-	log.Printf("[SIDECAR] Extracting screenshot for file: %s at %d ms", req.GetFilePath(), req.GetTimeMs())
-
 	if _, err := os.Stat(req.GetFilePath()); os.IsNotExist(err) {
 		return nil, status.Errorf(codes.NotFound, "media file does not exist: %s", req.GetFilePath())
 	}
@@ -828,6 +826,7 @@ func (s *ffmpegServer) GetVideoScreenshot(ctx context.Context, req *proto.Screen
 	if timeTargetMs <= 0 {
 		timeTargetMs = 1000 // Sane default to bypass initial black frames
 	}
+	log.Printf("[SIDECAR] Extracting screenshot for file: %s at effective timestamp %d ms (requested %d ms)", req.GetFilePath(), timeTargetMs, req.GetTimeMs())
 
 	cPath := C.CString(req.GetFilePath())
 	defer C.free(unsafe.Pointer(cPath))
