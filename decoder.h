@@ -304,6 +304,9 @@ int convert_video_file(const char *source_path, const char *output_path,
                        uintptr_t user_token, char *encoder_name,
                        size_t encoder_name_size, int *hardware_accelerated,
                        char *err_buf, size_t err_buf_size);
+int conversion_pin_current_thread(int core_id, void **state_out);
+void conversion_restore_thread_affinity(void *state);
+void conversion_get_cpu_counts(int *logical_out, int *physical_out);
 
 // Rescales decoded presentation timestamps into encoder time and guarantees
 // strictly increasing PTS for sources with duplicate frame timestamps.

@@ -26,6 +26,10 @@ func conversionTestRequest(source, output string) *proto.VideoConversionRequest 
 func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	client, _, closeServer := setupRealHardwareTestServer(t)
 	defer closeServer()
+	capacity, err := client.GetConversionCapacity(context.Background(), &proto.ConversionCapacityRequest{})
+	if err != nil || capacity.GetMaxConcurrent() < 1 || capacity.GetActiveSlots() != 0 {
+		t.Fatalf("initial conversion capacity = %+v, err=%v", capacity, err)
+	}
 
 	source, cleanup := generateRealTestMedia(t)
 	defer cleanup()
@@ -35,6 +39,10 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	stream, err := client.ConvertVideo(ctx, conversionTestRequest(source, output))
 	if err != nil {
 		t.Fatalf("ConvertVideo RPC failed to start: %v", err)
+	}
+	activeCapacity, err := client.GetConversionCapacity(ctx, &proto.ConversionCapacityRequest{})
+	if err != nil || activeCapacity.GetActiveSlots() < 1 {
+		t.Fatalf("conversion capacity did not report its active core lease: %+v, err=%v", activeCapacity, err)
 	}
 	lastProgress := -1.0
 	completed := false
@@ -92,6 +100,82 @@ func TestIntegration_ConvertVideoThroughRPC(t *testing.T) {
 	}
 	if metadata.GetDurationMs() <= 0 {
 		t.Fatalf("converted output has no duration: %d", metadata.GetDurationMs())
+	}
+	capacity, err = client.GetConversionCapacity(ctx, &proto.ConversionCapacityRequest{})
+	if err != nil || capacity.GetActiveSlots() != 0 {
+		t.Fatalf("completed conversion did not release its capacity lease: %+v, err=%v", capacity, err)
+	}
+}
+
+func TestIntegration_ConcurrentConversionsRespectReportedCapacity(t *testing.T) {
+	client, _, closeServer := setupRealHardwareTestServer(t)
+	defer closeServer()
+	capacity, err := client.GetConversionCapacity(context.Background(), &proto.ConversionCapacityRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity.GetMaxConcurrent() < 2 {
+		t.Skipf("host exposes conversion capacity %d; concurrent conversion is disabled", capacity.GetMaxConcurrent())
+	}
+	source, cleanup := generateRealTestMedia(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	streams := make([]proto.FFmpegService_ConvertVideoClient, 0, 2)
+	for i := 0; i < 2; i++ {
+		request := conversionTestRequest(source, filepath.Join(t.TempDir(), fmt.Sprintf("concurrent-%d.mp4", i)))
+		request.JobId = fmt.Sprintf("integration-concurrent-%d", i)
+		stream, err := client.ConvertVideo(ctx, request)
+		if err != nil {
+			t.Fatalf("conversion %d failed to start: %v", i, err)
+		}
+		streams = append(streams, stream)
+	}
+	type streamResult struct {
+		err       error
+		completed bool
+	}
+	results := make(chan streamResult, len(streams))
+	for _, stream := range streams {
+		go func(stream proto.FFmpegService_ConvertVideoClient) {
+			completed := false
+			for {
+				update, err := stream.Recv()
+				if err == io.EOF {
+					results <- streamResult{completed: completed}
+					return
+				}
+				if err != nil {
+					results <- streamResult{err: err}
+					return
+				}
+				completed = completed || update.GetCompleted()
+			}
+		}(stream)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		active, err := client.GetConversionCapacity(ctx, &proto.ConversionCapacityRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if active.GetActiveSlots() == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sidecar never leased two concurrent slots: %+v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for range streams {
+		result := <-results
+		if result.err != nil || !result.completed {
+			t.Fatalf("concurrent conversion result: %+v", result)
+		}
+	}
+	capacity, err = client.GetConversionCapacity(ctx, &proto.ConversionCapacityRequest{})
+	if err != nil || capacity.GetActiveSlots() != 0 {
+		t.Fatalf("conversion leases were not released after completion: %+v, err=%v", capacity, err)
 	}
 }
 
@@ -167,6 +251,10 @@ func TestIntegration_ConvertVideoRejectsInvalidRequests(t *testing.T) {
 	_, err = stream.Recv()
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound for missing source, got %v", err)
+	}
+	capacity, err := client.GetConversionCapacity(ctx, &proto.ConversionCapacityRequest{})
+	if err != nil || capacity.GetActiveSlots() != 0 {
+		t.Fatalf("failed conversion did not release its capacity lease: %+v, err=%v", capacity, err)
 	}
 }
 
@@ -279,5 +367,9 @@ func TestIntegration_CancelLongHEVCConversion(t *testing.T) {
 			t.Fatalf("cancelled conversion unexpectedly left final output at %s", output)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+	capacity, err := client.GetConversionCapacity(context.Background(), &proto.ConversionCapacityRequest{})
+	if err != nil || capacity.GetActiveSlots() != 0 {
+		t.Fatalf("cancelled conversion did not release its capacity lease: %+v, err=%v", capacity, err)
 	}
 }

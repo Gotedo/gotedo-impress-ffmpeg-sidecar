@@ -36,6 +36,18 @@ service FFmpegService {
     // Convert a video to an H.264/AAC MP4 with progress updates. Cancelling
     // the client stream interrupts decoding and encoding in the native loop.
     rpc ConvertVideo(VideoConversionRequest) returns (stream VideoConversionProgress);
+
+    // Reports the process-local conversion concurrency budget and active slots.
+    rpc GetConversionCapacity(ConversionCapacityRequest) returns (ConversionCapacityResponse);
+}
+
+message ConversionCapacityRequest {}
+
+message ConversionCapacityResponse {
+    int32 max_concurrent = 1;
+    int32 active_slots = 2;
+    int32 logical_cpus = 3;
+    int32 physical_cores = 4;
 }
 
 message VideoConversionRequest {
