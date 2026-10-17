@@ -2069,7 +2069,9 @@ EOF
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
         -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lc++ \
-        -framework CoreFoundation -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreText -framework CoreVideo -framework Security -lresolv"
+        -framework Foundation -framework AppKit -framework CoreFoundation -framework CoreImage -framework OpenGL \
+        -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics \
+        -framework CoreText -framework CoreVideo -framework Security -lresolv"
         ;;
     *)
         echo "Unsupported sidecar target: ${OS}-${ARCH}"
