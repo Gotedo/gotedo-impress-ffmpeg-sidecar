@@ -958,6 +958,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
         goto fail;
       while ((ret = avcodec_receive_frame(video_decoder, decoded_frame)) >= 0)
       {
+        if (conversion_interrupted(&interrupt))
+        {
+          ret = AVERROR_EXIT;
+          goto fail;
+        }
         if (first_video_pts == AV_NOPTS_VALUE)
           first_video_pts = decoded_frame->best_effort_timestamp != AV_NOPTS_VALUE
                                 ? decoded_frame->best_effort_timestamp
@@ -970,6 +975,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                                            preserve_hdr);
         if (ret < 0)
           goto fail;
+        if (conversion_interrupted(&interrupt))
+        {
+          ret = AVERROR_EXIT;
+          goto fail;
+        }
         int64_t frame_pts = decoded_frame->best_effort_timestamp != AV_NOPTS_VALUE
                                 ? decoded_frame->best_effort_timestamp
                                 : decoded_frame->pts;
@@ -1019,12 +1029,22 @@ static int convert_video_file_once(const char *source_path, const char *output_p
       av_packet_unref(packet);
       if (ret < 0 && ret != AVERROR(EAGAIN))
         goto fail;
+      if (conversion_interrupted(&interrupt))
+      {
+        ret = AVERROR_EXIT;
+        goto fail;
+      }
       ret = conversion_process_audio(audio_decoder, resampler, audio_fifo,
                                      audio_encoder, output, audio_output_stream,
                                      audio_frame, audio_encode_frame, encoded_packet,
                                      &audio_next_pts);
       if (ret < 0)
         goto fail;
+      if (conversion_interrupted(&interrupt))
+      {
+        ret = AVERROR_EXIT;
+        goto fail;
+      }
     }
     else
     {
@@ -1039,6 +1059,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
     goto fail;
   while ((ret = avcodec_receive_frame(video_decoder, decoded_frame)) >= 0)
   {
+    if (conversion_interrupted(&interrupt))
+    {
+      ret = AVERROR_EXIT;
+      goto fail;
+    }
     if (first_video_pts == AV_NOPTS_VALUE)
       first_video_pts = decoded_frame->best_effort_timestamp;
     ret = conversion_scale_video_frame(decoded_frame, video_frame,
@@ -1072,6 +1097,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
   if (ret != AVERROR_EOF && ret != AVERROR(EAGAIN))
     goto fail;
 
+  if (conversion_interrupted(&interrupt))
+  {
+    ret = AVERROR_EXIT;
+    goto fail;
+  }
   if (audio_decoder)
   {
     ret = avcodec_send_packet(audio_decoder, NULL);
@@ -1083,6 +1113,11 @@ static int convert_video_file_once(const char *source_path, const char *output_p
                                    &audio_next_pts);
     if (ret < 0)
       goto fail;
+    if (conversion_interrupted(&interrupt))
+    {
+      ret = AVERROR_EXIT;
+      goto fail;
+    }
     int capacity = swr_get_out_samples(resampler, 0);
     if (capacity > 0)
     {
@@ -1111,16 +1146,31 @@ static int convert_video_file_once(const char *source_path, const char *output_p
     if (ret < 0)
       goto fail;
   }
+  if (conversion_interrupted(&interrupt))
+  {
+    ret = AVERROR_EXIT;
+    goto fail;
+  }
   ret = conversion_flush_encoder(video_encoder, output, video_output_stream,
                                  encoded_packet);
   if (ret < 0)
     goto fail;
+  if (conversion_interrupted(&interrupt))
+  {
+    ret = AVERROR_EXIT;
+    goto fail;
+  }
   if (audio_encoder)
   {
     ret = conversion_flush_encoder(audio_encoder, output, audio_output_stream,
                                    encoded_packet);
     if (ret < 0)
       goto fail;
+  }
+  if (conversion_interrupted(&interrupt))
+  {
+    ret = AVERROR_EXIT;
+    goto fail;
   }
   ret = av_write_trailer(output);
   if (ret < 0)
