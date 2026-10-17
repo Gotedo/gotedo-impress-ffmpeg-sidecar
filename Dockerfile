@@ -2067,7 +2067,7 @@ EOF
         export CGO_LDFLAGS="$TARGET_FLAG --sysroot=/opt/macos-sdk -B/tmp/darwin-tools"
         EXTRA_LIBS="-lavformat -lavfilter -lzimg -lavcodec -lswresample -lswscale -lavutil \
         -lx264 -lx265 -lvpx -laom -ldav1d -lopus -lvorbis -lvorbisenc -logg -lmp3lame -lwebp -lwebpdecoder -lwebpmux -lwebpdemux -lsharpyuv \
-        -lass -lharfbuzz -lfreetype -lfontconfig -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
+        -lass -lharfbuzz -lfreetype -lfontconfig -lexpat -lfribidi -lpng -liconv -lbz2 -llzma -lbrotlidec -lbrotlicommon \
         -lc++ \
         -framework Foundation -framework AppKit -framework CoreFoundation -framework CoreImage -framework OpenGL \
         -framework CoreMedia -framework VideoToolbox -framework AudioToolbox -framework CoreAudio -framework CoreGraphics \
