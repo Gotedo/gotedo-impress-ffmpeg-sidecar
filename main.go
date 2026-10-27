@@ -141,8 +141,9 @@ func computeConversionOutputDimensions(width, height, maxResolution int) (int, i
 
 // ChunkPayload bundles the binary fMP4 data with its extraction PTS
 type ChunkPayload struct {
-	Data []byte
-	PTS  float64
+	Data  []byte
+	PTS   float64
+	IsEOF bool
 }
 
 // SessionContext tracks the state isolated to a single active playback monitor
@@ -461,6 +462,14 @@ func set_session_eof(token C.uintptr_t, isEof C.int) {
 	handle := cgo.Handle(token)
 	if sessCtx, ok := handle.Value().(*SessionContext); ok && sessCtx != nil {
 		atomic.StoreInt32(&sessCtx.IsEOF, int32(isEof))
+		if isEof != 0 {
+			// Queue an ordered EOF marker after all muxer writes so the gRPC
+			// sender can notify the webview after the final fMP4 bytes.
+			select {
+			case sessCtx.StreamChan <- ChunkPayload{IsEOF: true}:
+			case <-sessCtx.Done:
+			}
+		}
 	}
 }
 
@@ -712,11 +721,11 @@ func (s *ffmpegServer) StartStream(req *proto.StreamRequest, stream proto.FFmpeg
 			log.Printf("[SIDECAR] Pipeline ended successfully for target %s — waiting for client to finish (audio drain)", targetID)
 
 		case chunk := <-sessionCtx.StreamChan:
-			err := stream.Send(&proto.StreamResponse{
-				Fmp4Chunk: chunk.Data,
-				Pts:       chunk.PTS,
-				IsEof:     atomic.LoadInt32(&sessionCtx.IsEOF) != 0, // Thread-safe atomic load
-			})
+			response := &proto.StreamResponse{Fmp4Chunk: chunk.Data, Pts: chunk.PTS}
+			if chunk.IsEOF {
+				response.IsEof = true
+			}
+			err := stream.Send(response)
 			if err != nil {
 				log.Printf("[SIDECAR ERROR] Failed to send gRPC response: %v", err)
 				unregisterPlayback(targetID)
